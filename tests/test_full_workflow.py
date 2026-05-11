@@ -16,7 +16,8 @@ def test_full_workflow_creates_framework_state_and_review_packet(tmp_path: Path)
     run_dir = project / "runs" / run_id
     report = validate_project(project, run_id=run_id)
 
-    assert (project / "framework" / "paper_cards.json").exists()
+    assert (project / "framework" / "legacy_seed_paper_cards.json").exists()
+    assert not (project / "framework" / "paper_cards.json").exists()
     assert (project / "framework" / "research_gap_matrix.csv").exists()
     assert (project / "framework" / "method_hypotheses.md").exists()
     assert (project / "framework" / "policy_registry.yaml").exists()

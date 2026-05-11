@@ -36,12 +36,17 @@ FRAMEWORK_BOOTSTRAP_DIRS = (
 FRAMEWORK_ARTIFACTS = (
     *FRAMEWORK_BOOTSTRAP_ARTIFACTS,
     "framework/paper_cards.json",
+    "framework/method_modules.json",
+    "framework/literature_map.md",
     "framework/research_gap_matrix.csv",
     "framework/method_hypotheses.md",
+    "framework/algorithm_spec.md",
+    "framework/method_registry.yaml",
+)
+
+LEGACY_PROJECT_EXECUTION_ARTIFACTS = (
+    "framework/legacy_seed_paper_cards.json",
     "framework/policy_registry.yaml",
-    "framework/evaluation_protocol.md",
-    "framework/benchmark_results.csv",
-    "framework/ablation_results.csv",
 )
 
 FRAMEWORK_STATE_ARTIFACTS = (

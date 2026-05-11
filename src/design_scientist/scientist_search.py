@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import random
+import shutil
 import time
 from pathlib import Path
 from textwrap import dedent
@@ -56,6 +57,15 @@ METHOD_NODE_OUTPUT_SCHEMA: dict[str, Any] = {
     "required": ["summary", "policy_name", "policy_entrypoint", "files_written", "contract_notes"],
     "additionalProperties": False,
 }
+METHOD_NODE_AGENT_FILES = (
+    "proposal.json",
+    "method.py",
+    "manifest.json",
+    "candidate_policy.json",
+    "novelty_report.json",
+    "benchmark_metrics.json",
+    "validation_report.json",
+)
 
 
 def develop_method(
@@ -183,8 +193,9 @@ def _develop_method(
 
     for index, method_name in enumerate(planned_methods, start=1):
         node_id = f"node_{index:02d}_{method_name}"
-        workspace = ensure_dir(node_root / node_id)
+        workspace = _fresh_node_workspace(node_root / node_id)
         agent_result: dict[str, Any] | None = None
+        agent_rejection_reasons: list[str] = []
 
         if use_codex:
             agent_result = _run_codex_node_agent(
@@ -195,16 +206,23 @@ def _develop_method(
                 method_name=method_name,
                 literature_snapshot=snapshot,
             )
+            agent_rejection_reasons = _codex_agent_rejection_reasons(agent_result)
         else:
             _write_local_method_node(workspace, node_id=node_id, method_name=method_name)
 
-        execution = execute_method_node(workspace, guard_roots=[root])
-        benchmark_method = _benchmark_method_from_execution(execution, fallback=method_name)
-        policy_callable, policy_error = _policy_callable_from_execution(
-            execution,
-            node_id=node_id,
-            fallback_policy_name=f"{node_id}_policy",
-        )
+        if agent_rejection_reasons:
+            execution = _skipped_method_node_result(workspace, errors=agent_rejection_reasons)
+            benchmark_method = method_name if method_name in DEFAULT_METHODS else None
+            policy_callable = None
+            policy_error = None
+        else:
+            execution = execute_method_node(workspace, guard_roots=[root])
+            benchmark_method = _benchmark_method_from_execution(execution, fallback=method_name)
+            policy_callable, policy_error = _policy_callable_from_execution(
+                execution,
+                node_id=node_id,
+                fallback_policy_name=f"{node_id}_policy",
+            )
         reasons = _failure_reasons(
             execution,
             benchmark_method=benchmark_method,
@@ -359,6 +377,15 @@ def _resolve_backend(
     return CodexCliBackend()
 
 
+def _fresh_node_workspace(workspace: Path) -> Path:
+    if workspace.exists() or workspace.is_symlink():
+        if workspace.is_symlink() or workspace.is_file():
+            workspace.unlink()
+        else:
+            shutil.rmtree(workspace)
+    return ensure_dir(workspace)
+
+
 def _run_codex_node_agent(
     *,
     backend: WorkspaceAgentBackend | None,
@@ -397,6 +424,94 @@ def _run_codex_node_agent(
         "files_touched": list(result.files_touched),
         "commands_run": list(result.commands_run),
     }
+
+
+def _codex_agent_rejection_reasons(agent_result: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    returncode = agent_result.get("returncode")
+    if returncode != 0:
+        reasons.append(f"Codex backend failed with returncode {returncode}")
+
+    structured = agent_result.get("structured")
+    if not isinstance(structured, dict):
+        reasons.append("invalid Codex structured output: expected JSON object")
+        return reasons
+
+    required_fields = METHOD_NODE_OUTPUT_SCHEMA["required"]
+    missing_fields = [
+        field
+        for field in required_fields
+        if field not in structured
+    ]
+    if missing_fields:
+        reasons.append(
+            "invalid Codex structured output: missing required fields "
+            + ", ".join(missing_fields)
+        )
+
+    for field in ("summary", "policy_name", "policy_entrypoint"):
+        value = structured.get(field)
+        if field in structured and (not isinstance(value, str) or not value.strip()):
+            reasons.append(f"invalid Codex structured output: {field} must be a non-empty string")
+
+    files_written = structured.get("files_written")
+    if not isinstance(files_written, list) or not all(
+        isinstance(item, str) and item.strip()
+        for item in files_written
+    ):
+        reasons.append("invalid Codex structured output: files_written must be a string list")
+    else:
+        allowed_files = set(METHOD_NODE_AGENT_FILES)
+        normalized_files = {Path(item).name for item in files_written}
+        unsafe_files = [
+            item
+            for item in files_written
+            if Path(item).name != item or "/" in item or "\\" in item
+        ]
+        missing_files = sorted(allowed_files - normalized_files)
+        unexpected_files = sorted(normalized_files - allowed_files)
+        if unsafe_files:
+            reasons.append(
+                "invalid Codex files_written entries: "
+                + ", ".join(str(item) for item in unsafe_files)
+            )
+        if missing_files:
+            reasons.append(
+                "invalid Codex files_written entries: missing "
+                + ", ".join(missing_files)
+            )
+        if unexpected_files:
+            reasons.append(
+                "invalid Codex files_written entries: unexpected "
+                + ", ".join(unexpected_files)
+            )
+
+    contract_notes = structured.get("contract_notes")
+    if "contract_notes" in structured and not isinstance(contract_notes, list):
+        reasons.append("invalid Codex structured output: contract_notes must be a list")
+
+    extra_fields = sorted(set(structured) - set(METHOD_NODE_OUTPUT_SCHEMA["properties"]))
+    if extra_fields:
+        reasons.append(
+            "invalid Codex structured output: unexpected fields "
+            + ", ".join(extra_fields)
+        )
+    return _unique_strings(reasons)
+
+
+def _skipped_method_node_result(
+    workspace: Path,
+    *,
+    errors: list[str],
+) -> MethodNodeExecutionResult:
+    return MethodNodeExecutionResult(
+        workspace=workspace,
+        valid=False,
+        executed=False,
+        missing_artifacts=list(METHOD_NODE_AGENT_FILES),
+        errors=list(errors),
+        snapshot_roots=[workspace],
+    )
 
 
 def _codex_objective(
@@ -812,12 +927,8 @@ def _run_and_attach_benchmark(
         rounds=rounds,
         methods=methods,
     )
-    by_method = {
-        row["method"]: row
-        for row in benchmark_result["benchmark_results"]
-    }
     summary_by_method = {
-        row["method"]: row
+        str(row["method"]): row
         for row in benchmark_result.get("summary", {}).get("method_rankings", [])
         if isinstance(row, dict) and "method" in row
     }
@@ -828,10 +939,26 @@ def _run_and_attach_benchmark(
     ranking: list[dict[str, Any]] = []
     for record in node_records:
         benchmark_policy_name = record.get("benchmark_policy_name")
-        metrics = by_method.get(benchmark_policy_name)
-        if metrics is None:
-            continue
         method_rows = rows_by_method.get(str(benchmark_policy_name), [])
+        if not method_rows:
+            continue
+        summary_metrics = dict(summary_by_method.get(benchmark_policy_name, {}))
+        ranking_metrics = summary_metrics or dict(method_rows[-1])
+        replay_failure_reasons = _synthetic_replay_failure_reasons(method_rows)
+        if replay_failure_reasons:
+            _mark_record_failed(record, replay_failure_reasons)
+            _write_node_benchmark_metrics(
+                record=record,
+                benchmark_policy_name=benchmark_policy_name,
+                benchmark_result=benchmark_result,
+                summary_metrics=summary_metrics,
+                method_rows=method_rows,
+                ranking_score=None,
+                status="failed",
+                failure_reasons=replay_failure_reasons,
+            )
+            continue
+
         _refresh_node_novelty_report(record, method_rows)
         clone_reasons = [
             *_post_refresh_novelty_reasons(record),
@@ -842,21 +969,28 @@ def _run_and_attach_benchmark(
         ]
         if clone_reasons:
             _mark_record_failed(record, clone_reasons)
+            _write_node_benchmark_metrics(
+                record=record,
+                benchmark_policy_name=benchmark_policy_name,
+                benchmark_result=benchmark_result,
+                summary_metrics=summary_metrics,
+                method_rows=method_rows,
+                ranking_score=None,
+                status="failed",
+                failure_reasons=clone_reasons,
+            )
             continue
-        summary_metrics = summary_by_method.get(benchmark_policy_name, {})
-        ranking_score = _ranking_score(summary_metrics or metrics)
-        node_metrics = {
-            "node_id": record["node_id"],
-            "method": benchmark_policy_name,
-            "source_baseline_family": record.get("benchmark_method"),
-            "synthetic_replay": metrics,
-            "synthetic_replay_summary": summary_metrics,
-            "ranking_score": ranking_score,
-            "benchmark_results_path": benchmark_result["benchmark_results_path"],
-            "ablation_results_path": benchmark_result["ablation_results_path"],
-            "summary_results_path": benchmark_result["summary_results_path"],
-        }
-        write_json(Path(record["artifacts"]["benchmark_metrics"]), node_metrics)
+        ranking_score = _ranking_score(ranking_metrics)
+        _write_node_benchmark_metrics(
+            record=record,
+            benchmark_policy_name=benchmark_policy_name,
+            benchmark_result=benchmark_result,
+            summary_metrics=summary_metrics,
+            method_rows=method_rows,
+            ranking_score=ranking_score,
+            status="completed",
+            failure_reasons=[],
+        )
         ranking.append(
             {
                 "node_id": record["node_id"],
@@ -864,12 +998,15 @@ def _run_and_attach_benchmark(
                 "benchmark_method": record.get("benchmark_method"),
                 "benchmark_policy_name": benchmark_policy_name,
                 "ranking_score": ranking_score,
-                "benchmark_metrics": metrics,
+                "summary_rank": _optional_float(ranking_metrics.get("rank")),
+                "benchmark_metrics": ranking_metrics,
             }
         )
 
     ranking.sort(
         key=lambda row: (
+            row.get("summary_rank") is not None,
+            -float(row["summary_rank"]) if row.get("summary_rank") is not None else row["ranking_score"],
             row["ranking_score"],
             -_method_priority(row["benchmark_method"]),
             row["node_id"],
@@ -909,6 +1046,8 @@ def _attach_selected_full_chain_artifacts(root: Path, record: dict[str, Any]) ->
     strategy = str(record.get("benchmark_method") or record.get("planned_method") or "mechanism_aware")
     design_space = build_design_space(state, evidence)
     pool = generate_candidate_pool(design_space, state, evidence, strategy=strategy)
+    if not pool.candidates:
+        design_space, pool = _synthetic_replay_candidate_pool(root, strategy=strategy)
     diagnostics = {
         **dict(pool.diagnostics),
         "candidate_pool_id": pool.candidate_pool_id,
@@ -962,6 +1101,137 @@ def _write_candidate_pool_csv(path: Path, candidates: list[Any]) -> None:
             writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
+def _synthetic_replay_candidate_pool(root: Path, *, strategy: str) -> tuple[Any, Any]:
+    """Build explicit benchmark-scope candidates when no real project pool exists."""
+
+    from itertools import combinations
+
+    from design_scientist.candidates import candidate_pool_diagnostics
+    from design_scientist.schemas import (
+        Candidate,
+        CandidateLineage,
+        CandidatePool,
+        DesignOperatorSpec,
+        DesignSpace,
+    )
+    from design_scientist.synthetic_replay import (
+        BACKGROUND_ORDER,
+        ENDPOINTS,
+        FORBIDDEN_DESIGN_PAIRS,
+        MAX_MODULES,
+        MODULES,
+        TARGET_BACKGROUND,
+    )
+
+    design_space_id = f"{root.name}:synthetic_replay:{strategy}"
+    design_space = DesignSpace(
+        design_space_id=design_space_id,
+        project_id=root.name,
+        target_systems=["synthetic_replay"],
+        modules=list(MODULES),
+        backgrounds=list(BACKGROUND_ORDER),
+        operators=[
+            DesignOperatorSpec(
+                operator_id="synthetic_replay_variant",
+                category="lattice_repair",
+                description=(
+                    "Benchmark-scope synthetic replay variant. These records document "
+                    "the replay design space and are not wet-lab executable candidates."
+                ),
+                required_endpoints=list(ENDPOINTS),
+                default_cost=1.0,
+            )
+        ],
+        constraints={
+            "artifact_scope": "synthetic_replay_benchmark",
+            "wet_lab_executable": False,
+            "forbidden_design_pairs": [
+                "+".join(pair) for pair in sorted(FORBIDDEN_DESIGN_PAIRS)
+            ],
+        },
+        evidence_refs=["synthetic_replay_config"],
+        config={
+            "source": "synthetic_replay_benchmark",
+            "candidate_artifact_note": (
+                "Generated because this framework run has no real project design state."
+            ),
+        },
+    )
+
+    candidates: list[Candidate] = []
+    forbidden_pairs = [set(pair) for pair in FORBIDDEN_DESIGN_PAIRS]
+    for background in BACKGROUND_ORDER:
+        for module_count in range(MAX_MODULES + 1):
+            for modules in combinations(MODULES, module_count):
+                module_set = set(modules)
+                if any(pair.issubset(module_set) for pair in forbidden_pairs):
+                    continue
+                suffix = "WT" if not modules else "_".join(modules)
+                candidate_id = f"{background}__{suffix}"
+                category = (
+                    "control"
+                    if not modules
+                    else "lattice_repair"
+                    if len(modules) == 1
+                    else "interaction_square"
+                )
+                operator_args = {
+                    "background": background,
+                    "modules": list(modules),
+                    "benchmark": "synthetic_multi_round_wet_lab_replay",
+                }
+                candidates.append(
+                    Candidate(
+                        candidate_id=candidate_id,
+                        variant_id=candidate_id,
+                        design_space_id=design_space_id,
+                        operator="synthetic_replay_variant",
+                        category=category,
+                        target_system="synthetic_replay",
+                        background=background,
+                        target_background=TARGET_BACKGROUND,
+                        design_context={
+                            "artifact_scope": "synthetic_replay_benchmark",
+                            "wet_lab_executable": False,
+                            "benchmark_background": background,
+                            "target_background": TARGET_BACKGROUND,
+                        },
+                        modules=list(modules),
+                        rationale=(
+                            "Synthetic replay candidate used to audit policy behavior "
+                            "when no real project candidate pool has been initialized."
+                        ),
+                        evidence_refs=["synthetic_replay_config"],
+                        required_measurements=list(ENDPOINTS),
+                        required_endpoints=list(ENDPOINTS),
+                        operator_args=operator_args,
+                        lineage=CandidateLineage(
+                            operator="synthetic_replay_variant",
+                            operator_args=operator_args,
+                            parent_ids=[background],
+                            source_refs=["synthetic_replay_config"],
+                        ),
+                        parent_ids=[background],
+                        source_refs=["synthetic_replay_config"],
+                        cost=1.0,
+                    )
+                )
+
+    pool = CandidatePool(
+        candidate_pool_id=f"{design_space_id}:candidate_pool",
+        design_space_id=design_space_id,
+        strategy=strategy,
+        candidates=candidates,
+    )
+    pool.diagnostics = {
+        **candidate_pool_diagnostics(pool),
+        "source": "synthetic_replay_benchmark",
+        "real_project_candidate_pool_missing": True,
+        "wet_lab_executable": False,
+    }
+    return design_space, pool
+
+
 def _candidate_artifact_row(candidate: Any) -> dict[str, Any]:
     row = to_plain_data(candidate)
     if not isinstance(row, dict):
@@ -990,6 +1260,56 @@ def _merge_json_artifact(path: Path, updates: dict[str, Any]) -> None:
     write_json(path, data)
 
 
+def _synthetic_replay_failure_reasons(method_rows: list[dict[str, Any]]) -> list[str]:
+    failed_rows = [
+        row
+        for row in method_rows
+        if str(row.get("status") or "completed") != "completed"
+    ]
+    if not failed_rows:
+        return []
+    details = _unique_strings(
+        str(row.get("error") or row.get("failure_reason") or "unknown replay error")
+        for row in failed_rows
+    )
+    detail_text = "; ".join(details[:3])
+    suffix = f": {detail_text}" if detail_text else ""
+    return [
+        "synthetic replay failed "
+        f"in {len(failed_rows)}/{len(method_rows)} worlds{suffix}"
+    ]
+
+
+def _write_node_benchmark_metrics(
+    *,
+    record: dict[str, Any],
+    benchmark_policy_name: Any,
+    benchmark_result: dict[str, Any],
+    summary_metrics: dict[str, Any],
+    method_rows: list[dict[str, Any]],
+    ranking_score: float | None,
+    status: str,
+    failure_reasons: list[str],
+) -> None:
+    synthetic_replay = summary_metrics or (dict(method_rows[-1]) if method_rows else {})
+    node_metrics = {
+        "node_id": record["node_id"],
+        "method": benchmark_policy_name,
+        "source_baseline_family": record.get("benchmark_method"),
+        "status": status,
+        "synthetic_replay": synthetic_replay,
+        "synthetic_replay_rows": method_rows,
+        "synthetic_replay_summary": summary_metrics,
+        "ranking_score": ranking_score,
+        "benchmark_results_path": benchmark_result["benchmark_results_path"],
+        "ablation_results_path": benchmark_result["ablation_results_path"],
+        "summary_results_path": benchmark_result["summary_results_path"],
+    }
+    if failure_reasons:
+        node_metrics["failure_reasons"] = list(failure_reasons)
+    write_json(Path(record["artifacts"]["benchmark_metrics"]), node_metrics)
+
+
 def _refresh_node_novelty_report(record: dict[str, Any], method_rows: list[dict[str, Any]]) -> None:
     artifacts = record.get("artifacts") if isinstance(record.get("artifacts"), dict) else {}
     path_value = artifacts.get("novelty_report")
@@ -1003,23 +1323,10 @@ def _refresh_node_novelty_report(record: dict[str, Any], method_rows: list[dict[
     if not isinstance(report, dict):
         report = {}
 
-    baseline_overlaps = {
-        "random_feasible": _mean_metric(method_rows, "selection_overlap_random_feasible"),
-        "fixed_mix": _mean_metric(method_rows, "selection_overlap_fixed_mix"),
-    }
-    source_baseline = record.get("benchmark_method")
-    if isinstance(source_baseline, str):
-        source_key = f"selection_overlap_{source_baseline}"
-        source_overlap = _mean_metric(method_rows, source_key)
-        if source_overlap is not None:
-            baseline_overlaps[source_baseline] = source_overlap
-    measured = {
-        baseline: overlap
-        for baseline, overlap in baseline_overlaps.items()
-        if overlap is not None
-    }
-    nearest_baseline = max(measured, key=measured.get) if measured else None
-    max_overlap = measured[nearest_baseline] if nearest_baseline else None
+    worst_overlap = _worst_default_baseline_overlap(method_rows)
+    measured = worst_overlap["max_by_baseline"]
+    nearest_baseline = worst_overlap["nearest_baseline"]
+    max_overlap = worst_overlap["max_overlap"]
     clone = bool(
         nearest_baseline
         and max_overlap is not None
@@ -1031,12 +1338,47 @@ def _refresh_node_novelty_report(record: dict[str, Any], method_rows: list[dict[
             "baseline_overlap": max_overlap,
             "selection_overlap_vs_baselines": max_overlap,
             "nearest_baseline": nearest_baseline,
+            "nearest_baseline_world_id": worst_overlap["world_id"],
+            "selection_overlap_max_by_baseline": measured,
             "novelty_score": _mean_metric(method_rows, "novelty_score"),
             "synthetic_replay_worlds": len({str(row.get("world_id")) for row in method_rows}),
             "status": "measured_synthetic_replay",
         }
     )
     write_json(path, report)
+
+
+def _worst_default_baseline_overlap(method_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    default_baselines = set(DEFAULT_METHODS)
+    max_by_baseline: dict[str, float] = {}
+    nearest_baseline: str | None = None
+    nearest_world_id: str | None = None
+    max_overlap: float | None = None
+    for row in method_rows:
+        if str(row.get("status") or "completed") != "completed":
+            continue
+        for key, raw_value in row.items():
+            if not key.startswith("selection_overlap_"):
+                continue
+            baseline = key.removeprefix("selection_overlap_")
+            if baseline not in default_baselines:
+                continue
+            value = _optional_float(raw_value)
+            if value is None:
+                continue
+            previous = max_by_baseline.get(baseline)
+            if previous is None or value > previous:
+                max_by_baseline[baseline] = value
+            if max_overlap is None or value > max_overlap:
+                max_overlap = value
+                nearest_baseline = baseline
+                nearest_world_id = str(row.get("world_id")) if row.get("world_id") is not None else None
+    return {
+        "max_by_baseline": max_by_baseline,
+        "nearest_baseline": nearest_baseline,
+        "world_id": nearest_world_id,
+        "max_overlap": max_overlap,
+    }
 
 
 def _post_refresh_novelty_reasons(record: dict[str, Any]) -> list[str]:
@@ -1171,7 +1513,10 @@ def _policy_callable_from_execution(
         or fallback_policy_name
     )
     policy_name = _safe_policy_name(raw_policy_name, node_id=node_id, fallback=fallback_policy_name)
-    attribute = _entrypoint_attribute(entrypoint)
+    try:
+        attribute = _entrypoint_attribute(entrypoint)
+    except RuntimeError as exc:
+        return None, str(exc)
     policy_callable = execution.callables.get(attribute)
     if not callable(policy_callable):
         return None, f"method.py does not define callable policy {entrypoint!r}"
@@ -1214,8 +1559,8 @@ def _safe_policy_name(raw_name: Any, *, node_id: str, fallback: str) -> str:
     safe = "".join(char if char.isalnum() or char in "._-" else "_" for char in text).strip("._-")
     if not safe:
         safe = fallback
-    if safe in DEFAULT_METHODS:
-        safe = f"{node_id}_{safe}_policy"
+    if safe != node_id and not safe.startswith(f"{node_id}_"):
+        safe = f"{node_id}_{safe}"
     return safe
 
 

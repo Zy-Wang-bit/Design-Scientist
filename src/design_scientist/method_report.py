@@ -56,6 +56,7 @@ def write_method_report(project_dir: str | Path, run_id: str | None = None) -> P
     artifacts = _artifact_paths(root, run_dir, journal)
     selected_node = _selected_node_record(journal)
     selected_summary = _selected_node_summary(journal, selected_node)
+    selected_benchmark_summary = _selected_benchmark_summary(benchmark_summary_rows, selected_summary)
     selected_proposal = _selected_json_artifact(root, selected_node, "proposal", "proposal.json")
     selected_novelty_report = _selected_json_artifact(root, selected_node, "novelty_report", "novelty_report.json")
     selected_candidate_policy = _selected_json_artifact(
@@ -116,7 +117,14 @@ def write_method_report(project_dir: str | Path, run_id: str | None = None) -> P
     lines.extend(_benchmark_summary_section(root, run_dir, benchmark_summary_rows))
     lines.extend(_ablation_section(root, run_dir, ablation_rows))
     lines.extend(
-        _selected_method_section(root, selected_summary, selected_node, selected_proposal, selected_novelty_report)
+        _selected_method_section(
+            root,
+            selected_summary,
+            selected_benchmark_summary,
+            selected_node,
+            selected_proposal,
+            selected_novelty_report,
+        )
     )
     lines.extend(
         _generator_limited_diagnostics_section(
@@ -447,7 +455,7 @@ def _baseline_comparison_section(
         "baseline_overlap",
     ]
     lines.extend(_markdown_table(preferred, benchmark_rows))
-    selected_method = selected_summary.get("benchmark_method")
+    selected_method = _selected_report_method(selected_summary)
     if selected_method:
         selected_row = next((row for row in benchmark_rows if row.get("method") == selected_method), None)
         if selected_row:
@@ -484,10 +492,13 @@ def _benchmark_summary_section(
         "method",
         "world_count",
         "beats_random_feasible_worlds",
+        "beats_random_feasible_majority",
         "beats_fixed_mix_worlds",
+        "beats_fixed_mix_majority",
         "mean_best_feasible_utility",
         "mean_regret_proxy",
         "mean_hit_rate",
+        "mean_false_claim_rate",
         "mean_novelty_score",
         "mean_baseline_overlap",
     ]
@@ -602,6 +613,7 @@ def _ablation_section(root: Path, run_dir: Path, ablation_rows: list[dict[str, s
 def _selected_method_section(
     root: Path,
     selected_summary: dict[str, Any],
+    selected_benchmark_summary: dict[str, str],
     selected_node: dict[str, Any] | None,
     selected_proposal: Any,
     selected_novelty_report: Any,
@@ -615,6 +627,8 @@ def _selected_method_section(
         [
             f"Selected node: `{selected_summary.get('node_id', 'unknown')}`",
             f"Benchmark method: `{selected_summary.get('benchmark_method', 'unknown')}`",
+            "Benchmark policy: "
+            f"`{selected_summary.get('benchmark_policy_name', selected_summary.get('benchmark_method', 'unknown'))}`",
             f"Ranking score: {selected_summary.get('ranking_score', 'n/a')}",
             f"Workspace: `{selected_summary.get('workspace', 'unknown')}`",
             "",
@@ -633,6 +647,25 @@ def _selected_method_section(
                 f"- false_claim_rate: {metrics.get('false_claim_rate', 'n/a')}",
             ]
         )
+    if selected_benchmark_summary:
+        summary_keys = (
+            "rank",
+            "world_count",
+            "beats_random_feasible_worlds",
+            "beats_random_feasible_majority",
+            "beats_fixed_mix_worlds",
+            "beats_fixed_mix_majority",
+            "mean_best_feasible_utility",
+            "mean_regret_proxy",
+            "mean_hit_rate",
+            "mean_false_claim_rate",
+            "mean_novelty_score",
+            "mean_baseline_overlap",
+        )
+        lines.extend(["", "Selected multi-world summary:"])
+        for key in summary_keys:
+            if selected_benchmark_summary.get(key) not in (None, ""):
+                lines.append(f"- {key}: {selected_benchmark_summary.get(key)}")
     lines.extend(["", "Selected proposal:"])
     if isinstance(selected_proposal, dict) and selected_proposal:
         for key in ("proposal_id", "title", "method_claim", "expected_differentiator", "summary"):
@@ -783,9 +816,29 @@ def _selected_node_summary(journal: Any, selected_node: dict[str, Any] | None) -
         summary.setdefault("node_id", selected_node.get("node_id"))
         summary.setdefault("workspace", selected_node.get("workspace"))
         summary.setdefault("benchmark_method", selected_node.get("benchmark_method"))
+        summary.setdefault("benchmark_policy_name", selected_node.get("benchmark_policy_name"))
         summary.setdefault("ranking_score", selected_node.get("ranking_score"))
         summary.setdefault("benchmark_metrics", selected_node.get("benchmark_metrics"))
     return summary
+
+
+def _selected_benchmark_summary(
+    benchmark_summary_rows: list[dict[str, str]],
+    selected_summary: dict[str, Any],
+) -> dict[str, str]:
+    selected_method = _selected_report_method(selected_summary)
+    if not selected_method:
+        return {}
+    row = next((row for row in benchmark_summary_rows if row.get("method") == selected_method), None)
+    return dict(row) if row is not None else {}
+
+
+def _selected_report_method(selected_summary: dict[str, Any]) -> str | None:
+    for key in ("benchmark_policy_name", "method", "benchmark_method"):
+        value = selected_summary.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
 
 
 def _selected_json_artifact(

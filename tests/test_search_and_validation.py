@@ -87,6 +87,54 @@ def test_validate_project_rejects_stale_onee62_in_run_artifacts(tmp_path: Path) 
     assert any(finding.code == "stale_onee62_identifier" for finding in report.findings)
 
 
+def test_validate_project_rejects_invalid_panel_membership_duplicates_and_feasibility(tmp_path: Path) -> None:
+    project = tmp_path / "anti_hbsag"
+    _write_minimal_project(project)
+    run_dir = project / "runs" / "run_with_invalid_panel"
+    run_dir.mkdir()
+    _write_required_run_artifacts(
+        run_dir,
+        candidate_pool_csv=(
+            "candidate_id,operator,category,target_system,background,modules,feasibility_status,cost\n"
+            "valid,add_module,champion,1E62,real_bg,HD110H,feasible,1\n"
+            "infeasible,add_module,champion,1E62,real_bg,HG56H,infeasible,1\n"
+        ),
+        panel_csv=(
+            "candidate_id,operator,category,target_system,background,modules,feasibility_status,cost\n"
+            "valid,add_module,champion,1E62,real_bg,HD110H,feasible,1\n"
+            "valid,add_module,champion,1E62,real_bg,HD110H,feasible,1\n"
+            "infeasible,add_module,champion,1E62,real_bg,HG56H,feasible,1\n"
+            "outside_pool,add_module,champion,1E62,real_bg,HN54H,feasible,1\n"
+        ),
+    )
+
+    report = validate_project(project, run_id="run_with_invalid_panel", write_report=False)
+    codes = {finding.code for finding in report.findings}
+
+    assert not report.valid
+    assert "panel_candidate_not_in_pool" in codes
+    assert "panel_duplicate_candidate" in codes
+    assert "panel_infeasible_candidate" in codes
+
+
+def test_validate_project_rejects_panel_artifacts_missing_required_columns(tmp_path: Path) -> None:
+    project = tmp_path / "anti_hbsag"
+    _write_minimal_project(project)
+    run_dir = project / "runs" / "run_with_missing_panel_columns"
+    run_dir.mkdir()
+    _write_required_run_artifacts(
+        run_dir,
+        candidate_pool_csv="candidate_id,feasibility_status,cost\nvalid,feasible,1\n",
+        panel_csv="operator,category,target_system\nadd_module,champion,1E62\n",
+    )
+
+    report = validate_project(project, run_id="run_with_missing_panel_columns", write_report=False)
+    codes = {finding.code for finding in report.findings}
+
+    assert not report.valid
+    assert "missing_panel_column" in codes
+
+
 def _write_minimal_project(project: Path) -> None:
     (project / "state").mkdir(parents=True)
     (project / "runs").mkdir()
@@ -113,3 +161,30 @@ def _write_minimal_project(project: Path) -> None:
         },
     )
     write_json(project / "state" / "evidence_cards.json", [])
+
+
+def _write_required_run_artifacts(
+    run_dir: Path,
+    *,
+    candidate_pool_csv: str,
+    panel_csv: str,
+) -> None:
+    (run_dir / "candidate_pool.csv").write_text(candidate_pool_csv, encoding="utf-8")
+    (run_dir / "panel_recommendation.csv").write_text(panel_csv, encoding="utf-8")
+    (run_dir / "policy_comparison.csv").write_text("baseline,summary\nfixed,ok\n", encoding="utf-8")
+    write_json(
+        run_dir / "policy_metrics.json",
+        {
+            "budget": 3,
+            "baseline_comparison": ["fixed: ok"],
+            "unsupported_claims": [
+                "Current 1E62 combo data cannot support module causal claims; exact primary matched edges are missing."
+            ],
+        },
+    )
+    write_json(
+        run_dir / "validation_report.json",
+        {"project_id": "anti_hbsag", "run_id": run_dir.name, "valid": True, "findings": []},
+    )
+    (run_dir / "decision_report.md").write_text("Decision report\n", encoding="utf-8")
+    (run_dir / "human_review_packet.md").write_text("Review packet\n", encoding="utf-8")

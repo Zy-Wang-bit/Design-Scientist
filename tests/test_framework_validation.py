@@ -359,6 +359,130 @@ def test_review_framework_run_rejects_selected_method_without_majority_summary_w
     assert "selected_method_missing_majority_world_wins" in _codes(report)
 
 
+def test_review_framework_run_rejects_selected_method_missing_from_benchmark_evidence(
+    tmp_path: Path,
+) -> None:
+    project = _build_complete_framework_run(tmp_path)
+    selected_policy = _selected_policy_name(project)
+    run_dir = project / "runs" / "framework_unit"
+    benchmark_path = run_dir / "benchmark_results.csv"
+    summary_path = run_dir / "benchmark_summary.csv"
+
+    _rewrite_csv(
+        benchmark_path,
+        [row for row in _read_csv_rows(benchmark_path) if row["method"] != selected_policy],
+    )
+    _rewrite_csv(
+        summary_path,
+        [row for row in _read_csv_rows(summary_path) if row["method"] != selected_policy],
+    )
+
+    report = review_framework_run(project, run_id="framework_unit")
+
+    assert not report["valid"]
+    assert {
+        "selected_method_missing_benchmark_results",
+        "selected_method_missing_benchmark_summary",
+    } <= _codes(report)
+
+
+def test_review_framework_run_rejects_missing_required_benchmark_baseline(
+    tmp_path: Path,
+) -> None:
+    project = _build_complete_framework_run(tmp_path)
+    run_dir = project / "runs" / "framework_unit"
+    benchmark_path = run_dir / "benchmark_results.csv"
+    summary_path = run_dir / "benchmark_summary.csv"
+
+    _rewrite_csv(
+        benchmark_path,
+        [row for row in _read_csv_rows(benchmark_path) if row["method"] != "fixed_mix"],
+    )
+    _rewrite_csv(
+        summary_path,
+        [row for row in _read_csv_rows(summary_path) if row["method"] != "fixed_mix"],
+    )
+
+    report = review_framework_run(project, run_id="framework_unit")
+
+    assert not report["valid"]
+    assert {
+        "benchmark_missing_required_baselines",
+        "benchmark_summary_missing_required_baselines",
+    } <= _codes(report)
+
+
+def test_review_framework_run_rejects_selected_method_without_comparable_majority_signal(
+    tmp_path: Path,
+) -> None:
+    project = _build_framework_run(tmp_path)
+    _write_selected_v2_artifacts(project)
+    selected_policy = _selected_policy_name(project)
+    run_dir = project / "runs" / "framework_unit"
+    benchmark_path = run_dir / "benchmark_results.csv"
+    benchmark_rows = _read_csv_rows(benchmark_path)
+    for row in benchmark_rows:
+        row.pop("world_id", None)
+    _rewrite_csv(benchmark_path, benchmark_rows)
+    _write_benchmark_summary(
+        project,
+        [
+            {
+                "method": selected_policy,
+                "world_count": "5",
+                "beats_random_feasible_worlds": "",
+                "beats_random_feasible_majority": "",
+                "beats_fixed_mix_worlds": "",
+                "beats_fixed_mix_majority": "",
+            },
+            {
+                "method": "random_feasible",
+                "world_count": "5",
+                "beats_random_feasible_worlds": "0",
+                "beats_random_feasible_majority": "false",
+                "beats_fixed_mix_worlds": "1",
+                "beats_fixed_mix_majority": "false",
+            },
+            {
+                "method": "fixed_mix",
+                "world_count": "5",
+                "beats_random_feasible_worlds": "4",
+                "beats_random_feasible_majority": "true",
+                "beats_fixed_mix_worlds": "0",
+                "beats_fixed_mix_majority": "false",
+            },
+        ],
+    )
+    write_method_report(project, run_id="framework_unit")
+
+    report = review_framework_run(project, run_id="framework_unit")
+
+    assert not report["valid"]
+    assert "selected_method_missing_comparable_majority_signal" in _codes(report)
+
+
+def test_review_framework_run_rejects_selected_false_claim_rate_above_required_baselines(
+    tmp_path: Path,
+) -> None:
+    project = _build_complete_framework_run(tmp_path)
+    selected_policy = _selected_policy_name(project)
+    run_dir = project / "runs" / "framework_unit"
+    benchmark_path = run_dir / "benchmark_results.csv"
+    rows = _read_csv_rows(benchmark_path)
+
+    for row in rows:
+        if row["method"] == selected_policy:
+            row["false_claim_rate"] = "0.20"
+        elif row["method"] in {"random_feasible", "fixed_mix"}:
+            row["false_claim_rate"] = "0.10"
+    _rewrite_csv(benchmark_path, rows)
+
+    report = review_framework_run(project, run_id="framework_unit")
+
+    assert not report["valid"]
+    assert "selected_method_false_claim_rate_exceeds_baselines" in _codes(report)
+
+
 def test_review_framework_run_rejects_selected_policy_majority_loss_from_benchmark_results(
     tmp_path: Path,
 ) -> None:
@@ -412,6 +536,141 @@ def test_review_framework_run_rejects_selected_policy_majority_loss_from_benchma
     assert "selected_method_missing_majority_world_wins" in _codes(report)
 
 
+def test_review_framework_run_rejects_selected_node_missing_or_malformed_contract(
+    tmp_path: Path,
+) -> None:
+    project = _build_complete_framework_run(tmp_path)
+    journal_path = project / "runs" / "framework_unit" / "scientist_journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    selected_id = journal["selected_node_id"]
+    for node in journal["nodes"]:
+        if node["node_id"] == selected_id:
+            node.pop("contract", None)
+            break
+    _write_json(journal_path, journal)
+
+    report = review_framework_run(project, run_id="framework_unit")
+
+    assert not report["valid"]
+    assert "selected_node_contract_missing" in _codes(report)
+
+    for node in journal["nodes"]:
+        if node["node_id"] == selected_id:
+            node["contract"] = "valid"
+            break
+    _write_json(journal_path, journal)
+
+    report = review_framework_run(project, run_id="framework_unit")
+
+    assert not report["valid"]
+    assert "selected_node_contract_invalid" in _codes(report)
+
+
+def test_review_framework_run_rejects_selected_node_artifact_outside_workspace_or_run_dir(
+    tmp_path: Path,
+) -> None:
+    project = _build_complete_framework_run(tmp_path)
+    outside = tmp_path / "outside_proposal.json"
+    _write_json(
+        outside,
+        {
+            "proposal_id": "outside",
+            "title": "Outside artifact",
+            "method_claim": "This path should not be accepted.",
+        },
+    )
+    journal_path = project / "runs" / "framework_unit" / "scientist_journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    selected_id = journal["selected_node_id"]
+    for node in journal["nodes"]:
+        if node["node_id"] == selected_id:
+            node["artifacts"]["proposal"] = str(outside)
+            break
+    _write_json(journal_path, journal)
+
+    report = review_framework_run(project, run_id="framework_unit")
+
+    assert not report["valid"]
+    assert "selected_node_artifact_outside_allowed_roots" in _codes(report)
+
+
+def test_review_framework_run_rejects_selected_node_artifact_directory(
+    tmp_path: Path,
+) -> None:
+    project = _build_complete_framework_run(tmp_path)
+    workspace = _selected_workspace(project)
+    directory_artifact = workspace / "candidate_policy_dir"
+    directory_artifact.mkdir()
+    journal_path = project / "runs" / "framework_unit" / "scientist_journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    selected_id = journal["selected_node_id"]
+    for node in journal["nodes"]:
+        if node["node_id"] == selected_id:
+            node["artifacts"]["candidate_policy"] = str(directory_artifact)
+            break
+    _write_json(journal_path, journal)
+
+    report = review_framework_run(project, run_id="framework_unit")
+
+    assert not report["valid"]
+    assert "selected_node_artifact_not_file" in _codes(report)
+
+
+def test_write_method_report_renders_selected_multi_world_summary(
+    tmp_path: Path,
+) -> None:
+    project = _build_framework_run(tmp_path)
+    _write_selected_v2_artifacts(project)
+    selected_policy = _selected_policy_name(project)
+    _write_benchmark_summary(
+        project,
+        [
+            {
+                "rank": "1",
+                "method": selected_policy,
+                "world_count": "5",
+                "beats_random_feasible_worlds": "4",
+                "beats_random_feasible_majority": "true",
+                "beats_fixed_mix_worlds": "3",
+                "beats_fixed_mix_majority": "true",
+                "mean_best_feasible_utility": "0.82",
+                "mean_false_claim_rate": "0.04",
+            },
+            {
+                "rank": "2",
+                "method": "random_feasible",
+                "world_count": "5",
+                "beats_random_feasible_worlds": "0",
+                "beats_random_feasible_majority": "false",
+                "beats_fixed_mix_worlds": "2",
+                "beats_fixed_mix_majority": "false",
+                "mean_best_feasible_utility": "0.61",
+                "mean_false_claim_rate": "0.07",
+            },
+            {
+                "rank": "3",
+                "method": "fixed_mix",
+                "world_count": "5",
+                "beats_random_feasible_worlds": "3",
+                "beats_random_feasible_majority": "true",
+                "beats_fixed_mix_worlds": "0",
+                "beats_fixed_mix_majority": "false",
+                "mean_best_feasible_utility": "0.58",
+                "mean_false_claim_rate": "0.08",
+            },
+        ],
+    )
+
+    report_path = write_method_report(project, run_id="framework_unit")
+
+    text = report_path.read_text(encoding="utf-8")
+    assert "Selected multi-world summary:" in text
+    assert "- world_count: 5" in text
+    assert "- beats_random_feasible_majority: true" in text
+    assert "- beats_fixed_mix_majority: true" in text
+    assert "- mean_false_claim_rate: 0.04" in text
+
+
 def test_review_framework_run_rejects_path_traversal_run_id(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="path separators"):
         review_framework_run(tmp_path, run_id="../escape")
@@ -430,6 +689,7 @@ def _build_framework_run(tmp_path: Path) -> Path:
     run_literature_search(project, max_papers=5, offline_fixtures=True)
     extraction = extract_methods(project)
     assert extraction["status"] == "ok"
+    _write_minimal_design_state(project)
     develop_method(project, nodes=2, use_codex=False, run_id="framework_unit")
     return project
 
@@ -539,14 +799,67 @@ def _write_run_json(project: Path, filename: str, data: dict[str, object]) -> No
     _write_json(project / "runs" / "framework_unit" / filename, data)
 
 
-def _write_json(path: Path, data: dict[str, object]) -> None:
+def _write_minimal_design_state(project: Path) -> None:
+    state_dir = project / "state"
+    state_dir.mkdir(exist_ok=True)
+    _write_json(
+        state_dir / "design_state.json",
+        {
+            "project_id": "unit",
+            "module_status": [
+                {"module_id": "HD110H", "status": "available"},
+                {"module_id": "HG56H", "status": "available"},
+            ],
+            "backgrounds": ["target_bg"],
+            "known_champions": ["target_bg__HD110H"],
+            "unresolved_edges": [
+                {
+                    "module_id": "HD110H",
+                    "base_variant": "target_bg",
+                    "system": "1E62",
+                    "evidence_id": "role_split_sdab_1E62",
+                    "reason": "unit fixture lattice edge",
+                }
+            ],
+            "unsupported_claims": [
+                "Synthetic replay ranking does not establish prospective wet-lab superiority."
+            ],
+        },
+    )
+    _write_json(
+        state_dir / "evidence_cards.json",
+        [
+            {
+                "evidence_id": "role_split_sdab_1E62",
+                "summary": "Unit fixture evidence for candidate generation.",
+            }
+        ],
+    )
+
+
+def _write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
 
 def _write_benchmark_summary(project: Path, rows: list[dict[str, str]]) -> None:
     path = project / "runs" / "framework_unit" / "benchmark_summary.csv"
+    _rewrite_csv(path, rows)
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _rewrite_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    assert rows
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        fieldnames: list[str] = []
+        for row in rows:
+            for key in row:
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 

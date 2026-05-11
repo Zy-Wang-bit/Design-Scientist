@@ -28,6 +28,7 @@ ARXIV_MAX_RETRIES = 1
 ARXIV_RETRY_STATUS_CODES = {429, 503}
 ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 _LAST_ARXIV_REQUEST_AT = 0.0
+_CACHE_MISS = object()
 
 
 @dataclass(frozen=True)
@@ -52,28 +53,35 @@ def search_pubmed(
     client: httpx.Client | None = None,
 ) -> list[dict[str, Any]]:
     cache = ensure_dir(cache_dir)
+    esearch_path = cache / "pubmed_esearch.json"
+    efetch_path = cache / "pubmed_efetch.xml"
     if offline_fixtures:
         raw = _read_fixture_json(fixture_dir, "pubmed_esearch.json")
         xml_text = _read_fixture_text(fixture_dir, "pubmed_efetch.xml")
-        _write_cache_json(cache / "pubmed_esearch.json", raw)
-        _write_cache_text(cache / "pubmed_efetch.xml", xml_text)
+        _write_cache_json(esearch_path, raw)
+        _write_cache_text(efetch_path, xml_text)
     else:
-        params = _pubmed_common_params()
-        params.update(
-            {
-                "db": "pubmed",
-                "term": context.query,
-                "retmode": "json",
-                "retmax": str(max_papers),
-                "sort": "relevance",
-            }
-        )
-        raw = _get_json(
-            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
-            params=params,
-            client=client,
-        )
-        _write_cache_json(cache / "pubmed_esearch.json", raw)
+        cached_xml = _read_cached_text(efetch_path)
+        if cached_xml is not None:
+            return _parse_pubmed_xml(cached_xml, context)[:max_papers]
+        raw = _read_cached_json(esearch_path)
+        if raw is _CACHE_MISS:
+            params = _pubmed_common_params()
+            params.update(
+                {
+                    "db": "pubmed",
+                    "term": context.query,
+                    "retmode": "json",
+                    "retmax": str(max_papers),
+                    "sort": "relevance",
+                }
+            )
+            raw = _get_json(
+                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                params=params,
+                client=client,
+            )
+            _write_cache_json(esearch_path, raw)
         ids = _extract_pubmed_ids(raw)[:max_papers]
         if not ids:
             return []
@@ -84,7 +92,7 @@ def search_pubmed(
             params=fetch_params,
             client=client,
         )
-        _write_cache_text(cache / "pubmed_efetch.xml", xml_text)
+        _write_cache_text(efetch_path, xml_text)
     return _parse_pubmed_xml(xml_text, context)[:max_papers]
 
 
@@ -98,13 +106,16 @@ def search_biorxiv(
     client: httpx.Client | None = None,
 ) -> list[dict[str, Any]]:
     cache = ensure_dir(cache_dir)
+    cache_path = cache / "biorxiv.json"
     if offline_fixtures:
         raw = _read_fixture_json(fixture_dir, "biorxiv.json")
-        _write_cache_json(cache / "biorxiv.json", raw)
+        _write_cache_json(cache_path, raw)
     else:
-        url = f"https://api.biorxiv.org/details/biorxiv/2020-01-01/{date.today().isoformat()}/0"
-        raw = _get_json(url, client=client)
-        _write_cache_json(cache / "biorxiv.json", raw)
+        raw = _read_cached_json(cache_path)
+        if raw is _CACHE_MISS:
+            url = f"https://api.biorxiv.org/details/biorxiv/2020-01-01/{date.today().isoformat()}/0"
+            raw = _get_json(url, client=client)
+            _write_cache_json(cache_path, raw)
     records = raw.get("collection", []) if isinstance(raw, dict) else []
     query_terms = _query_terms(context.query)
     cards = []
@@ -144,23 +155,28 @@ def search_arxiv(
     client: httpx.Client | None = None,
 ) -> list[dict[str, Any]]:
     cache = ensure_dir(cache_dir)
+    cache_path = cache / "arxiv.xml"
     if offline_fixtures:
         xml_text = _read_fixture_text(fixture_dir, "arxiv.xml")
-        _write_cache_text(cache / "arxiv.xml", xml_text)
+        _write_cache_text(cache_path, xml_text)
     else:
-        xml_text = _get_arxiv_text(
-            "https://export.arxiv.org/api/query",
-            params={
-                "search_query": _arxiv_search_query(context.query),
-                "start": "0",
-                "max_results": str(max_papers),
-                "sortBy": "relevance",
-                "sortOrder": "descending",
-            },
-            headers=_arxiv_headers(),
-            client=client,
-        )
-        _write_cache_text(cache / "arxiv.xml", xml_text)
+        cached_xml = _read_cached_text(cache_path)
+        if cached_xml is not None:
+            xml_text = cached_xml
+        else:
+            xml_text = _get_arxiv_text(
+                "https://export.arxiv.org/api/query",
+                params={
+                    "search_query": _arxiv_search_query(context.query),
+                    "start": "0",
+                    "max_results": str(max_papers),
+                    "sortBy": "relevance",
+                    "sortOrder": "descending",
+                },
+                headers=_arxiv_headers(),
+                client=client,
+            )
+            _write_cache_text(cache_path, xml_text)
     return _parse_arxiv_xml(xml_text, context)[:max_papers]
 
 
@@ -175,28 +191,31 @@ def search_semantic_scholar(
 ) -> list[dict[str, Any]]:
     cache = ensure_dir(cache_dir)
     api_key = os.getenv("S2_API_KEY")
-    if not offline_fixtures and not api_key:
-        return []
+    cache_path = cache / "semantic_scholar.json"
     if offline_fixtures:
         raw = _read_fixture_json(fixture_dir, "semantic_scholar.json")
-        _write_cache_json(cache / "semantic_scholar.json", raw)
+        _write_cache_json(cache_path, raw)
     else:
-        raw = _get_json(
-            "https://api.semanticscholar.org/graph/v1/paper/search",
-            params={
-                "query": context.query,
-                "limit": str(max_papers),
-                "fields": (
-                    "paperId,title,abstract,authors,year,venue,url,externalIds,"
-                    "publicationDate,citationCount,referenceCount,influentialCitationCount,"
-                    "citations.paperId,citations.title,citations.year,citations.url,citations.externalIds,"
-                    "references.paperId,references.title,references.year,references.url,references.externalIds"
-                ),
-            },
-            headers={"x-api-key": api_key},
-            client=client,
-        )
-        _write_cache_json(cache / "semantic_scholar.json", raw)
+        raw = _read_cached_json(cache_path)
+        if raw is _CACHE_MISS:
+            if not api_key:
+                return []
+            raw = _get_json(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={
+                    "query": context.query,
+                    "limit": str(max_papers),
+                    "fields": (
+                        "paperId,title,abstract,authors,year,venue,url,externalIds,"
+                        "publicationDate,citationCount,referenceCount,influentialCitationCount,"
+                        "citations.paperId,citations.title,citations.year,citations.url,citations.externalIds,"
+                        "references.paperId,references.title,references.year,references.url,references.externalIds"
+                    ),
+                },
+                headers={"x-api-key": api_key},
+                client=client,
+            )
+            _write_cache_json(cache_path, raw)
     records = raw.get("data", []) if isinstance(raw, dict) else []
     cards = []
     for item in records:
@@ -261,7 +280,7 @@ def default_fixture_dir() -> Path:
     env_path = os.getenv("DESIGN_SCIENTIST_LITERATURE_FIXTURES")
     if env_path:
         return Path(env_path).expanduser().resolve()
-    return Path.cwd() / "tests" / "fixtures" / "literature"
+    return Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "literature"
 
 
 def _pubmed_common_params() -> dict[str, str]:
@@ -614,7 +633,9 @@ def _xml_text(node: ET.Element | None) -> str | None:
 
 
 def _read_fixture_json(fixture_dir: str | Path | None, name: str) -> Any:
-    path = (Path(fixture_dir).expanduser().resolve() if fixture_dir else default_fixture_dir()) / name
+    path = _fixture_path(fixture_dir, name)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing literature fixture: {path}")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -622,11 +643,36 @@ def _read_fixture_json(fixture_dir: str | Path | None, name: str) -> Any:
 
 
 def _read_fixture_text(fixture_dir: str | Path | None, name: str) -> str:
-    path = (Path(fixture_dir).expanduser().resolve() if fixture_dir else default_fixture_dir()) / name
+    path = _fixture_path(fixture_dir, name)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing literature fixture: {path}")
     try:
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def _fixture_path(fixture_dir: str | Path | None, name: str) -> Path:
+    root = Path(fixture_dir).expanduser().resolve() if fixture_dir else default_fixture_dir()
+    return root / name
+
+
+def _read_cached_json(path: Path) -> Any:
+    if not path.exists():
+        return _CACHE_MISS
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _CACHE_MISS
+
+
+def _read_cached_text(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _write_cache_json(path: Path, payload: Any) -> None:

@@ -6,7 +6,12 @@ import random
 from collections import Counter
 from typing import Any
 
-from design_scientist.acquisition import default_policy, score_candidate, score_panel
+from design_scientist.acquisition import (
+    candidate_is_selectable,
+    default_policy,
+    score_candidate,
+    score_panel,
+)
 from design_scientist.schemas import AcquisitionPolicy, Candidate
 
 
@@ -18,30 +23,30 @@ def select_panel(
     return_diagnostics: bool = False,
 ) -> tuple[list[Candidate], float] | tuple[list[Candidate], float, dict[str, Any]]:
     policy = policy or default_policy()
-    limit = max(0, budget)
-    pool = _dedupe_candidates(candidates)
+    cost_budget = _cost_budget(budget)
+    pool = _selectable_candidates(candidates)
     ranked = sorted(
         pool,
         key=lambda candidate: (-score_candidate(candidate, policy), candidate.candidate_id),
     )
-    panel = ranked[:limit]
-    _enforce_panel_invariants(pool, panel, limit)
+    panel = _take_within_budget(ranked, cost_budget)
+    _enforce_panel_invariants(_dedupe_candidates(candidates), panel, cost_budget)
     score = score_panel(panel, policy)
     if return_diagnostics:
-        return panel, score, panel_diagnostics(pool, panel, policy, budget=limit, score=score)
+        return panel, score, panel_diagnostics(candidates, panel, policy, budget=cost_budget, score=score)
     return panel, score
 
 
 def random_feasible(candidates: list[Candidate], budget: int) -> list[Candidate]:
     rng = random.Random(0)
-    sample = sorted(_dedupe_candidates(candidates), key=lambda candidate: candidate.candidate_id)
+    sample = sorted(_selectable_candidates(candidates), key=lambda candidate: candidate.candidate_id)
     rng.shuffle(sample)
-    return sample[: max(0, budget)]
+    return _take_within_budget(sample, _cost_budget(budget))
 
 
 def top_predicted_utility(candidates: list[Candidate], budget: int) -> list[Candidate]:
-    return sorted(
-        _dedupe_candidates(candidates),
+    ranked = sorted(
+        _selectable_candidates(candidates),
         key=lambda c: (
             -(
                 c.score_components.get("performance", 0.0)
@@ -49,37 +54,47 @@ def top_predicted_utility(candidates: list[Candidate], budget: int) -> list[Cand
             ),
             c.candidate_id,
         ),
-    )[: max(0, budget)]
+    )
+    return _take_within_budget(ranked, _cost_budget(budget))
 
 
 def pure_lattice_repair(candidates: list[Candidate], budget: int) -> list[Candidate]:
-    return sorted(
-        _dedupe_candidates(candidates),
+    ranked = sorted(
+        _selectable_candidates(candidates),
         key=lambda c: (-c.score_components.get("lattice_repair", 0.0), c.candidate_id),
-    )[: max(0, budget)]
+    )
+    return _take_within_budget(ranked, _cost_budget(budget))
 
 
 def fixed_mix(candidates: list[Candidate], budget: int) -> list[Candidate]:
-    limit = max(0, budget)
-    if limit == 0:
+    cost_budget = _cost_budget(budget)
+    if cost_budget == 0:
         return []
     categories = ["champion", "champion_contrast", "lattice_repair", "interaction_square", "control", "repeat"]
     selected: list[Candidate] = []
     selected_ids: set[str] = set()
-    pool = sorted(_dedupe_candidates(candidates), key=lambda candidate: candidate.candidate_id)
+    selected_cost = 0.0
+    pool = sorted(_selectable_candidates(candidates), key=lambda candidate: candidate.candidate_id)
     for category in categories:
-        for candidate in [c for c in pool if c.category == category][: max(1, limit // len(categories))]:
+        quota = max(1, int(cost_budget) // len(categories))
+        for candidate in [c for c in pool if c.category == category][:quota]:
             if candidate.candidate_id in selected_ids:
+                continue
+            if selected_cost + _candidate_cost(candidate) > cost_budget:
                 continue
             selected.append(candidate)
             selected_ids.add(candidate.candidate_id)
-            if len(selected) >= limit:
-                return selected[:limit]
+            selected_cost += _candidate_cost(candidate)
+            if selected_cost >= cost_budget:
+                return selected
     for candidate in pool:
         if candidate.candidate_id not in selected_ids:
+            if selected_cost + _candidate_cost(candidate) > cost_budget:
+                continue
             selected.append(candidate)
             selected_ids.add(candidate.candidate_id)
-        if len(selected) >= limit:
+            selected_cost += _candidate_cost(candidate)
+        if selected_cost >= cost_budget:
             break
     return selected
 
@@ -93,6 +108,7 @@ def panel_diagnostics(
     score: float | None = None,
 ) -> dict[str, Any]:
     pool = _dedupe_candidates(candidates)
+    selectable_pool = _selectable_candidates(candidates)
     panel_ids = [candidate.candidate_id for candidate in panel]
     pool_ids = {candidate.candidate_id for candidate in pool}
     duplicate_ids = sorted(
@@ -101,17 +117,19 @@ def panel_diagnostics(
         if count > 1
     )
     selected_set = set(panel_ids)
-    baseline_budget = len(panel)
     baselines = {
-        "top_predicted_utility": top_predicted_utility(pool, baseline_budget),
-        "random_feasible": random_feasible(pool, baseline_budget),
-        "pure_lattice_repair": pure_lattice_repair(pool, baseline_budget),
-        "fixed_mix": fixed_mix(pool, baseline_budget),
+        "top_predicted_utility": top_predicted_utility(pool, int(budget)),
+        "random_feasible": random_feasible(pool, int(budget)),
+        "pure_lattice_repair": pure_lattice_repair(pool, int(budget)),
+        "fixed_mix": fixed_mix(pool, int(budget)),
     }
     return {
         "policy": policy.name,
         "budget": budget,
+        "cost_budget": budget,
+        "total_cost": round(sum(_candidate_cost(candidate) for candidate in panel), 6),
         "pool_count": len(pool),
+        "selectable_pool_count": len(selectable_pool),
         "selected_count": len(panel),
         "score": score_panel(panel, policy) if score is None else score,
         "subset_of_pool": selected_set <= pool_ids,
@@ -158,19 +176,52 @@ def _dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
     return list(unique.values())
 
 
+def _selectable_candidates(candidates: list[Candidate]) -> list[Candidate]:
+    return [
+        candidate
+        for candidate in _dedupe_candidates(candidates)
+        if candidate_is_selectable(candidate)
+    ]
+
+
+def _cost_budget(budget: int | float) -> float:
+    return max(0.0, float(budget))
+
+
+def _candidate_cost(candidate: Candidate) -> float:
+    try:
+        return max(0.0, float(candidate.cost))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _take_within_budget(candidates: list[Candidate], cost_budget: float) -> list[Candidate]:
+    panel: list[Candidate] = []
+    total_cost = 0.0
+    for candidate in candidates:
+        cost = _candidate_cost(candidate)
+        if total_cost + cost > cost_budget:
+            continue
+        panel.append(candidate)
+        total_cost += cost
+    return panel
+
+
 def _enforce_panel_invariants(
     pool: list[Candidate],
     panel: list[Candidate],
-    budget: int,
+    budget: float,
 ) -> None:
     pool_ids = {candidate.candidate_id for candidate in pool}
     panel_ids = [candidate.candidate_id for candidate in panel]
-    if len(panel) > budget:
-        raise ValueError("Panel exceeds budget")
+    if sum(_candidate_cost(candidate) for candidate in panel) > budget:
+        raise ValueError("Panel exceeds cost budget")
     if set(panel_ids) - pool_ids:
         raise ValueError("Panel contains candidates outside the pool")
     if len(panel_ids) != len(set(panel_ids)):
         raise ValueError("Panel contains duplicate candidates")
+    if any(not candidate_is_selectable(candidate) for candidate in panel):
+        raise ValueError("Panel contains infeasible candidates")
 
 
 def _overlap_summary(selected_ids: set[str], baseline_ids: set[str]) -> dict[str, float | int]:

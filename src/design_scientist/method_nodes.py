@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 import stat
+import subprocess
 import sys
 import traceback
 import uuid
@@ -32,6 +33,9 @@ METHOD_NODE_JSON_ARTIFACTS = (
     "benchmark_metrics.json",
     "validation_report.json",
 )
+METHOD_NODE_GENERATED_ARTIFACTS = tuple(
+    artifact for artifact in METHOD_NODE_REQUIRED_ARTIFACTS if artifact != "method.py"
+)
 NOVELTY_SELECTION_OVERLAP_THRESHOLD = 0.85
 PROPOSAL_REQUIRED_FIELDS = (
     "method_hypothesis",
@@ -46,6 +50,21 @@ PROPOSAL_REQUIRED_FIELDS = (
     "planned_ablation",
 )
 DEFAULT_ENTRYPOINT = "run"
+DEFAULT_EXECUTION_TIMEOUT_SECONDS = 30.0
+
+FAILURE_CONTRACT = "contract"
+FAILURE_SUBPROCESS_NONZERO = "subprocess_nonzero"
+FAILURE_TIMEOUT = "timeout"
+FAILURE_MISSING_ARTIFACTS = "missing_artifacts"
+FAILURE_MALFORMED_ARTIFACTS = "malformed_artifacts"
+FAILURE_PATH_GUARD = "path_guard"
+FAILURE_STALE_ARTIFACTS = "stale_artifacts"
+FAILURE_CALLABLE_IMPORT = "callable_import"
+
+_SUBPROCESS_CODE = (
+    "from design_scientist.method_nodes import _method_node_subprocess_main\n"
+    "_method_node_subprocess_main()\n"
+)
 
 
 class MethodNodeError(RuntimeError):
@@ -106,16 +125,31 @@ class MethodNodeExecutionResult:
     workspace: Path
     valid: bool
     executed: bool
+    failure_kinds: list[str] = field(default_factory=list)
     missing_artifacts: list[str] = field(default_factory=list)
     malformed_json: dict[str, str] = field(default_factory=dict)
+    stale_artifacts: list[str] = field(default_factory=list)
     out_of_bounds_writes: list[str] = field(default_factory=list)
     escaping_symlinks: list[str] = field(default_factory=list)
     exception: str | None = None
+    subprocess_returncode: int | None = None
+    subprocess_stdout: str = ""
+    subprocess_stderr: str = ""
+    timed_out: bool = False
+    timeout_seconds: float | None = None
     artifacts: dict[str, dict[str, Any]] = field(default_factory=dict)
     filesystem_changes: list[FilesystemChange] = field(default_factory=list)
     snapshot_roots: list[Path] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     callables: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _MethodNodeSubprocessResult:
+    returncode: int | None
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
 
 
 def load_method_node(node_workspace: str | Path) -> MethodNode:
@@ -153,13 +187,16 @@ def execute_method_node(
     node_workspace: str | Path,
     *,
     guard_roots: Iterable[str | Path] | None = None,
+    timeout_seconds: float | None = DEFAULT_EXECUTION_TIMEOUT_SECONDS,
 ) -> MethodNodeExecutionResult:
     """Execute a node and mark it invalid on contract or path-guard failure.
 
     The harness does not generate node code. It imports the workspace's
-    ``method.py`` and calls the manifest-declared entrypoint, defaulting to
-    ``run``. Relative writes land in the node workspace because execution
-    temporarily changes the process cwd to that workspace.
+    ``method.py`` inside an isolated subprocess and calls the manifest-declared
+    entrypoint, defaulting to ``run``. Relative writes land in the node
+    workspace because the subprocess cwd is set to that workspace. Callable
+    policies are imported in the parent only after artifacts validate, and the
+    entrypoint is not called during that import.
     """
 
     workspace = _resolve_workspace(node_workspace)
@@ -169,6 +206,10 @@ def execute_method_node(
     exception: str | None = None
     errors: list[str] = []
     exported_callables: dict[str, Any] = {}
+    node: MethodNode | None = None
+    subprocess_result = _MethodNodeSubprocessResult(returncode=None)
+    callable_import_failed = False
+    contract_failed = False
 
     try:
         preflight = validate_method_node(workspace, require_generated_artifacts=False)
@@ -176,12 +217,31 @@ def execute_method_node(
             escaped = ", ".join(preflight.escaping_symlinks)
             raise MethodNodeContractError(f"Node workspace has symlinks escaping workspace: {escaped}")
         node = load_method_node(workspace)
-        exported_callables = _execute_loaded_node(node)
-        executed = True
+        _entrypoint_attribute(node.entrypoint)
     except MethodNodeContractError as exc:
+        contract_failed = True
         errors.append(str(exc))
-    except Exception:
-        exception = traceback.format_exc()
+    except Exception as exc:
+        contract_failed = True
+        errors.append(f"Preflight failed: {exc}")
+
+    if node is not None and not errors:
+        subprocess_result = _execute_node_subprocess(
+            node,
+            timeout_seconds=timeout_seconds,
+        )
+        if subprocess_result.timed_out:
+            exception = (
+                subprocess_result.stderr.strip()
+                or f"method.py timed out after {timeout_seconds} seconds"
+            )
+        elif subprocess_result.returncode == 0:
+            executed = True
+        else:
+            exception = (
+                subprocess_result.stderr.strip()
+                or f"method.py exited with code {subprocess_result.returncode}"
+            )
 
     after = snapshot_filesystem(snapshot_roots)
     filesystem_changes = diff_filesystem_snapshots(before, after)
@@ -191,24 +251,56 @@ def execute_method_node(
         if not _is_relative_to(change.path, workspace)
     ]
     validation = validate_method_node(workspace)
+    stale_artifacts = (
+        _stale_generated_artifacts(before, after, workspace)
+        if executed
+        else []
+    )
     errors.extend(validation.errors)
 
-    valid = (
+    preliminary_valid = (
         executed
         and exception is None
         and validation.valid
         and not out_of_bounds_writes
         and not errors
+        and not stale_artifacts
     )
+    if preliminary_valid and node is not None:
+        try:
+            exported_callables = load_method_node_callables(node)
+        except MethodNodeContractError as exc:
+            callable_import_failed = True
+            errors.append(str(exc))
+        except Exception:
+            callable_import_failed = True
+            exception = traceback.format_exc()
+
+    failure_kinds = _execution_failure_kinds(
+        contract_failed=contract_failed,
+        subprocess_result=subprocess_result,
+        validation=validation,
+        out_of_bounds_writes=out_of_bounds_writes,
+        stale_artifacts=stale_artifacts,
+        callable_import_failed=callable_import_failed,
+    )
+    valid = preliminary_valid and not callable_import_failed
     return MethodNodeExecutionResult(
         workspace=workspace,
         valid=valid,
         executed=executed,
+        failure_kinds=failure_kinds,
         missing_artifacts=validation.missing_artifacts,
         malformed_json=validation.malformed_json,
+        stale_artifacts=stale_artifacts,
         out_of_bounds_writes=sorted(out_of_bounds_writes),
         escaping_symlinks=validation.escaping_symlinks,
         exception=exception,
+        subprocess_returncode=subprocess_result.returncode,
+        subprocess_stdout=subprocess_result.stdout,
+        subprocess_stderr=subprocess_result.stderr,
+        timed_out=subprocess_result.timed_out,
+        timeout_seconds=timeout_seconds,
         artifacts=validation.artifacts,
         filesystem_changes=filesystem_changes,
         snapshot_roots=snapshot_roots,
@@ -242,6 +334,9 @@ def validate_method_node(
     for artifact in METHOD_NODE_JSON_ARTIFACTS:
         path = workspace / artifact
         if not path.exists():
+            continue
+        if not path.is_file():
+            malformed_json[artifact] = f"JSON artifact must be a file: {artifact}"
             continue
         try:
             data = _read_json_object(path)
@@ -328,7 +423,93 @@ def find_escaping_symlinks(node_workspace: str | Path) -> list[Path]:
     return sorted(escaping)
 
 
-def _execute_loaded_node(node: MethodNode) -> dict[str, Any]:
+def load_method_node_callables(node_workspace: str | Path | MethodNode) -> dict[str, Any]:
+    """Import ``method.py`` and return public callables without calling ``run``.
+
+    This is intended for benchmarking policies after subprocess artifact
+    execution and validation have succeeded.
+    """
+
+    node = (
+        node_workspace
+        if isinstance(node_workspace, MethodNode)
+        else load_method_node(node_workspace)
+    )
+    module = _load_method_module(node)
+    return {
+        name: value
+        for name, value in vars(module).items()
+        if callable(value) and not name.startswith("_")
+    }
+
+
+def _execute_node_subprocess(
+    node: MethodNode,
+    *,
+    timeout_seconds: float | None,
+) -> _MethodNodeSubprocessResult:
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _SUBPROCESS_CODE,
+                os.fspath(node.workspace),
+            ],
+            cwd=node.workspace,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=_subprocess_env(),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr = _coerce_subprocess_output(exc.stderr)
+        timeout_message = f"method.py timed out after {timeout_seconds} seconds"
+        if stderr:
+            stderr = f"{stderr.rstrip()}\n{timeout_message}"
+        else:
+            stderr = timeout_message
+        return _MethodNodeSubprocessResult(
+            returncode=None,
+            stdout=_coerce_subprocess_output(exc.stdout),
+            stderr=stderr,
+            timed_out=True,
+        )
+    return _MethodNodeSubprocessResult(
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        timed_out=False,
+    )
+
+
+def _subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    pythonpath_entries = [
+        os.fspath(Path.cwd()) if not entry else entry
+        for entry in sys.path
+    ]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+    return env
+
+
+def _method_node_subprocess_main() -> None:
+    workspace = _resolve_workspace(sys.argv[1])
+    node = load_method_node(workspace)
+    module = _load_method_module(node)
+    entrypoint = getattr(module, _entrypoint_attribute(node.entrypoint), None)
+    if not callable(entrypoint):
+        raise MethodNodeContractError(
+            f"method.py does not define callable entrypoint {node.entrypoint!r}"
+        )
+    _call_entrypoint(entrypoint, node.workspace)
+
+
+def _load_method_module(node: MethodNode) -> Any:
     module_name = f"_design_scientist_method_node_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(module_name, node.method_path)
     if spec is None or spec.loader is None:
@@ -342,21 +523,63 @@ def _execute_loaded_node(node: MethodNode) -> dict[str, Any]:
         os.chdir(node.workspace)
         sys.path.insert(0, str(node.workspace))
         spec.loader.exec_module(module)
-        entrypoint = getattr(module, _entrypoint_attribute(node.entrypoint), None)
-        if not callable(entrypoint):
-            raise MethodNodeContractError(
-                f"method.py does not define callable entrypoint {node.entrypoint!r}"
-            )
-        _call_entrypoint(entrypoint, node.workspace)
-        return {
-            name: value
-            for name, value in vars(module).items()
-            if callable(value) and not name.startswith("_")
-        }
+        return module
     finally:
         os.chdir(previous_cwd)
         sys.path[:] = previous_sys_path
         sys.modules.pop(module_name, None)
+
+
+def _coerce_subprocess_output(output: str | bytes | None) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return output
+
+
+def _stale_generated_artifacts(
+    before: dict[Path, FilesystemEntry],
+    after: dict[Path, FilesystemEntry],
+    workspace: Path,
+) -> list[str]:
+    stale: list[str] = []
+    for artifact in METHOD_NODE_GENERATED_ARTIFACTS:
+        path = _absolute_no_symlink_resolve(workspace / artifact)
+        before_entry = before.get(path)
+        after_entry = after.get(path)
+        if before_entry is not None and after_entry is not None and before_entry == after_entry:
+            stale.append(artifact)
+    return stale
+
+
+def _execution_failure_kinds(
+    *,
+    contract_failed: bool,
+    subprocess_result: _MethodNodeSubprocessResult,
+    validation: MethodNodeValidationResult,
+    out_of_bounds_writes: list[str],
+    stale_artifacts: list[str],
+    callable_import_failed: bool,
+) -> list[str]:
+    kinds: list[str] = []
+    if contract_failed or validation.errors:
+        kinds.append(FAILURE_CONTRACT)
+    if subprocess_result.timed_out:
+        kinds.append(FAILURE_TIMEOUT)
+    elif subprocess_result.returncode not in (None, 0):
+        kinds.append(FAILURE_SUBPROCESS_NONZERO)
+    if validation.missing_artifacts:
+        kinds.append(FAILURE_MISSING_ARTIFACTS)
+    if validation.malformed_json:
+        kinds.append(FAILURE_MALFORMED_ARTIFACTS)
+    if out_of_bounds_writes or validation.escaping_symlinks:
+        kinds.append(FAILURE_PATH_GUARD)
+    if stale_artifacts:
+        kinds.append(FAILURE_STALE_ARTIFACTS)
+    if callable_import_failed:
+        kinds.append(FAILURE_CALLABLE_IMPORT)
+    return kinds
 
 
 def _call_entrypoint(entrypoint: Any, workspace: Path) -> None:
@@ -407,6 +630,8 @@ def _read_json_object(path: Path) -> dict[str, Any]:
             data = json.load(handle)
     except FileNotFoundError as exc:
         raise ValueError(f"Missing JSON artifact: {path.name}") from exc
+    except OSError as exc:
+        raise ValueError(f"Invalid JSON artifact {path.name}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"Malformed JSON in {path.name}: {exc.msg}") from exc
     if not isinstance(data, dict):
@@ -597,6 +822,16 @@ def _is_relative_to(path: Path, base: Path) -> bool:
 
 __all__ = [
     "DEFAULT_ENTRYPOINT",
+    "DEFAULT_EXECUTION_TIMEOUT_SECONDS",
+    "FAILURE_CALLABLE_IMPORT",
+    "FAILURE_CONTRACT",
+    "FAILURE_MALFORMED_ARTIFACTS",
+    "FAILURE_MISSING_ARTIFACTS",
+    "FAILURE_PATH_GUARD",
+    "FAILURE_STALE_ARTIFACTS",
+    "FAILURE_SUBPROCESS_NONZERO",
+    "FAILURE_TIMEOUT",
+    "METHOD_NODE_GENERATED_ARTIFACTS",
     "METHOD_NODE_JSON_ARTIFACTS",
     "METHOD_NODE_REQUIRED_ARTIFACTS",
     "NOVELTY_SELECTION_OVERLAP_THRESHOLD",
@@ -611,6 +846,7 @@ __all__ = [
     "diff_filesystem_snapshots",
     "execute_method_node",
     "find_escaping_symlinks",
+    "load_method_node_callables",
     "load_method_node",
     "snapshot_filesystem",
     "validate_method_node",

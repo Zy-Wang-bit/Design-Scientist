@@ -160,6 +160,8 @@ class Candidate:
     category: CandidateCategory
     target_system: str
     background: str | None = None
+    target_background: str | None = None
+    design_context: dict[str, Any] = field(default_factory=dict)
     modules: list[str] = field(default_factory=list)
     rationale: str = ""
     evidence_refs: list[str] = field(default_factory=list)
@@ -180,6 +182,21 @@ class Candidate:
     def __post_init__(self) -> None:
         if self.variant_id is None:
             self.variant_id = self.candidate_id
+        if self.target_background is None and self.background:
+            self.target_background = self.background
+        if not self.design_context:
+            self.design_context = {
+                key: value
+                for key, value in {
+                    "target_system": self.target_system,
+                    "target_background": self.target_background,
+                }.items()
+                if value
+            }
+        else:
+            self.design_context.setdefault("target_system", self.target_system)
+            if self.target_background:
+                self.design_context.setdefault("target_background", self.target_background)
         if not self.required_endpoints and self.required_measurements:
             self.required_endpoints = list(self.required_measurements)
         if not self.source_refs and self.evidence_refs:

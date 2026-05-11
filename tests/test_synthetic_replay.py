@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from design_scientist.synthetic_replay import run_synthetic_benchmark
+from design_scientist.synthetic_replay import DEFAULT_METHODS, run_synthetic_benchmark
 
 
 EXPECTED_WORLD_ORDER = (
@@ -52,6 +52,8 @@ def test_synthetic_benchmark_writes_deterministic_artifacts(tmp_path: Path) -> N
     }
     assert all(row["novelty_score"] for row in rows)
     assert all(row["baseline_overlap"] for row in rows)
+    expected_overlap_columns = {f"selection_overlap_{method}" for method in DEFAULT_METHODS}
+    assert expected_overlap_columns <= set(rows[0])
 
     by_world_method = {
         (row["world_id"], row["method"]): row
@@ -183,6 +185,53 @@ def test_synthetic_benchmark_accepts_policy_callables_returning_candidate_record
     rows = _read_rows(result["benchmark_results_path"])
     assert [row["method"] for row in rows] == ["first_two_records_policy"] * len(EXPECTED_WORLD_ORDER)
     assert {int(row["selected_count"]) for row in rows} == {2}
+
+
+def test_synthetic_benchmark_isolates_policy_failures_by_method(tmp_path: Path) -> None:
+    def raising_policy(observed, candidates, budget, round_index, rng) -> list[str]:
+        del observed, candidates, budget, round_index, rng
+        raise RuntimeError("policy exploded")
+
+    def invalid_id_policy(observed, candidates, budget, round_index, rng) -> list[str]:
+        del observed, candidates, budget, round_index, rng
+        return ["missing_candidate_id"]
+
+    def first_two_policy(observed, candidates, budget, round_index, rng) -> list[str]:
+        del observed, round_index, rng
+        return [str(candidate["variant_id"]) for candidate in candidates[:budget]]
+
+    raising_policy.policy_name = "generated_raising_policy"  # type: ignore[attr-defined]
+    invalid_id_policy.policy_name = "generated_invalid_id_policy"  # type: ignore[attr-defined]
+
+    result = run_synthetic_benchmark(
+        tmp_path / "project",
+        run_id="policy_failures",
+        rounds=1,
+        budget=2,
+        methods=[raising_policy, invalid_id_policy, first_two_policy, "random_feasible"],
+    )
+
+    rows = _read_rows(result["benchmark_results_path"])
+    rows_by_method: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        rows_by_method.setdefault(row["method"], []).append(row)
+
+    assert {row["status"] for row in rows_by_method["first_two_policy"]} == {"completed"}
+    assert {row["status"] for row in rows_by_method["random_feasible"]} == {"completed"}
+    assert {row["status"] for row in rows_by_method["generated_raising_policy"]} == {"failed"}
+    assert {row["status"] for row in rows_by_method["generated_invalid_id_policy"]} == {"failed"}
+    assert all("policy exploded" in row["error"] for row in rows_by_method["generated_raising_policy"])
+    assert all("unavailable candidate" in row["error"] for row in rows_by_method["generated_invalid_id_policy"])
+    assert {int(row["selected_count"]) for row in rows_by_method["generated_raising_policy"]} == {0}
+    assert {int(row["selected_count"]) for row in rows_by_method["generated_invalid_id_policy"]} == {0}
+
+    summary_by_method = {
+        row["method"]: row
+        for row in result["summary"]["method_rankings"]
+    }
+    assert summary_by_method["first_two_policy"]["failed_worlds"] == 0
+    assert summary_by_method["generated_raising_policy"]["failed_worlds"] == len(EXPECTED_WORLDS)
+    assert summary_by_method["generated_invalid_id_policy"]["failed_worlds"] == len(EXPECTED_WORLDS)
 
 
 def test_synthetic_benchmark_rejects_unknown_method_and_unsafe_run_id(tmp_path: Path) -> None:

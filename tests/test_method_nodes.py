@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from textwrap import dedent
 
@@ -73,6 +74,203 @@ def test_execute_method_node_accepts_valid_node(tmp_path: Path) -> None:
         "benchmark_metrics.json",
         "validation_report.json",
     }
+
+
+def test_execute_method_node_runs_artifact_generation_in_subprocess_and_exports_policy_callable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "nodes" / "subprocess_policy"
+    env_name = "METHOD_NODE_PARENT_RUN_LEAK"
+    monkeypatch.delenv(env_name, raising=False)
+    _write_node(
+        workspace,
+        f"""
+        def run(workspace):
+            import json
+            import os
+            from pathlib import Path
+
+            os.environ[{env_name!r}] = "run executed in this process"
+            root = Path.cwd().resolve()
+            if root != Path(workspace).resolve():
+                raise RuntimeError(f"expected cwd {{workspace}}, got {{root}}")
+
+            (root / "proposal.json").write_text(
+                json.dumps({{
+                    "method_hypothesis": "subprocess execution isolates artifact generation",
+                    "literature_basis": ["active learning under execution isolation"],
+                    "literature_gap_ids": ["gap_subprocess_execution"],
+                    "reused_components": ["policy callable loading"],
+                    "architecture_delta": "runs artifact generation before callable import",
+                    "new_mechanism_claim": "subprocess isolation prevents parent side effects",
+                    "algorithm_mechanism": "write artifacts from cwd and expose a policy callable",
+                    "expected_advantage": "deterministic artifact validation",
+                    "failure_modes": ["subprocess unavailable"],
+                    "planned_ablation": "disable_subprocess_execution",
+                }}),
+                encoding="utf-8",
+            )
+            (root / "candidate_policy.json").write_text(
+                json.dumps({{"policy_id": "subprocess", "policy_entrypoint": "select_batch"}}),
+                encoding="utf-8",
+            )
+            (root / "novelty_report.json").write_text(
+                json.dumps({{"baseline_clone": False, "selection_overlap_vs_baselines": 0.22}}),
+                encoding="utf-8",
+            )
+            (root / "benchmark_metrics.json").write_text(
+                json.dumps({{"score": 1.4}}),
+                encoding="utf-8",
+            )
+            (root / "validation_report.json").write_text(
+                json.dumps({{"valid": True, "findings": []}}),
+                encoding="utf-8",
+            )
+
+        def select_batch(observed, candidates, budget, round_index, rng):
+            return list(candidates)[:budget]
+        """,
+    )
+
+    result = execute_method_node(workspace, guard_roots=[tmp_path])
+
+    assert result.valid
+    assert result.executed
+    assert env_name not in os.environ
+    assert callable(result.callables["select_batch"])
+    assert result.callables["select_batch"]([], ["a", "b"], 1, 0, None) == ["a"]
+
+
+def test_execute_method_node_reports_json_directory_as_malformed_not_crash(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "nodes" / "json_directory"
+    _write_node(
+        workspace,
+        """
+        def run(workspace):
+            import json
+            from pathlib import Path
+
+            root = Path(workspace)
+            (root / "proposal.json").mkdir()
+            (root / "candidate_policy.json").write_text(
+                json.dumps({"policy_id": "json_directory", "policy_entrypoint": "select_batch"}),
+                encoding="utf-8",
+            )
+            (root / "novelty_report.json").write_text(
+                json.dumps({"baseline_clone": False, "selection_overlap_vs_baselines": 0.20}),
+                encoding="utf-8",
+            )
+            (root / "benchmark_metrics.json").write_text(
+                json.dumps({"score": 0.0}),
+                encoding="utf-8",
+            )
+            (root / "validation_report.json").write_text(
+                json.dumps({"valid": True, "findings": []}),
+                encoding="utf-8",
+            )
+
+        def select_batch(observed, candidates, budget, round_index, rng):
+            return []
+        """,
+    )
+
+    result = execute_method_node(workspace, guard_roots=[tmp_path])
+
+    assert not result.valid
+    assert result.executed
+    assert "proposal.json" in result.malformed_json
+    assert "malformed_artifacts" in result.failure_kinds
+    assert result.exception is None
+
+
+def test_execute_method_node_rejects_stale_generated_artifacts(tmp_path: Path) -> None:
+    workspace = tmp_path / "nodes" / "stale_artifacts"
+    _write_node(
+        workspace,
+        """
+        def run(workspace):
+            pass
+        """,
+    )
+    (workspace / "proposal.json").write_text(
+        json.dumps({
+            "method_hypothesis": "stale artifacts must not validate a no-op run",
+            "literature_basis": ["active learning benchmark hygiene"],
+            "literature_gap_ids": ["gap_stale_artifact_guard"],
+            "reused_components": ["method-node harness"],
+            "architecture_delta": "requires regenerated artifacts for each execution",
+            "new_mechanism_claim": "stale output detection prevents invalid reuse",
+            "algorithm_mechanism": "compare pre/post artifact filesystem entries",
+            "expected_advantage": "deterministic node acceptance",
+            "failure_modes": ["artifact timestamps preserved"],
+            "planned_ablation": "disable_stale_artifact_guard",
+        }),
+        encoding="utf-8",
+    )
+    (workspace / "candidate_policy.json").write_text(
+        json.dumps({"policy_id": "stale", "policy_entrypoint": "select_batch"}),
+        encoding="utf-8",
+    )
+    (workspace / "novelty_report.json").write_text(
+        json.dumps({"baseline_clone": False, "selection_overlap_vs_baselines": 0.20}),
+        encoding="utf-8",
+    )
+    (workspace / "benchmark_metrics.json").write_text(
+        json.dumps({"score": 1.0}),
+        encoding="utf-8",
+    )
+    (workspace / "validation_report.json").write_text(
+        json.dumps({"valid": True, "findings": []}),
+        encoding="utf-8",
+    )
+
+    result = execute_method_node(workspace, guard_roots=[tmp_path])
+
+    assert not result.valid
+    assert result.executed
+    assert "stale_artifacts" in result.failure_kinds
+    assert set(result.stale_artifacts) == {
+        "proposal.json",
+        "candidate_policy.json",
+        "novelty_report.json",
+        "benchmark_metrics.json",
+        "validation_report.json",
+    }
+
+
+def test_execute_method_node_reports_subprocess_exception_invalid(tmp_path: Path) -> None:
+    workspace = tmp_path / "nodes" / "subprocess_raises"
+    _write_node(
+        workspace,
+        """
+        def run(workspace):
+            raise RuntimeError("node boom")
+        """,
+    )
+
+    result = execute_method_node(workspace, guard_roots=[tmp_path])
+
+    assert not result.valid
+    assert not result.executed
+    assert "subprocess_nonzero" in result.failure_kinds
+    assert result.subprocess_returncode != 0
+    assert result.exception is not None
+    assert "node boom" in result.exception
+
+
+def test_execute_method_node_reports_contract_preflight_error(tmp_path: Path) -> None:
+    workspace = tmp_path / "nodes" / "missing_method"
+    workspace.mkdir(parents=True)
+
+    result = execute_method_node(workspace, guard_roots=[tmp_path])
+
+    assert not result.valid
+    assert not result.executed
+    assert "contract" in result.failure_kinds
+    assert any("method.py" in error for error in result.errors)
 
 
 def test_execute_method_node_accepts_structured_architecture_delta_and_ablation(
@@ -292,6 +490,7 @@ def test_execute_method_node_marks_missing_artifact_invalid(tmp_path: Path) -> N
     assert not result.valid
     assert result.executed
     assert result.missing_artifacts == ["benchmark_metrics.json"]
+    assert "missing_artifacts" in result.failure_kinds
     assert result.exception is None
 
 
@@ -342,6 +541,7 @@ def test_execute_method_node_marks_malformed_json_invalid(tmp_path: Path) -> Non
     assert not result.valid
     assert result.executed
     assert "candidate_policy.json" in result.malformed_json
+    assert "malformed_artifacts" in result.failure_kinds
     assert result.exception is None
 
 
@@ -414,6 +614,7 @@ def test_execute_method_node_rejects_incomplete_proposal(tmp_path: Path) -> None
 
     assert not result.valid
     assert "proposal.json missing required fields" in "; ".join(result.errors)
+    assert "contract" in result.failure_kinds
 
 
 def test_execute_method_node_rejects_missing_literature_gap_provenance(tmp_path: Path) -> None:
@@ -696,6 +897,7 @@ def test_execute_method_node_marks_out_of_bounds_write_invalid(tmp_path: Path) -
     assert result.executed
     assert result.exception is None
     assert any(path.endswith("outside.txt") for path in result.out_of_bounds_writes)
+    assert "path_guard" in result.failure_kinds
 
 
 def _write_node(workspace: Path, method_source: str, entrypoint: str = "run") -> None:

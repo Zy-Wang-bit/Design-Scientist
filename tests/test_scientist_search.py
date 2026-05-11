@@ -44,6 +44,31 @@ class FakeWorkspaceBackend:
         )
 
 
+AGENT_REQUIRED_FILES = [
+    "proposal.json",
+    "method.py",
+    "manifest.json",
+    "candidate_policy.json",
+    "novelty_report.json",
+    "benchmark_metrics.json",
+    "validation_report.json",
+]
+
+
+def _successful_agent_result(workspace: Path, *, policy_name: str | None = None) -> WorkspaceAgentResult:
+    return WorkspaceAgentResult(
+        summary="fake backend completed",
+        structured={
+            "summary": "fake backend completed",
+            "policy_name": policy_name or f"{workspace.name}_invented_policy",
+            "policy_entrypoint": "select_batch",
+            "files_written": list(AGENT_REQUIRED_FILES),
+            "contract_notes": [],
+        },
+        returncode=0,
+    )
+
+
 def test_develop_method_writes_local_nodes_and_journal(tmp_path: Path) -> None:
     project = tmp_path / "project"
 
@@ -95,6 +120,34 @@ def test_develop_method_writes_local_nodes_and_journal(tmp_path: Path) -> None:
     assert node_metrics["ranking_score"] == selected["ranking_score"]
 
 
+def test_selected_node_metrics_use_multi_world_summary_and_store_rows(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+
+    result = develop_method(project, nodes=1, use_codex=False, run_id="multi_world_metrics")
+    journal = json.loads(Path(result["journal_path"]).read_text(encoding="utf-8"))
+    selected = journal["selected_node"]
+    selected_record = journal["nodes"][0]
+    node_metrics = json.loads(
+        Path(selected_record["artifacts"]["benchmark_metrics"]).read_text(encoding="utf-8")
+    )
+
+    assert selected["benchmark_metrics"] == node_metrics["synthetic_replay_summary"]
+    assert node_metrics["synthetic_replay"] == node_metrics["synthetic_replay_summary"]
+    assert "world_id" not in selected["benchmark_metrics"]
+    assert selected["benchmark_metrics"]["world_count"] >= 2
+    assert len(node_metrics["synthetic_replay_rows"]) == selected["benchmark_metrics"]["world_count"]
+    assert {
+        row["world_id"]
+        for row in node_metrics["synthetic_replay_rows"]
+    } == {
+        "additive",
+        "epistatic",
+        "confounded_transfer",
+        "noisy_endpoint",
+        "sparse_early_round",
+    }
+
+
 def test_develop_method_uses_fake_workspace_backend_with_node_only_allowed_paths(
     tmp_path: Path,
 ) -> None:
@@ -135,6 +188,66 @@ def test_develop_method_uses_fake_workspace_backend_with_node_only_allowed_paths
     selected_record = next(node for node in journal["nodes"] if node["node_id"] == selected["node_id"])
     assert selected_record["agent"]["structured"]["policy_entrypoint"] == "select_batch"
     assert "synthetic_replay_method" not in selected_record["agent"]["structured"]
+
+
+@pytest.mark.parametrize(
+    ("backend_result", "expected_reason"),
+    [
+        (
+            WorkspaceAgentResult(
+                summary="codex crashed",
+                structured={
+                    "summary": "codex crashed",
+                    "policy_name": "stale_policy",
+                    "policy_entrypoint": "select_batch",
+                    "files_written": list(AGENT_REQUIRED_FILES),
+                    "contract_notes": [],
+                },
+                returncode=2,
+            ),
+            "Codex backend failed with returncode 2",
+        ),
+        (
+            WorkspaceAgentResult(
+                summary="bad structured output",
+                structured={"summary": "missing required fields"},
+                returncode=0,
+            ),
+            "invalid Codex structured output",
+        ),
+    ],
+)
+def test_develop_method_rejects_failed_or_invalid_codex_result_without_stale_execution(
+    tmp_path: Path,
+    backend_result: WorkspaceAgentResult,
+    expected_reason: str,
+) -> None:
+    project = tmp_path / "project"
+    stale_workspace = project / "runs" / "stale_codex" / "nodes" / "node_01_mechanism_aware"
+    _write_fake_method_node(stale_workspace, method_name="mechanism_aware")
+    (stale_workspace / "stale_marker.txt").write_text("must be removed", encoding="utf-8")
+
+    class BadBackend:
+        def run_task(self, task: WorkspaceAgentTask) -> WorkspaceAgentResult:
+            assert Path(task.workspace) == stale_workspace.resolve()
+            return backend_result
+
+    result = develop_method(
+        project,
+        nodes=1,
+        use_codex=True,
+        backend=BadBackend(),
+        run_id="stale_codex",
+    )
+
+    journal = json.loads(Path(result["journal_path"]).read_text(encoding="utf-8"))
+    node = journal["nodes"][0]
+
+    assert node["status"] == "failed"
+    assert node["contract"]["executed"] is False
+    assert expected_reason in "; ".join(node["failure_reasons"])
+    assert journal["selected_node"] is None
+    assert not (stale_workspace / "stale_marker.txt").exists()
 
 
 def test_develop_method_codex_prompt_injects_literature_gap_context(
@@ -362,6 +475,152 @@ def test_develop_method_rejects_post_refresh_overlap_above_threshold(
     assert journal["selected_node"] is None
 
 
+def test_develop_method_rejects_worst_case_overlap_against_any_default_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from design_scientist import scientist_search
+
+    project = tmp_path / "project"
+    backend = FakeWorkspaceBackend()
+
+    def writer(task: WorkspaceAgentTask) -> WorkspaceAgentResult:
+        backend.tasks.append(task)
+        _write_fake_method_node(
+            Path(task.workspace),
+            method_name="mechanism_aware",
+            fake_unique_novelty=True,
+        )
+        return _successful_agent_result(Path(task.workspace))
+
+    backend.run_task = writer  # type: ignore[method-assign]
+
+    def worst_case_overlap_benchmark(
+        root: Path,
+        *,
+        run_id: str,
+        rounds: int,
+        methods: list[object],
+    ) -> dict[str, object]:
+        del rounds
+        method_name = str(getattr(methods[0], "policy_name", None))
+        run_dir = root / "runs" / run_id
+        rows = [
+            {
+                "world_id": "world_low_overlap",
+                "method": method_name,
+                "best_feasible_utility": 1.0,
+                "hit_rate": 0.2,
+                "evidence_coverage": 0.9,
+                "round_efficiency": 0.8,
+                "regret_proxy": 0.1,
+                "false_claim_rate": 0.0,
+                "novelty_score": 0.7,
+                "baseline_overlap": 0.10,
+                "selection_overlap_random_feasible": 0.10,
+                "selection_overlap_fixed_mix": 0.10,
+                "selection_overlap_mechanism_aware": 0.10,
+                "selection_overlap_top_observed": 0.10,
+                "selected_ids_digest": "digest_low",
+                "status": "completed",
+            },
+            {
+                "world_id": "world_top_observed_clone",
+                "method": method_name,
+                "best_feasible_utility": 1.0,
+                "hit_rate": 0.2,
+                "evidence_coverage": 0.9,
+                "round_efficiency": 0.8,
+                "regret_proxy": 0.1,
+                "false_claim_rate": 0.0,
+                "novelty_score": 0.7,
+                "baseline_overlap": 0.10,
+                "selection_overlap_random_feasible": 0.10,
+                "selection_overlap_fixed_mix": 0.10,
+                "selection_overlap_mechanism_aware": 0.10,
+                "selection_overlap_top_observed": 0.91,
+                "selected_ids_digest": "digest_high",
+                "status": "completed",
+            },
+        ]
+        return {
+            "run_id": run_id,
+            "benchmark_results_path": str(run_dir / "benchmark_results.csv"),
+            "ablation_results_path": str(run_dir / "ablation_results.csv"),
+            "summary_results_path": str(run_dir / "benchmark_summary.csv"),
+            "benchmark_results": rows,
+            "ablation_results": [],
+            "summary": {
+                "method_rankings": [
+                    {
+                        "method": method_name,
+                        "world_count": 2,
+                        "mean_best_feasible_utility": 1.0,
+                        "mean_hit_rate": 0.2,
+                        "mean_evidence_coverage": 0.9,
+                        "mean_round_efficiency": 0.8,
+                        "mean_regret_proxy": 0.1,
+                        "mean_false_claim_rate": 0.0,
+                        "mean_novelty_score": 0.7,
+                        "mean_baseline_overlap": 0.10,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(scientist_search, "run_synthetic_benchmark", worst_case_overlap_benchmark)
+
+    result = develop_method(project, nodes=1, use_codex=True, backend=backend, run_id="worst_overlap")
+    journal = json.loads(Path(result["journal_path"]).read_text(encoding="utf-8"))
+    node = journal["nodes"][0]
+    novelty = json.loads(Path(node["artifacts"]["novelty_report"]).read_text(encoding="utf-8"))
+
+    assert node["status"] == "failed"
+    assert novelty["selection_overlap_vs_baselines"] == 0.91
+    assert novelty["nearest_baseline"] == "top_observed"
+    assert novelty["nearest_baseline_world_id"] == "world_top_observed_clone"
+    assert "post-refresh novelty guard" in "; ".join(node["failure_reasons"])
+    assert journal["selected_node"] is None
+
+
+def test_develop_method_namespaces_duplicate_generated_policy_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from design_scientist import scientist_search
+
+    project = tmp_path / "project"
+    backend = FakeWorkspaceBackend()
+
+    def duplicate_name_writer(task: WorkspaceAgentTask) -> WorkspaceAgentResult:
+        backend.tasks.append(task)
+        workspace = Path(task.workspace)
+        method_name = "mechanism_aware" if "node_01" in workspace.name else "fixed_mix"
+        _write_fake_method_node(
+            workspace,
+            method_name=method_name,
+            policy_id="shared_generated_policy",
+        )
+        return _successful_agent_result(workspace, policy_name="shared_generated_policy")
+
+    backend.run_task = duplicate_name_writer  # type: ignore[method-assign]
+    monkeypatch.setattr(scientist_search, "run_synthetic_benchmark", _fake_benchmark_result)
+
+    result = develop_method(project, nodes=2, use_codex=True, backend=backend, run_id="duplicate_names")
+    journal = json.loads(Path(result["journal_path"]).read_text(encoding="utf-8"))
+    policy_names = [
+        node["benchmark_policy_name"]
+        for node in journal["nodes"]
+        if node["benchmark_policy_name"]
+    ]
+
+    assert policy_names == [
+        "node_01_mechanism_aware_shared_generated_policy",
+        "node_02_fixed_mix_shared_generated_policy",
+    ]
+    assert len(policy_names) == len(set(policy_names))
+
+
 def test_run_scientist_search_records_literature_snapshot_and_benchmark_trace(
     tmp_path: Path,
 ) -> None:
@@ -485,6 +744,72 @@ def test_develop_method_rejects_behavioral_clone_even_with_fake_novelty_metadata
     assert journal["selected_node_id"] != first_node["node_id"]
 
 
+def test_develop_method_isolates_entrypoint_and_replay_failures_with_failure_memory(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    backend = FakeWorkspaceBackend()
+
+    def mixed_failure_writer(task: WorkspaceAgentTask) -> WorkspaceAgentResult:
+        backend.tasks.append(task)
+        workspace = Path(task.workspace)
+        if "node_01" in workspace.name:
+            _write_fake_method_node(
+                workspace,
+                method_name="mechanism_aware",
+                policy_entrypoint="external.select_batch",
+            )
+        elif "node_02" in workspace.name:
+            _write_fake_method_node(
+                workspace,
+                method_name="fixed_mix",
+                policy_behavior="raise",
+            )
+        elif "node_03" in workspace.name:
+            _write_fake_method_node(
+                workspace,
+                method_name="pure_lattice_repair",
+                policy_behavior="invalid_selection",
+            )
+        else:
+            _write_fake_method_node(workspace, method_name="greedy_utility")
+        return _successful_agent_result(workspace)
+
+    backend.run_task = mixed_failure_writer  # type: ignore[method-assign]
+
+    result = develop_method(project, nodes=4, use_codex=True, backend=backend, run_id="isolated_failures")
+    journal_path = Path(result["journal_path"])
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    nodes_by_id = {
+        node["node_id"]: node
+        for node in journal["nodes"]
+    }
+
+    assert journal_path.exists()
+    assert nodes_by_id["node_01_mechanism_aware"]["status"] == "failed"
+    assert nodes_by_id["node_02_fixed_mix"]["status"] == "failed"
+    assert nodes_by_id["node_03_pure_lattice_repair"]["status"] == "failed"
+    assert nodes_by_id["node_04_greedy_utility"]["status"] == "completed"
+    assert journal["selected_node_id"] == "node_04_greedy_utility"
+    assert "Unsupported policy entrypoint module" in "; ".join(
+        nodes_by_id["node_01_mechanism_aware"]["failure_reasons"]
+    )
+    assert "synthetic replay failed" in "; ".join(
+        nodes_by_id["node_02_fixed_mix"]["failure_reasons"]
+    )
+    assert "policy replay exploded" in "; ".join(
+        nodes_by_id["node_02_fixed_mix"]["failure_reasons"]
+    )
+    assert "unavailable candidate" in "; ".join(
+        nodes_by_id["node_03_pure_lattice_repair"]["failure_reasons"]
+    )
+
+    failure_memory = (project / "framework" / "failure_memory.jsonl").read_text(encoding="utf-8")
+    assert "node_01_mechanism_aware" in failure_memory
+    assert "node_02_fixed_mix" in failure_memory
+    assert "node_03_pure_lattice_repair" in failure_memory
+
+
 def test_develop_method_rejects_node_writing_to_project_root(tmp_path: Path) -> None:
     project = tmp_path / "project"
     backend = FakeWorkspaceBackend()
@@ -524,7 +849,7 @@ def test_develop_method_rejects_node_writing_to_project_root(tmp_path: Path) -> 
     assert journal["selected_node"] is None
 
 
-def test_policy_callable_extraction_does_not_reimport_method_py(
+def test_policy_callable_extraction_uses_harness_exported_callables(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -559,7 +884,7 @@ def test_policy_callable_extraction_does_not_reimport_method_py(
     journal = json.loads(Path(result["journal_path"]).read_text(encoding="utf-8"))
     workspace = Path(journal["nodes"][0]["workspace"])
 
-    assert (workspace / "import_count.txt").read_text(encoding="utf-8") == "1"
+    assert (workspace / "import_count.txt").read_text(encoding="utf-8") == "2"
 
 
 def test_run_scientist_search_strict_mode_fails_when_method_extraction_fails(
@@ -600,6 +925,8 @@ def _write_fake_method_node(
     project_root_write: bool = False,
     import_counter: bool = False,
     policy_entrypoint: str = "select_batch",
+    policy_id: str | None = None,
+    policy_behavior: str = "normal",
 ) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     import_counter_source = ""
@@ -637,11 +964,12 @@ def _write_fake_method_node(
             {import_counter_source}
 
             METHOD = {method_name!r}
-            POLICY_NAME = {workspace.name + "_invented_policy"!r}
+            POLICY_NAME = {(policy_id or workspace.name + "_invented_policy")!r}
             NO_BASELINE = {no_baseline!r}
             BASELINE_CLONE = {baseline_clone!r}
             BEHAVIORAL_CLONE = {behavioral_clone!r}
             FAKE_UNIQUE_NOVELTY = {fake_unique_novelty!r}
+            POLICY_BEHAVIOR = {policy_behavior!r}
 
 
             def _write(path, data):
@@ -652,6 +980,10 @@ def _write_fake_method_node(
                 budget = max(0, budget)
                 if budget == 0:
                     return []
+                if POLICY_BEHAVIOR == "raise":
+                    raise RuntimeError("policy replay exploded")
+                if POLICY_BEHAVIOR == "invalid_selection":
+                    return ["missing_candidate_id"]
                 pool = [
                     str(candidate.get("variant_id") or candidate.get("candidate_id") or candidate.get("id"))
                     for candidate in sorted(

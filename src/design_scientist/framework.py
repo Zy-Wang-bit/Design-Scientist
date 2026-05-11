@@ -41,12 +41,18 @@ def seed_literature_queries(domain: str) -> list[LiteratureQuery]:
     ]
 
 
-def init_framework(root: str | Path, domain: str) -> FrameworkSpec:
+def init_framework(
+    root: str | Path,
+    domain: str,
+    *,
+    force_domain_update: bool = False,
+) -> FrameworkSpec:
     """Initialize the framework-first artifact layout without running adapters."""
     base = Path(root).expanduser().resolve()
     for rel_dir in FRAMEWORK_BOOTSTRAP_DIRS:
         ensure_dir(base / rel_dir)
 
+    initialize_research_os(base, domain=domain, force_domain_update=force_domain_update)
     spec = FrameworkSpec(
         framework_id=_framework_id(domain),
         domain=domain,
@@ -54,7 +60,6 @@ def init_framework(root: str | Path, domain: str) -> FrameworkSpec:
     )
     write_yaml(base / FRAMEWORK_SPEC, spec)
     write_yaml(base / LITERATURE_QUERIES, {"queries": seed_literature_queries(domain)})
-    initialize_research_os(base, domain=domain)
     return spec
 
 

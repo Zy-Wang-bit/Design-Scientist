@@ -83,6 +83,8 @@ SIMPLE_BASELINE_METHODS = {
     "pure_lattice_repair",
 }
 
+REQUIRED_BENCHMARK_BASELINES = ("random_feasible", "fixed_mix")
+FALSE_CLAIM_RATE_TOLERANCE = 1e-9
 BASELINE_OVERLAP_ERROR_THRESHOLD = 0.85
 
 ALGORITHM_REQUIRED_SECTIONS = (
@@ -271,7 +273,23 @@ def review_framework_run(project_dir: str | Path, run_id: str | None = None) -> 
         findings,
         generated_policy_names,
     )
-    _validate_selected_node_artifacts(root, selected_record, findings, artifacts)
+    _validate_selected_method_benchmark_evidence(
+        benchmark_rows,
+        benchmark_summary_rows,
+        selected_record,
+        _rel(benchmark_path, root),
+        _rel(benchmark_summary_path, root),
+        findings,
+    )
+    _validate_selected_method_false_claim_rate(
+        benchmark_rows,
+        benchmark_summary_rows,
+        selected_record,
+        _rel(benchmark_path, root),
+        _rel(benchmark_summary_path, root),
+        findings,
+    )
+    _validate_selected_node_artifacts(root, run_dir, selected_record, findings, artifacts)
     _validate_selected_trace(root, selected_record, findings)
     _validate_selected_method_majority_wins(
         benchmark_rows,
@@ -861,20 +879,15 @@ def _validate_benchmark_rows(
             "Benchmark results must include mechanism_aware.",
             artifact,
         )
-    baseline_methods = methods & {
-        "random_feasible",
-        "top_observed",
-        "greedy_utility",
-        "fixed_mix",
-        "pure_uncertainty",
-        "pure_lattice_repair",
-    }
-    if not baseline_methods:
+    missing_baselines = [baseline for baseline in REQUIRED_BENCHMARK_BASELINES if baseline not in methods]
+    if missing_baselines:
         _add_finding(
             findings,
             "error",
-            "benchmark_missing_baseline",
-            "Benchmark results must include at least one simple baseline.",
+            "benchmark_missing_required_baselines",
+            "Benchmark results must include required baselines: "
+            + ", ".join(REQUIRED_BENCHMARK_BASELINES)
+            + f". Missing: {', '.join(missing_baselines)}.",
             artifact,
         )
     if registry_policy_names:
@@ -978,6 +991,18 @@ def _validate_benchmark_summary_rows(
             "benchmark_summary.csv must contain a method column.",
             artifact,
         )
+    methods = {row.get("method", "") for row in rows}
+    missing_baselines = [baseline for baseline in REQUIRED_BENCHMARK_BASELINES if baseline not in methods]
+    if missing_baselines:
+        _add_finding(
+            findings,
+            "error",
+            "benchmark_summary_missing_required_baselines",
+            "benchmark_summary.csv must include required baselines: "
+            + ", ".join(REQUIRED_BENCHMARK_BASELINES)
+            + f". Missing: {', '.join(missing_baselines)}.",
+            artifact,
+        )
     required_majority_columns = (
         "world_count",
         "beats_random_feasible_worlds",
@@ -1010,6 +1035,155 @@ def _validate_benchmark_summary_rows(
                 )
 
 
+def _validate_selected_method_benchmark_evidence(
+    benchmark_rows: list[dict[str, str]] | None,
+    summary_rows: list[dict[str, str]] | None,
+    selected_record: dict[str, Any] | None,
+    benchmark_artifact: str,
+    summary_artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    if not selected_record:
+        return
+    selected_method = _selected_benchmark_policy_name(selected_record)
+    if not selected_method:
+        return
+
+    benchmark_methods = _csv_methods(benchmark_rows)
+    if selected_method not in benchmark_methods:
+        _add_finding(
+            findings,
+            "error",
+            "selected_method_missing_benchmark_results",
+            f"Selected benchmark method {selected_method!r} is missing from benchmark_results.csv.",
+            benchmark_artifact,
+        )
+
+    summary_methods = _csv_methods(summary_rows)
+    if selected_method not in summary_methods:
+        _add_finding(
+            findings,
+            "error",
+            "selected_method_missing_benchmark_summary",
+            f"Selected benchmark method {selected_method!r} is missing from benchmark_summary.csv.",
+            summary_artifact,
+        )
+
+
+def _csv_methods(rows: list[dict[str, str]] | None) -> set[str]:
+    if not rows:
+        return set()
+    return {row.get("method", "") for row in rows if row.get("method")}
+
+
+def _validate_selected_method_false_claim_rate(
+    benchmark_rows: list[dict[str, str]] | None,
+    summary_rows: list[dict[str, str]] | None,
+    selected_record: dict[str, Any] | None,
+    benchmark_artifact: str,
+    summary_artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    if not selected_record:
+        return
+    selected_method = _selected_benchmark_policy_name(selected_record)
+    if not selected_method:
+        return
+
+    comparable, violations = _false_claim_rate_violations_by_world(benchmark_rows, selected_method)
+    if comparable:
+        if violations:
+            _add_finding(
+                findings,
+                "error",
+                "selected_method_false_claim_rate_exceeds_baselines",
+                "Selected method false_claim_rate exceeds the worse required baseline in comparable worlds: "
+                + ", ".join(violations[:8])
+                + ".",
+                benchmark_artifact,
+            )
+        return
+
+    summary_violation = _false_claim_rate_summary_violation(summary_rows, selected_method)
+    if summary_violation is not None:
+        _add_finding(
+            findings,
+            "error",
+            "selected_method_false_claim_rate_exceeds_baselines",
+            summary_violation,
+            summary_artifact,
+        )
+
+
+def _false_claim_rate_violations_by_world(
+    rows: list[dict[str, str]] | None,
+    selected_method: str,
+) -> tuple[int, list[str]]:
+    if not rows or "world_id" not in rows[0] or "false_claim_rate" not in rows[0]:
+        return 0, []
+
+    by_world_method: dict[tuple[str, str], dict[str, str]] = {}
+    worlds: set[str] = set()
+    for row in rows:
+        method = row.get("method")
+        world_id = row.get("world_id")
+        if not method or not world_id:
+            continue
+        worlds.add(world_id)
+        by_world_method[(world_id, method)] = row
+
+    comparable = 0
+    violations: list[str] = []
+    for world_id in sorted(worlds):
+        selected = by_world_method.get((world_id, selected_method))
+        baselines = [
+            by_world_method.get((world_id, baseline))
+            for baseline in REQUIRED_BENCHMARK_BASELINES
+        ]
+        if selected is None or any(row is None for row in baselines):
+            continue
+        selected_rate = _to_float(selected.get("false_claim_rate"))
+        baseline_rates = [
+            _to_float(row.get("false_claim_rate")) for row in baselines if row is not None
+        ]
+        if selected_rate is None or any(rate is None for rate in baseline_rates):
+            continue
+        comparable += 1
+        worst_baseline = max(rate for rate in baseline_rates if rate is not None)
+        if selected_rate > worst_baseline + FALSE_CLAIM_RATE_TOLERANCE:
+            violations.append(f"{world_id} ({selected_rate:g} > {worst_baseline:g})")
+    return comparable, violations
+
+
+def _false_claim_rate_summary_violation(
+    rows: list[dict[str, str]] | None,
+    selected_method: str,
+) -> str | None:
+    if not rows:
+        return None
+    by_method = {row.get("method", ""): row for row in rows if row.get("method")}
+    selected = by_method.get(selected_method)
+    baselines = [by_method.get(baseline) for baseline in REQUIRED_BENCHMARK_BASELINES]
+    if selected is None or any(row is None for row in baselines):
+        return None
+
+    selected_rate = _first_float(selected, ("mean_false_claim_rate", "false_claim_rate"))
+    baseline_rates = [
+        _first_float(row, ("mean_false_claim_rate", "false_claim_rate"))
+        for row in baselines
+        if row is not None
+    ]
+    if selected_rate is None or any(rate is None for rate in baseline_rates):
+        return None
+    worst_baseline = max(rate for rate in baseline_rates if rate is not None)
+    if selected_rate <= worst_baseline + FALSE_CLAIM_RATE_TOLERANCE:
+        return None
+    return (
+        "Selected method summary false_claim_rate exceeds the worse required baseline: "
+        f"{selected_rate:g} > {worst_baseline:g}."
+    )
+
+
 def _validate_selected_method_majority_wins(
     benchmark_rows: list[dict[str, str]] | None,
     rows: list[dict[str, str]] | None,
@@ -1025,6 +1199,7 @@ def _validate_selected_method_majority_wins(
         return
 
     benchmark_signal = _per_world_benchmark_win_signal(benchmark_rows, selected_method)
+    comparable_signal_found = benchmark_signal is not None
     if benchmark_signal is not None:
         _add_majority_failure_findings(
             benchmark_signal,
@@ -1034,6 +1209,7 @@ def _validate_selected_method_majority_wins(
 
     aggregate = _aggregate_summary_win_signal(rows or [], selected_method)
     if aggregate is not None:
+        comparable_signal_found = True
         _add_majority_failure_findings(
             aggregate,
             findings,
@@ -1052,7 +1228,16 @@ def _validate_selected_method_majority_wins(
 
     per_world = _per_world_summary_win_signal(rows or [], selected_method)
     if per_world is None:
+        if not comparable_signal_found:
+            _add_finding(
+                findings,
+                "error",
+                "selected_method_missing_comparable_majority_signal",
+                "Selected method has no comparable majority-world signal against random_feasible and fixed_mix.",
+                summary_artifact,
+            )
         return
+    comparable_signal_found = True
     _add_majority_failure_findings(
         per_world,
         findings,
@@ -1321,7 +1506,23 @@ def _validate_scientist_journal(
             artifact,
         )
     contract = selected_record.get("contract")
-    if isinstance(contract, dict) and contract.get("valid") is not True:
+    if contract is None:
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_contract_missing",
+            f"Selected node {selected_node_id!r} is missing its method-node contract.",
+            artifact,
+        )
+    elif not isinstance(contract, dict):
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_contract_invalid",
+            f"Selected node {selected_node_id!r} contract must be a mapping with valid: true.",
+            artifact,
+        )
+    elif contract.get("valid") is not True:
         _add_finding(
             findings,
             "error",
@@ -1334,6 +1535,7 @@ def _validate_scientist_journal(
 
 def _validate_selected_node_artifacts(
     root: Path,
+    run_dir: Path,
     selected_record: dict[str, Any] | None,
     findings: list[dict[str, Any]],
     artifacts: dict[str, str],
@@ -1343,6 +1545,7 @@ def _validate_selected_node_artifacts(
 
     workspace_value = selected_record.get("workspace")
     workspace = _coerce_path(root, workspace_value) if workspace_value else None
+    allowed_roots = _selected_artifact_allowed_roots(workspace, run_dir)
     artifact_map = selected_record.get("artifacts") if isinstance(selected_record.get("artifacts"), dict) else {}
     loaded_json: dict[str, Any] = {}
 
@@ -1363,23 +1566,7 @@ def _validate_selected_node_artifacts(
             continue
 
         artifacts[f"selected_node_{key}"] = str(path)
-        if not path.exists():
-            _add_finding(
-                findings,
-                "error",
-                f"missing_selected_node_{key}",
-                f"Missing selected node artifact {filename}.",
-                _rel(path, root),
-            )
-            continue
-        if path.is_file() and path.stat().st_size == 0:
-            _add_finding(
-                findings,
-                "error",
-                f"empty_selected_node_{key}",
-                f"Selected node artifact {filename} is empty.",
-                _rel(path, root),
-            )
+        if not _validate_selected_artifact_file(root, path, key, filename, allowed_roots, findings):
             continue
         if filename.endswith(".json"):
             data = _load_json(path, f"selected_node_{key}", findings)
@@ -1425,23 +1612,7 @@ def _validate_selected_node_artifacts(
         if not required and not exists:
             continue
         artifacts[f"selected_node_{key}"] = str(path)
-        if not exists:
-            _add_finding(
-                findings,
-                "error",
-                f"missing_selected_node_{key}",
-                f"Missing selected node artifact {filename}.",
-                _rel(path, root),
-            )
-            continue
-        if path.is_file() and path.stat().st_size == 0:
-            _add_finding(
-                findings,
-                "error",
-                f"empty_selected_node_{key}",
-                f"Selected node artifact {filename} is empty.",
-                _rel(path, root),
-            )
+        if not _validate_selected_artifact_file(root, path, key, filename, allowed_roots, findings):
             continue
 
         data = _load_json(path, f"selected_node_{key}", findings)
@@ -1459,7 +1630,88 @@ def _validate_selected_node_artifacts(
             findings,
         )
 
-    _validate_optional_selected_node_artifacts(root, selected_record, workspace, artifact_map, findings, artifacts)
+    _validate_optional_selected_node_artifacts(
+        root,
+        selected_record,
+        workspace,
+        run_dir,
+        artifact_map,
+        findings,
+        artifacts,
+    )
+
+
+def _selected_artifact_allowed_roots(workspace: Path | None, run_dir: Path) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    if workspace is not None:
+        roots.append(_safe_resolve(workspace))
+    roots.append(_safe_resolve(run_dir))
+    return tuple(roots)
+
+
+def _validate_selected_artifact_file(
+    root: Path,
+    path: Path,
+    key: str,
+    filename: str,
+    allowed_roots: tuple[Path, ...],
+    findings: list[dict[str, Any]],
+) -> bool:
+    if not _is_under_any(path, allowed_roots):
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_artifact_outside_allowed_roots",
+            f"Selected node artifact {key} must resolve under the selected workspace or run directory.",
+            _rel(path, root),
+        )
+        return False
+    if not path.exists():
+        _add_finding(
+            findings,
+            "error",
+            f"missing_selected_node_{key}",
+            f"Missing selected node artifact {filename}.",
+            _rel(path, root),
+        )
+        return False
+    if not path.is_file():
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_artifact_not_file",
+            f"Selected node artifact {key} must be a non-empty file.",
+            _rel(path, root),
+        )
+        return False
+    if path.stat().st_size == 0:
+        _add_finding(
+            findings,
+            "error",
+            f"empty_selected_node_{key}",
+            f"Selected node artifact {filename} is empty.",
+            _rel(path, root),
+        )
+        return False
+    return True
+
+
+def _is_under_any(path: Path, roots: tuple[Path, ...]) -> bool:
+    candidate = _safe_resolve(path)
+    for root in roots:
+        try:
+            candidate.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _safe_resolve(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve()
+    except OSError:
+        return path.expanduser()
 
 
 def _selected_node_is_v2(
@@ -1691,10 +1943,12 @@ def _validate_optional_selected_node_artifacts(
     root: Path,
     selected_record: dict[str, Any],
     workspace: Path | None,
+    run_dir: Path,
     artifact_map: dict[str, Any],
     findings: list[dict[str, Any]],
     artifacts: dict[str, str],
 ) -> None:
+    allowed_roots = _selected_artifact_allowed_roots(workspace, run_dir)
     optional_keys = {
         key
         for key in artifact_map
@@ -1712,23 +1966,7 @@ def _validate_optional_selected_node_artifacts(
         if path is None:
             continue
         artifacts[f"selected_node_{key}"] = str(path)
-        if not path.exists():
-            _add_finding(
-                findings,
-                "error",
-                f"missing_selected_node_{key}",
-                f"Missing selected node artifact {path.name}.",
-                _rel(path, root),
-            )
-            continue
-        if path.is_file() and path.stat().st_size == 0:
-            _add_finding(
-                findings,
-                "error",
-                f"empty_selected_node_{key}",
-                f"Selected node artifact {path.name} is empty.",
-                _rel(path, root),
-            )
+        if not _validate_selected_artifact_file(root, path, key, path.name, allowed_roots, findings):
             continue
         if _is_design_space_key(key):
             _validate_design_space_artifact(path, root, findings)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,6 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
     init_framework = subparsers.add_parser("init-framework", help="Initialize framework-first artifacts")
     init_framework.add_argument("root")
     init_framework.add_argument("--domain", required=True)
+    init_framework.add_argument(
+        "--force-domain-update",
+        action="store_true",
+        help="Rewrite existing Research OS domain metadata when it differs from --domain",
+    )
 
     audit_references = subparsers.add_parser(
         "audit-references", help="Audit local reference repositories"
@@ -23,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_references.add_argument("root")
 
     literature_search = subparsers.add_parser(
-        "literature-search", help="Run framework literature search"
+        "literature-search", help="debug/development: run framework literature search only"
     )
     literature_search.add_argument("root")
     literature_search.add_argument("--max-papers", type=int, default=60)
@@ -31,12 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
     literature_search.add_argument("--sources", nargs="*")
 
     extract_methods = subparsers.add_parser(
-        "extract-methods", help="Extract method modules from literature cards"
+        "extract-methods", help="debug/development: extract method modules only"
     )
     extract_methods.add_argument("root")
 
     develop_method = subparsers.add_parser(
-        "develop-method", help="Develop and rank controlled method nodes"
+        "develop-method", help="debug/development: develop and rank method nodes only"
     )
     develop_method.add_argument("root")
     develop_method.add_argument("--nodes", type=int, default=3)
@@ -44,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     develop_method.add_argument("--run-id")
 
     benchmark_methods = subparsers.add_parser(
-        "benchmark-methods", help="Run synthetic replay method benchmarks"
+        "benchmark-methods", help="debug/development: run baseline-only synthetic replay benchmarks"
     )
     benchmark_methods.add_argument("root")
     benchmark_methods.add_argument("--rounds", type=int, default=3)
@@ -52,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_methods.add_argument("--run-id")
 
     run_scientist = subparsers.add_parser(
-        "run-scientist", help="Run the framework scientist loop"
+        "run-scientist", help="recommended full-chain framework scientist loop"
     )
     run_scientist.add_argument("root")
     run_scientist.add_argument("--max-papers", type=int, default=60)
@@ -76,7 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
     build_state = subparsers.add_parser("build-state", help="Build project design state")
     build_state.add_argument("project_dir")
 
-    literature = subparsers.add_parser("literature", help="Create seed paper cards and gap matrix")
+    literature = subparsers.add_parser(
+        "literature", help="Legacy project execution: create seed cards and gap matrix"
+    )
     literature.add_argument("project_dir")
 
     hypotheses = subparsers.add_parser("hypotheses", help="Build or update hypothesis board")
@@ -124,7 +132,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init-framework":
         from design_scientist.framework import init_framework
 
-        init_framework(args.root, domain=args.domain)
+        try:
+            init_framework(
+                args.root,
+                domain=args.domain,
+                force_domain_update=args.force_domain_update,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
         return 0
     if args.command == "audit-references":
         from design_scientist.reference_audit import audit_references
@@ -165,11 +180,18 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if args.command == "benchmark-methods":
-        from design_scientist.synthetic_replay import run_synthetic_benchmark
+        from design_scientist.synthetic_replay import DEFAULT_RUN_ID, run_synthetic_benchmark
 
+        run_id = args.run_id or f"baseline_{DEFAULT_RUN_ID}"
+        run_dir = Path(args.root).expanduser().resolve() / "runs" / run_id
+        if (run_dir / "scientist_journal.json").exists():
+            parser.error(
+                "benchmark-methods refuses to write into an existing scientist run; "
+                "choose a baseline-only --run-id or omit --run-id to use the baseline default"
+            )
         result = run_synthetic_benchmark(
             args.root,
-            run_id=args.run_id,
+            run_id=run_id,
             rounds=args.rounds,
             budget=args.budget,
         )

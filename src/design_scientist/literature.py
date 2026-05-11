@@ -82,6 +82,8 @@ METHOD_FAMILIES = [
     },
 ]
 
+LEGACY_SEED_PAPER_CARDS = "legacy_seed_paper_cards.json"
+
 
 def create_seed_paper_cards(project_dir: str | Path) -> Path:
     root = Path(project_dir).expanduser().resolve()
@@ -94,9 +96,9 @@ def create_seed_paper_cards(project_dir: str | Path) -> Path:
         card["relevance_to_current_project"] = project.get("goal", "general iterative variant design")
         card["review_status"] = "seed_unverified"
         cards.append(card)
-    out = framework_dir / "paper_cards.json"
+    out = framework_dir / LEGACY_SEED_PAPER_CARDS
     write_json(out, cards)
-    print(f"Wrote seed paper cards: {out}")
+    print(f"Wrote legacy seed paper cards: {out}")
     return out
 
 
@@ -156,4 +158,3 @@ def build_research_gap_matrix(project_dir: str | Path) -> Path:
         writer.writerows(rows)
     print(f"Wrote research gap matrix: {out}")
     return out
-

@@ -310,8 +310,10 @@ def run_synthetic_benchmark(
 
     benchmark_rows: list[dict[str, Any]] = []
     ablation_rows: list[dict[str, Any]] = []
-    random_reference = MethodSpec("random_feasible", policy_api.random_feasible)
-    fixed_mix_reference = MethodSpec("fixed_mix", policy_api.fixed_mix)
+    reference_specs = {
+        method_name: MethodSpec(method_name, policy_api.get_policy(method_name))
+        for method_name in DEFAULT_METHODS
+    }
     mechanism_reference = MethodSpec("mechanism_aware", policy_api.mechanism_aware)
 
     for context in world_contexts:
@@ -322,7 +324,7 @@ def run_synthetic_benchmark(
         truth = context["truth"]
 
         world_results = [
-            _run_replay(
+            _run_replay_safely(
                 method,
                 world=world,
                 variants=variants,
@@ -334,55 +336,27 @@ def run_synthetic_benchmark(
             )
             for method in method_specs
         ]
-        random_result = next(
-            (result for result in world_results if result["method"] == "random_feasible"),
-            None,
-        )
-        if random_result is None:
-            random_result = _run_replay(
-                random_reference,
-                world=world,
-                variants=variants,
-                observations_by_id=observations_by_id,
-                initial_ids=initial_ids,
-                rounds=rounds,
-                budget=budget,
-                ablation=None,
+        reference_results: dict[str, dict[str, Any]] = {}
+        for reference_name, reference_spec in reference_specs.items():
+            reference_result = next(
+                (result for result in world_results if result["method"] == reference_name),
+                None,
             )
-        fixed_mix_result = next(
-            (result for result in world_results if result["method"] == "fixed_mix"),
-            None,
-        )
-        if fixed_mix_result is None:
-            fixed_mix_result = _run_replay(
-                fixed_mix_reference,
-                world=world,
-                variants=variants,
-                observations_by_id=observations_by_id,
-                initial_ids=initial_ids,
-                rounds=rounds,
-                budget=budget,
-                ablation=None,
-            )
-        mechanism_result = next(
-            (result for result in world_results if result["method"] == "mechanism_aware"),
-            None,
-        )
-        if mechanism_result is None:
-            mechanism_result = _run_replay(
-                mechanism_reference,
-                world=world,
-                variants=variants,
-                observations_by_id=observations_by_id,
-                initial_ids=initial_ids,
-                rounds=rounds,
-                budget=budget,
-                ablation=None,
-            )
+            if reference_result is None:
+                reference_result = _run_replay_safely(
+                    reference_spec,
+                    world=world,
+                    variants=variants,
+                    observations_by_id=observations_by_id,
+                    initial_ids=initial_ids,
+                    rounds=rounds,
+                    budget=budget,
+                    ablation=None,
+                )
+            reference_results[reference_name] = reference_result
         reference_selected_ids = {
-            "mechanism_aware": set(mechanism_result["selected_ids"]),
-            "random_feasible": set(random_result["selected_ids"]),
-            "fixed_mix": set(fixed_mix_result["selected_ids"]),
+            method_name: set(result["selected_ids"])
+            for method_name, result in reference_results.items()
         }
 
         for result in world_results:
@@ -404,7 +378,7 @@ def run_synthetic_benchmark(
                 )
             benchmark_rows.append(row)
 
-        full_mechanism = _run_replay(
+        full_mechanism = _run_replay_safely(
             mechanism_reference,
             world=world,
             variants=variants,
@@ -423,7 +397,7 @@ def run_synthetic_benchmark(
             "evidence_guardrail",
         ):
             ablation = None if removed_component == "none" else removed_component
-            result = full_mechanism if ablation is None else _run_replay(
+            result = full_mechanism if ablation is None else _run_replay_safely(
                 mechanism_reference,
                 world=world,
                 variants=variants,
@@ -771,6 +745,69 @@ def _initial_observation_ids(
             _variant_id("screening_bg", ("HA23K", "KD31N")),
         ]
     return [variant_id for variant_id in requested if variant_id in observations_by_id]
+
+
+def _run_replay_safely(
+    method: MethodSpec,
+    *,
+    world: WorldSpec,
+    variants: list[SyntheticVariant],
+    observations_by_id: dict[str, SyntheticObservation],
+    initial_ids: list[str],
+    rounds: int,
+    budget: int,
+    ablation: str | None,
+) -> dict[str, Any]:
+    try:
+        result = _run_replay(
+            method,
+            world=world,
+            variants=variants,
+            observations_by_id=observations_by_id,
+            initial_ids=initial_ids,
+            rounds=rounds,
+            budget=budget,
+            ablation=ablation,
+        )
+    except Exception as exc:
+        return _failed_replay_result(
+            method,
+            world=world,
+            initial_observation_count=len(initial_ids),
+            error=f"{type(exc).__name__}: {exc}",
+            ablation=ablation,
+        )
+    result["status"] = "completed"
+    result["error"] = ""
+    return result
+
+
+def _failed_replay_result(
+    method: MethodSpec,
+    *,
+    world: WorldSpec,
+    initial_observation_count: int,
+    error: str,
+    ablation: str | None,
+) -> dict[str, Any]:
+    return {
+        "world_id": world.world_id,
+        "method": method.name,
+        "ablation": ablation,
+        "selected_count": 0,
+        "total_observations": initial_observation_count,
+        "selected_ids": tuple(),
+        "metrics": {
+            "best_feasible_utility": 0.0,
+            "hit_rate": 0.0,
+            "regret_proxy": 1.0,
+            "false_claim_rate": 1.0,
+            "evidence_coverage": 0.0,
+            "round_efficiency": 0.0,
+        },
+        "status": "failed",
+        "error": error,
+    }
 
 
 def _run_replay(
@@ -1426,6 +1463,8 @@ def _result_row(
     return {
         "world_id": result["world_id"],
         "method": result["method"],
+        "status": result.get("status", "completed"),
+        "error": result.get("error", ""),
         "rounds": rounds,
         "budget_per_round": budget,
         "initial_observations": initial_observations,
@@ -1493,11 +1532,26 @@ def _benchmark_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     rankings: list[dict[str, Any]] = []
     for method, method_rows in by_method.items():
         worlds = {str(row["world_id"]) for row in method_rows}
+        failed_worlds = sum(
+            1
+            for row in method_rows
+            if str(row.get("status") or "completed") != "completed"
+        )
         majority_signal = _majority_signal(method_rows, by_world_method)
         rankings.append(
             {
                 "method": method,
+                "status": (
+                    "failed"
+                    if failed_worlds == len(method_rows)
+                    else "partial_failed" if failed_worlds else "completed"
+                ),
                 "world_count": len(worlds),
+                "failed_worlds": failed_worlds,
+                "rounds": int(max(float(row.get("rounds", 0) or 0) for row in method_rows)),
+                "budget_per_round": int(
+                    max(float(row.get("budget_per_round", 0) or 0) for row in method_rows)
+                ),
                 "mean_best_feasible_utility": _round_metric(
                     mean(float(row["best_feasible_utility"]) for row in method_rows)
                 ),
@@ -1506,6 +1560,15 @@ def _benchmark_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 ),
                 "mean_hit_rate": _round_metric(
                     mean(float(row["hit_rate"]) for row in method_rows)
+                ),
+                "mean_false_claim_rate": _round_metric(
+                    mean(float(row["false_claim_rate"]) for row in method_rows)
+                ),
+                "mean_evidence_coverage": _round_metric(
+                    mean(float(row["evidence_coverage"]) for row in method_rows)
+                ),
+                "mean_round_efficiency": _round_metric(
+                    mean(float(row["round_efficiency"]) for row in method_rows)
                 ),
                 "mean_novelty_score": _round_metric(
                     mean(float(row["novelty_score"]) for row in method_rows)
@@ -1519,6 +1582,7 @@ def _benchmark_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     rankings.sort(
         key=lambda row: (
+            row["status"] == "completed",
             float(row["mean_best_feasible_utility"]),
             -float(row["mean_regret_proxy"]),
             float(row["mean_hit_rate"]),

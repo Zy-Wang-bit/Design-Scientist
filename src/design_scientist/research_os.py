@@ -13,7 +13,7 @@ try:
 except ImportError:  # pragma: no cover - POSIX path is used in CI/dev.
     fcntl = None
 
-from design_scientist.io import ensure_dir, write_json, write_yaml
+from design_scientist.io import ensure_dir, read_json, read_yaml, write_json, write_yaml
 from design_scientist.schemas import to_plain_data
 
 QUEST_ARTIFACT = "framework/quest.yaml"
@@ -96,7 +96,12 @@ def _default_research_map(domain: str) -> dict[str, Any]:
     }
 
 
-def initialize_research_os(root: str | Path, *, domain: str) -> dict[str, Path]:
+def initialize_research_os(
+    root: str | Path,
+    *,
+    domain: str,
+    force_domain_update: bool = False,
+) -> dict[str, Path]:
     """Create Research OS control files without truncating existing memory logs."""
     base = _base(root)
     framework_dir = ensure_dir(base / "framework")
@@ -106,6 +111,8 @@ def initialize_research_os(root: str | Path, *, domain: str) -> dict[str, Path]:
         "findings_memory": base / FINDINGS_MEMORY_ARTIFACT,
         "failure_memory": base / FAILURE_MEMORY_ARTIFACT,
     }
+
+    _validate_or_update_domain_files(paths, domain=domain, force_domain_update=force_domain_update)
 
     if not paths["quest"].exists():
         write_yaml(paths["quest"], _default_quest(domain))
@@ -120,16 +127,51 @@ def initialize_research_os(root: str | Path, *, domain: str) -> dict[str, Path]:
     return paths
 
 
+def _validate_or_update_domain_files(
+    paths: dict[str, Path],
+    *,
+    domain: str,
+    force_domain_update: bool,
+) -> None:
+    existing: list[tuple[str, Path, str]] = []
+    if paths["quest"].exists():
+        quest = read_yaml(paths["quest"])
+        existing_domain = str(quest.get("domain") or "").strip()
+        if existing_domain and existing_domain != domain:
+            existing.append(("quest", paths["quest"], existing_domain))
+    if paths["research_map"].exists():
+        research_map = read_json(paths["research_map"])
+        if isinstance(research_map, dict):
+            existing_domain = str(research_map.get("domain") or "").strip()
+            if existing_domain and existing_domain != domain:
+                existing.append(("research_map", paths["research_map"], existing_domain))
+
+    if existing and not force_domain_update:
+        labels = ", ".join(
+            f"{label} has domain {existing_domain!r}" for label, _path, existing_domain in existing
+        )
+        raise ValueError(
+            "Research OS domain mismatch: "
+            f"{labels}; requested domain {domain!r}. "
+            "Pass --force-domain-update to rewrite Research OS domain metadata."
+        )
+    if force_domain_update:
+        if paths["quest"].exists():
+            write_yaml(paths["quest"], _default_quest(domain))
+        if paths["research_map"].exists():
+            write_json(paths["research_map"], _default_research_map(domain))
+
+
 def _normalize_memory_record(record_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     summary = str(payload.get("summary") or "").strip()
     if not summary:
         raise ValueError(f"{record_type} memory records require a non-empty summary")
     record = {
+        **payload,
         "schema_version": 1,
         "record_type": record_type,
         "record_id": f"{record_type}_{uuid4().hex[:12]}",
         "created_at": _now(),
-        **payload,
     }
     return to_plain_data(record)
 

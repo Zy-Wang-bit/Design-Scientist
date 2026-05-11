@@ -244,6 +244,86 @@ def test_policy_api_accepts_synthetic_variant_records_directly() -> None:
     assert set(selected) <= {candidate.variant_id for candidate in candidates}
 
 
+def test_policy_selectors_exclude_infeasible_and_forbidden_candidate_records() -> None:
+    observed = [
+        {
+            "variant_id": "real_bg__WT",
+            "background": "real_bg",
+            "modules": (),
+            "observed_utility": 0.50,
+            "target_background": "real_bg",
+        }
+    ]
+    candidates = [
+        {
+            "candidate_id": "infeasible_high_score",
+            "background": "real_bg",
+            "modules": ["HD110H"],
+            "score": 99.0,
+            "target_background": "real_bg",
+            "feasibility_status": "infeasible",
+            "cost": 1.0,
+        },
+        {
+            "candidate_id": "forbidden_pair",
+            "background": "real_bg",
+            "modules": ["KD31N", "SY92F"],
+            "score": 98.0,
+            "target_background": "real_bg",
+            "feasibility_status": "feasible",
+            "cost": 1.0,
+        },
+        {
+            "candidate_id": "valid_singleton",
+            "background": "real_bg",
+            "modules": ["HG56H"],
+            "score": 0.1,
+            "target_background": "real_bg",
+            "feasibility_status": "feasible",
+            "cost": 1.0,
+        },
+    ]
+
+    for method in policies.DEFAULT_POLICY_NAMES:
+        selected = policies.get_policy(method)(
+            observed,
+            candidates,
+            budget=3,
+            round_index=1,
+            rng=random.Random(31),
+        )
+
+        assert selected == ["valid_singleton"]
+
+
+def test_policy_records_from_real_candidates_preserve_target_context() -> None:
+    candidate = Candidate(
+        candidate_id="real_bg__HD110H",
+        operator="add_module",
+        category="champion",
+        target_system="1E62",
+        background="real_bg",
+        modules=["HD110H"],
+        score_components={"performance": 0.5},
+    )
+
+    normalized = policies.to_policy_record(candidate)
+    selected = policies.mechanism_aware(
+        observed=[],
+        candidates=[candidate],
+        budget=1,
+        round_index=1,
+        rng=random.Random(37),
+    )
+
+    assert normalized["target_background"] == "real_bg"
+    assert normalized["design_context"] == {
+        "target_system": "1E62",
+        "target_background": "real_bg",
+    }
+    assert selected == ["real_bg__HD110H"]
+
+
 def test_select_panel_is_budgeted_subset_deterministic_and_diagnostic() -> None:
     candidates = [
         Candidate(

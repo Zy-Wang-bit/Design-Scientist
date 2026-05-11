@@ -7,6 +7,8 @@ from typing import Any
 from design_scientist.schemas import AcquisitionPolicy, Candidate
 
 
+FORBIDDEN_MODULE_PAIRS = frozenset({("KD31N", "SY92F")})
+
 POLICIES = {
     "mechanism_aware": {
         "performance": 1.0,
@@ -33,6 +35,18 @@ POLICIES = {
         "risk": -0.4,
     },
 }
+
+
+def has_forbidden_module_pair(modules: list[str] | tuple[str, ...]) -> bool:
+    module_set = {str(module) for module in modules}
+    return any(set(pair).issubset(module_set) for pair in FORBIDDEN_MODULE_PAIRS)
+
+
+def candidate_is_selectable(candidate: Candidate) -> bool:
+    return (
+        candidate.feasibility_status != "infeasible"
+        and not has_forbidden_module_pair(candidate.modules)
+    )
 
 
 def default_policy(name: str = "mechanism_aware") -> AcquisitionPolicy:
@@ -66,4 +80,3 @@ def metrics_for_candidate(candidate: Candidate, policy: AcquisitionPolicy) -> di
         "score_components": candidate.score_components,
         "risk_flags": candidate.risk_flags,
     }
-

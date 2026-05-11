@@ -266,7 +266,7 @@ design-scientist = "design_scientist.cli:main"
 
 主要命令分为两组。
 
-Framework R&D 命令：
+Framework R&D 命令中，`run-scientist` 是推荐的 full-chain 路径；其余分阶段命令主要用于 debug/development：
 
 ```bash
 design-scientist init-framework
@@ -390,14 +390,30 @@ export NCBI_TOOL=design_scientist
 export NCBI_API_KEY=...   # 可选
 ```
 
-然后运行：
+然后仍优先运行 full-chain：
+
+```bash
+uv run design-scientist run-scientist /tmp/my_design_scientist_project \
+  --max-papers 60 \
+  --nodes 4 \
+  --rounds 3
+
+uv run design-scientist review-framework /tmp/my_design_scientist_project
+```
+
+分阶段命令只作为 debug/development 入口。若故意拆开运行，需要在 `review-framework` 前写出 `method_report.md`；`benchmark-methods` 默认写入独立的 baseline-only run：
 
 ```bash
 uv run design-scientist literature-search /tmp/my_design_scientist_project --max-papers 60
 uv run design-scientist extract-methods /tmp/my_design_scientist_project
 uv run design-scientist develop-method /tmp/my_design_scientist_project --nodes 4
-uv run design-scientist benchmark-methods /tmp/my_design_scientist_project --rounds 3
-uv run design-scientist review-framework /tmp/my_design_scientist_project
+uv run design-scientist benchmark-methods /tmp/my_design_scientist_project \
+  --run-id baseline_synthetic_replay_seed_1729 \
+  --rounds 3
+uv run python -m design_scientist.method_report /tmp/my_design_scientist_project \
+  --run-id <debug_run_id>
+uv run design-scientist review-framework /tmp/my_design_scientist_project \
+  --run-id <debug_run_id>
 ```
 
 如果要让本地 Codex 参与生成 method node：

@@ -90,6 +90,9 @@ def run_literature_search(
     in DESIGN_SCIENTIST_LITERATURE_FIXTURES.
     """
 
+    if max_papers <= 0:
+        raise ValueError("max_papers must be positive")
+
     root = Path(project_dir).expanduser().resolve()
     framework_dir = ensure_dir(root / "framework")
     cache_dir = ensure_dir(framework_dir / "cache" / "literature_raw")
@@ -117,20 +120,35 @@ def run_literature_search(
             adapter = SOURCE_ADAPTERS.get(source)
             if adapter is None:
                 raise ValueError(f"Unknown literature source: {source}")
-            if _should_skip_semantic_scholar(source, offline_fixtures=offline_fixtures):
+            source_cache_dir = _source_cache_dir(cache_dir, query_id=query["query_id"], source=source)
+            pre_cache_files = _cache_files(source_cache_dir)
+            cache_complete = _source_cache_complete(source, source_cache_dir, pre_cache_files)
+            if _should_skip_semantic_scholar(
+                source,
+                offline_fixtures=offline_fixtures,
+                cache_complete=cache_complete,
+            ):
+                event = {
+                    "event": "source_skip",
+                    "status": "skipped",
+                    "query_id": query["query_id"],
+                    "source": source,
+                    "raw_count": 0,
+                    "normalized_count": 0,
+                    "reason": "missing_s2_api_key",
+                }
                 events.append(
-                    {
-                        "event": "source_skip",
-                        "status": "skipped",
-                        "query_id": query["query_id"],
-                        "source": source,
-                        "raw_count": 0,
-                        "normalized_count": 0,
-                        "reason": "missing_s2_api_key",
-                    }
+                    _with_source_event_metadata(
+                        event,
+                        source=source,
+                        source_cache_dir=source_cache_dir,
+                        project_root=root,
+                        offline_fixtures=offline_fixtures,
+                        cache_complete=cache_complete,
+                        network_fetch=False,
+                    )
                 )
                 continue
-            source_cache_dir = _source_cache_dir(cache_dir, query_id=query["query_id"], source=source)
             if source in cooldown_sources:
                 event = {
                     "event": "source_skip",
@@ -141,7 +159,17 @@ def run_literature_search(
                     "normalized_count": 0,
                     "reason": f"previous_{source}_error",
                 }
-                events.append(_with_cache_metadata(event, source_cache_dir=source_cache_dir, project_root=root))
+                events.append(
+                    _with_source_event_metadata(
+                        event,
+                        source=source,
+                        source_cache_dir=source_cache_dir,
+                        project_root=root,
+                        offline_fixtures=offline_fixtures,
+                        cache_complete=cache_complete,
+                        network_fetch=False,
+                    )
+                )
                 continue
             try:
                 source_cards = adapter(
@@ -163,7 +191,17 @@ def run_literature_search(
                     "result_count": len(annotated_cards),
                     "paper_ids": [card["paper_id"] for card in annotated_cards if card.get("paper_id")],
                 }
-                events.append(_with_cache_metadata(event, source_cache_dir=source_cache_dir, project_root=root))
+                events.append(
+                    _with_source_event_metadata(
+                        event,
+                        source=source,
+                        source_cache_dir=source_cache_dir,
+                        project_root=root,
+                        offline_fixtures=offline_fixtures,
+                        cache_complete=cache_complete,
+                        network_fetch=not cache_complete and not offline_fixtures,
+                    )
+                )
             except LiteratureSourceTemporarilyUnavailable as exc:
                 event = {
                     "event": "source_skip",
@@ -175,7 +213,17 @@ def run_literature_search(
                     "reason": str(exc),
                     "error_type": type(exc).__name__,
                 }
-                events.append(_with_cache_metadata(event, source_cache_dir=source_cache_dir, project_root=root))
+                events.append(
+                    _with_source_event_metadata(
+                        event,
+                        source=source,
+                        source_cache_dir=source_cache_dir,
+                        project_root=root,
+                        offline_fixtures=offline_fixtures,
+                        cache_complete=cache_complete,
+                        network_fetch=not cache_complete and not offline_fixtures,
+                    )
+                )
                 cooldown_sources.add(source)
             except Exception as exc:
                 raw_count = _raw_count_for_source(source, source_cache_dir, fallback=0)
@@ -199,7 +247,17 @@ def run_literature_search(
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 }
-                events.append(_with_cache_metadata(event, source_cache_dir=source_cache_dir, project_root=root))
+                events.append(
+                    _with_source_event_metadata(
+                        event,
+                        source=source,
+                        source_cache_dir=source_cache_dir,
+                        project_root=root,
+                        offline_fixtures=offline_fixtures,
+                        cache_complete=cache_complete,
+                        network_fetch=not cache_complete and not offline_fixtures,
+                    )
+                )
                 if source == "arxiv" and not offline_fixtures:
                     cooldown_sources.add(source)
 
@@ -323,8 +381,13 @@ def _query_id(value: Any, *, index: int) -> str:
     return text or f"query_{index}"
 
 
-def _should_skip_semantic_scholar(source: str, *, offline_fixtures: bool) -> bool:
-    return source in {"semantic_scholar", "s2"} and not offline_fixtures and not os.getenv("S2_API_KEY")
+def _should_skip_semantic_scholar(source: str, *, offline_fixtures: bool, cache_complete: bool) -> bool:
+    return (
+        source in {"semantic_scholar", "s2"}
+        and not offline_fixtures
+        and not cache_complete
+        and not os.getenv("S2_API_KEY")
+    )
 
 
 def _source_cache_dir(cache_dir: Path, *, query_id: str, source: str) -> Path:
@@ -344,10 +407,43 @@ def _with_cache_metadata(event: dict[str, Any], *, source_cache_dir: Path, proje
     return event
 
 
+def _with_source_event_metadata(
+    event: dict[str, Any],
+    *,
+    source: str,
+    source_cache_dir: Path,
+    project_root: Path,
+    offline_fixtures: bool,
+    cache_complete: bool,
+    network_fetch: bool,
+) -> dict[str, Any]:
+    event = _with_cache_metadata(event, source_cache_dir=source_cache_dir, project_root=project_root)
+    if not offline_fixtures:
+        event["cache_hit"] = bool(cache_complete)
+        event["cache_miss"] = not cache_complete
+        event["network_fetch"] = bool(network_fetch)
+    if source == "biorxiv" and not offline_fixtures:
+        event["behavior"] = "recent_feed_scan"
+    return event
+
+
 def _cache_files(source_cache_dir: Path) -> list[Path]:
     if not source_cache_dir.exists():
         return []
     return sorted(path for path in source_cache_dir.iterdir() if path.is_file())
+
+
+def _source_cache_complete(source: str, source_cache_dir: Path, cache_files: list[Path]) -> bool:
+    source_name = "semantic_scholar" if source == "s2" else source
+    if source_name == "pubmed":
+        return (source_cache_dir / "pubmed_efetch.xml").exists()
+    if source_name == "biorxiv":
+        return _read_cache_json(source_cache_dir / "biorxiv.json") is not None
+    if source_name == "arxiv":
+        return (source_cache_dir / "arxiv.xml").exists()
+    if source_name == "semantic_scholar":
+        return _read_cache_json(source_cache_dir / "semantic_scholar.json") is not None
+    return bool(cache_files)
 
 
 def _relative_artifact_path(path: Path, project_root: Path) -> str:

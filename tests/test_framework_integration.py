@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from design_scientist.framework import init_framework
@@ -29,6 +30,7 @@ def test_offline_framework_rd_flow_generates_report_and_validates_via_module_cli
     audit_references(project)
     run_literature_search(project, max_papers=6, offline_fixtures=True)
     extraction = extract_methods(project)
+    _write_minimal_design_state(project)
     scientist = develop_method(project, nodes=3, use_codex=False, run_id="offline_rd")
 
     assert extraction["status"] == "ok"
@@ -59,3 +61,49 @@ def test_offline_framework_rd_flow_generates_report_and_validates_via_module_cli
     assert "framework/literature_search_trace.json" in text
     assert "runs/offline_rd/benchmark_results.csv" in text
     assert (project / "runs" / "offline_rd" / "scientist_journal.json").exists()
+
+
+def _write_minimal_design_state(project: Path) -> None:
+    state_dir = project / "state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "design_state.json").write_text(
+        json.dumps(
+            {
+                "project_id": "framework_project",
+                "module_status": [
+                    {"module_id": "HD110H", "status": "available"},
+                    {"module_id": "HG56H", "status": "available"},
+                ],
+                "backgrounds": ["target_bg"],
+                "known_champions": ["target_bg__HD110H"],
+                "unresolved_edges": [
+                    {
+                        "module_id": "HD110H",
+                        "base_variant": "target_bg",
+                        "system": "1E62",
+                        "evidence_id": "role_split_sdab_1E62",
+                        "reason": "integration fixture lattice edge",
+                    }
+                ],
+                "unsupported_claims": [
+                    "Synthetic replay ranking does not establish prospective wet-lab superiority."
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (state_dir / "evidence_cards.json").write_text(
+        json.dumps(
+            [
+                {
+                    "evidence_id": "role_split_sdab_1E62",
+                    "summary": "Integration fixture evidence for candidate generation.",
+                }
+            ],
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )

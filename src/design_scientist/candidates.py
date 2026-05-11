@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from design_scientist.acquisition import has_forbidden_module_pair
 from design_scientist.schemas import (
     Candidate,
     CandidateLineage,
@@ -16,11 +17,15 @@ from design_scientist.schemas import (
 
 CANONICAL_TARGET_SYSTEM = "1E62"
 STALE_TARGET_SYSTEM = "1e+62"
+CANONICAL_ROLE_SPLIT_EVIDENCE_ID = "role_split_sdab_1E62"
+STALE_ROLE_SPLIT_EVIDENCE_ID = "role_split_sdab_1e62"
 PREFERRED_MODULE_ORDER = ["HD110H", "HG56H", "HN54H", "HV105H"]
 
 
 def _canonicalize_identifier(value: Any) -> Any:
     if isinstance(value, str):
+        if value == STALE_ROLE_SPLIT_EVIDENCE_ID:
+            return CANONICAL_ROLE_SPLIT_EVIDENCE_ID
         return value.replace(STALE_TARGET_SYSTEM, CANONICAL_TARGET_SYSTEM)
     return value
 
@@ -73,6 +78,35 @@ def _target_systems(state: dict[str, Any], config: dict[str, Any]) -> list[str]:
 
     unique = sorted(set(systems))
     return unique or [CANONICAL_TARGET_SYSTEM]
+
+
+def _as_identifier_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    identifiers: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            identifier = (
+                item.get("background")
+                or item.get("background_id")
+                or item.get("variant_id")
+                or item.get("candidate_id")
+                or item.get("champion_id")
+                or item.get("id")
+            )
+        else:
+            identifier = item
+        if identifier:
+            identifiers.append(str(_canonicalize_identifier(identifier)))
+    return identifiers
+
+
+def _explicit_backgrounds(state: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    backgrounds: list[str] = []
+    for key in ("backgrounds", "target_backgrounds", "known_backgrounds"):
+        backgrounds.extend(_as_identifier_list(config.get(key)))
+        backgrounds.extend(_as_identifier_list(state.get(key)))
+    return sorted(dict.fromkeys(backgrounds))
 
 
 def _evidence_refs(evidence: list[dict[str, Any]] | list[Any]) -> list[str]:
@@ -149,11 +183,7 @@ def build_design_space(
     modules = _module_ids(canonical_state)
     target_systems = _target_systems(canonical_state, canonical_config)
     project_id = str(canonical_state.get("project_id") or canonical_config.get("project_id") or "unknown_project")
-    backgrounds = canonical_config.get("backgrounds")
-    if not isinstance(backgrounds, list) or not backgrounds:
-        target = target_systems[0]
-        backgrounds = [f"{target}_background_candidate", f"{target}_champion_candidate"]
-    backgrounds = [str(_canonicalize_identifier(background)) for background in backgrounds]
+    backgrounds = _explicit_backgrounds(canonical_state, canonical_config)
     design_space_id = str(
         canonical_config.get("design_space_id")
         or f"{project_id}:{'-'.join(target_systems)}:{'-'.join(modules) if modules else 'no_modules'}"
@@ -405,16 +435,30 @@ def candidate_pool_diagnostics(
     }
 
 
-def _backgrounds(design_space: DesignSpace) -> tuple[str, str]:
-    target = design_space.target_systems[0] if design_space.target_systems else CANONICAL_TARGET_SYSTEM
-    background = f"{target}_background_candidate"
-    champion = f"{target}_champion_candidate"
-    for candidate_background in design_space.backgrounds:
-        if str(candidate_background).endswith("_background_candidate"):
-            background = str(candidate_background)
-        elif str(candidate_background).endswith("_champion_candidate"):
-            champion = str(candidate_background)
-    return background, champion
+def _backgrounds(design_space: DesignSpace) -> list[str]:
+    return [str(_canonicalize_identifier(background)) for background in design_space.backgrounds]
+
+
+def _champions(state: dict[str, Any], design_space: DesignSpace) -> list[str]:
+    champions: list[str] = []
+    for key in ("champions", "known_champions"):
+        champions.extend(_as_identifier_list(design_space.config.get(key)))
+        champions.extend(_as_identifier_list(state.get(key)))
+    champions.extend(
+        background
+        for background in _backgrounds(design_space)
+        if "champion" in background.lower()
+    )
+    return sorted(dict.fromkeys(champions))
+
+
+def _mark_feasibility(candidate: Candidate) -> Candidate:
+    if has_forbidden_module_pair(candidate.modules):
+        candidate.feasibility_status = "infeasible"
+        reason = "forbidden_module_pair"
+        if reason not in candidate.feasibility_reasons:
+            candidate.feasibility_reasons.append(reason)
+    return candidate
 
 
 def _sort_candidates(candidates: list[Candidate], strategy: str) -> None:
@@ -446,31 +490,40 @@ def generate_candidate_pool(
     canonical_state = _canonicalize_data(state)
     canonical_evidence = _canonicalize_data(evidence)
     target_system = design_space.target_systems[0] if design_space.target_systems else CANONICAL_TARGET_SYSTEM
-    background, champion = _backgrounds(design_space)
+    backgrounds = _backgrounds(design_space)
+    champions = _champions(canonical_state, design_space)
+    background = backgrounds[0] if backgrounds else None
+    champion = champions[0] if champions else None
     modules = design_space.modules or _module_ids(canonical_state)
     preferred_modules = sorted(modules, key=_module_sort_key)[:4]
     evidence_refs = set(_evidence_refs(canonical_evidence))
-    add_module_evidence = "role_split_sdab_1E62" if "role_split_sdab_1E62" in evidence_refs else None
+    add_module_evidence = (
+        CANONICAL_ROLE_SPLIT_EVIDENCE_ID
+        if CANONICAL_ROLE_SPLIT_EVIDENCE_ID in evidence_refs
+        else None
+    )
     candidates: list[Candidate] = []
 
     for module in preferred_modules[:4]:
-        candidates.append(
-            add_module(
-                background,
-                module,
-                add_module_evidence,
-                design_space_id=design_space.design_space_id,
-                target_system=target_system,
+        if background:
+            candidates.append(
+                add_module(
+                    background,
+                    module,
+                    add_module_evidence,
+                    design_space_id=design_space.design_space_id,
+                    target_system=target_system,
+                )
             )
-        )
-        candidates.append(
-            remove_module(
-                champion,
-                module,
-                design_space_id=design_space.design_space_id,
-                target_system=target_system,
+        if champion:
+            candidates.append(
+                remove_module(
+                    champion,
+                    module,
+                    design_space_id=design_space.design_space_id,
+                    target_system=target_system,
+                )
             )
-        )
 
     unresolved_edges = [
         edge
@@ -487,7 +540,7 @@ def generate_candidate_pool(
     for edge in unresolved_edges[:24]:
         candidates.append(complete_missing_edge(edge, design_space_id=design_space.design_space_id))
 
-    if len(preferred_modules) >= 2:
+    if background and len(preferred_modules) >= 2:
         candidates.append(
             complete_square(
                 background,
@@ -498,21 +551,30 @@ def generate_candidate_pool(
             )
         )
 
-    candidates.append(
-        validate_genotype_coverage(
-            champion,
-            design_space_id=design_space.design_space_id,
-            target_system=target_system,
+    if champion:
+        candidates.append(
+            validate_genotype_coverage(
+                champion,
+                design_space_id=design_space.design_space_id,
+                target_system=target_system,
+            )
         )
-    )
-    candidates.append(
-        repeat_or_control(
-            "primary_edge_control",
-            design_space_id=design_space.design_space_id,
-            target_system=target_system,
-        )
-    )
 
+    repeat_target = None
+    if unresolved_edges:
+        repeat_target = str(unresolved_edges[0].get("base_variant") or "")
+    if not repeat_target:
+        repeat_target = champion or background
+    if repeat_target:
+        candidates.append(
+            repeat_or_control(
+                repeat_target,
+                design_space_id=design_space.design_space_id,
+                target_system=target_system,
+            )
+        )
+
+    candidates = [_mark_feasibility(candidate) for candidate in candidates]
     _sort_candidates(candidates, strategy)
     pool = CandidatePool(
         candidate_pool_id=f"{design_space.design_space_id}:{strategy}",

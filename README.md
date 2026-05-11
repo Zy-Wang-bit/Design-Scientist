@@ -69,15 +69,12 @@ python scripts/configure_s2_api_key.py --input ~/Downloads/S2.txt --zshrc ~/.zsh
 Framework R&D is the method-development loop. It should produce literature-backed
 method modules, a registry, replay benchmarks, a scientist journal, a method
 report, and a validation report before any method is treated as usable.
+`run-scientist` is the recommended full-chain CLI path; staged commands are debug/development entry points for inspecting one phase at a time.
 
 ```bash
 design-scientist init-framework /tmp/ds_product --domain "protein_variant_design"
-design-scientist audit-references /tmp/ds_product
-design-scientist literature-search /tmp/ds_product
-design-scientist extract-methods /tmp/ds_product
-design-scientist develop-method /tmp/ds_product
-design-scientist benchmark-methods /tmp/ds_product
 design-scientist run-scientist /tmp/ds_product
+design-scientist review-framework /tmp/ds_product
 ```
 
 For local smoke tests or deterministic integration runs, use offline fixtures:
@@ -87,12 +84,11 @@ DESIGN_SCIENTIST_LITERATURE_FIXTURES=tests/fixtures/literature \
   design-scientist run-scientist /tmp/ds_product --offline-fixtures
 ```
 
-After the framework run writes `runs/<run_id>/scientist_journal.json`,
-`runs/<run_id>/benchmark_results.csv`, and `runs/<run_id>/ablation_results.csv`,
-write the method report and validate the run:
+`run-scientist` writes `runs/<run_id>/scientist_journal.json`,
+`runs/<run_id>/benchmark_results.csv`, `runs/<run_id>/ablation_results.csv`, and
+`runs/<run_id>/method_report.md`. Validate that run with:
 
 ```bash
-python -m design_scientist.method_report /tmp/ds_product --run-id <run_id>
 python -m design_scientist.framework_validation /tmp/ds_product --run-id <run_id>
 ```
 
@@ -106,9 +102,10 @@ non-zero exit code if any critical artifact is missing or malformed.
 reported as provenance warnings unless a partial audit output indicates that the
 audit was requested and did not complete cleanly.
 
-`run-scientist` is the full-chain CLI path. It runs literature discovery,
-method extraction, method-node development, synthetic replay ranking, report
-generation, and reviewable artifact wiring. A successful run should leave:
+`run-scientist` is the recommended full-chain CLI path. It runs literature
+discovery, method extraction, method-node development, synthetic replay ranking,
+report generation, and reviewable artifact wiring. A successful run should
+leave:
 
 - Literature trace and ranking artifacts: `framework/literature_search_plan.json`,
   `framework/literature_search_trace.json`, `framework/citation_graph.json`,
@@ -132,6 +129,21 @@ No-baseline invention mode is used for literature-gap method nodes. In that
 mode the node should invent from recorded literature gaps rather than declaring
 a simple baseline family as its source, and `review-framework` expects
 non-clone novelty evidence plus the literature gap/rationale in `proposal.json`.
+
+Staged framework commands are debug/development entry points:
+
+```bash
+design-scientist literature-search /tmp/ds_product
+design-scientist extract-methods /tmp/ds_product
+design-scientist develop-method /tmp/ds_product --run-id debug_method_run
+design-scientist benchmark-methods /tmp/ds_product --run-id baseline_synthetic_replay_seed_1729
+python -m design_scientist.method_report /tmp/ds_product --run-id debug_method_run
+design-scientist review-framework /tmp/ds_product --run-id debug_method_run
+```
+
+`benchmark-methods` writes baseline-only replay artifacts. When no `--run-id`
+is supplied it uses `baseline_synthetic_replay_seed_1729`; it refuses to write
+into an existing scientist run directory.
 
 Programmatic entry points:
 

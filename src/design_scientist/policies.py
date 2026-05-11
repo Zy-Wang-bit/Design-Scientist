@@ -9,6 +9,8 @@ from itertools import combinations
 from statistics import mean
 from typing import Any
 
+from design_scientist.acquisition import FORBIDDEN_MODULE_PAIRS, has_forbidden_module_pair
+
 
 PolicyRecord = Mapping[str, Any]
 PolicyRecordLike = Any
@@ -57,7 +59,7 @@ PRIOR_INTERACTION_PAIRS = {
     ("HD110H", "LT47Y"),
 }
 RISK_MODULES = {"HA23K", "SY92F", "KD31N"}
-FORBIDDEN_DESIGN_PAIRS = {("KD31N", "SY92F")}
+FORBIDDEN_DESIGN_PAIRS = set(FORBIDDEN_MODULE_PAIRS)
 
 POLICY_RECORD_ID_KEYS = ("variant_id", "candidate_id", "id", "name")
 POLICY_RECORD_UTILITY_KEYS = ("observed_utility", "utility", "score")
@@ -72,6 +74,10 @@ POLICY_RECORD_OPTIONAL_KEYS = (
     "score_components",
     "risk_flags",
     "required_measurements",
+    "feasibility_status",
+    "feasibility_reasons",
+    "cost",
+    "design_context",
     "world_id",
 )
 
@@ -151,6 +157,14 @@ def to_policy_record(
         resolved_target = _record_value(record, "target_background")
     if resolved_target is None and variant is not None:
         resolved_target = _record_value(variant, "target_background")
+    if resolved_target is None:
+        design_context = _record_value(record, "design_context")
+        if design_context is None and variant is not None:
+            design_context = _record_value(variant, "design_context")
+        if isinstance(design_context, Mapping):
+            resolved_target = design_context.get("target_background")
+    if resolved_target is None and _record_value(record, "target_system") is not None and background is not None:
+        resolved_target = background
     if resolved_target is not None:
         normalized["target_background"] = str(resolved_target)
 
@@ -203,10 +217,9 @@ def random_feasible(
 
     del round_index
     pool = _candidate_pool(observed, candidates)
-    pool = [candidate for candidate in pool if _design_feasible(_record_modules(candidate))]
     pool = sorted(pool, key=_record_id)
     rng.shuffle(pool)
-    return [_record_id(candidate) for candidate in pool[: max(0, budget)]]
+    return [_record_id(candidate) for candidate in _take_within_budget(pool, budget)]
 
 
 def top_observed(
@@ -226,7 +239,7 @@ def top_observed(
         model,
         round_index=round_index,
     )
-    return [_record_id(candidate) for candidate in ranked[: max(0, budget)]]
+    return [_record_id(candidate) for candidate in _take_within_budget(ranked, budget)]
 
 
 def greedy_utility(
@@ -246,7 +259,7 @@ def greedy_utility(
         model,
         round_index=round_index,
     )
-    return [_record_id(candidate) for candidate in ranked[: max(0, budget)]]
+    return [_record_id(candidate) for candidate in _take_within_budget(ranked, budget)]
 
 
 def fixed_mix(
@@ -269,6 +282,8 @@ def fixed_mix(
     ]
     selected: list[PolicyRecord] = []
     selected_ids: set[str] = set()
+    selected_cost = 0.0
+    cost_budget = _cost_budget(budget)
     for ranker, quota, predicate in quotas:
         ranker_pool = [
             candidate
@@ -276,21 +291,37 @@ def fixed_mix(
             if _record_id(candidate) not in selected_ids and predicate(candidate)
         ]
         ranked = _rank_policy(ranker, ranker_pool, model, round_index=round_index)
-        for candidate in ranked[:quota]:
-            if len(selected) >= budget:
-                return [_record_id(record) for record in selected]
+        added_for_quota = 0
+        for candidate in ranked:
+            if added_for_quota >= quota:
+                break
+            candidate_cost = _record_cost(candidate)
+            if selected_cost + candidate_cost > cost_budget:
+                continue
             selected.append(candidate)
             selected_ids.add(_record_id(candidate))
+            selected_cost += candidate_cost
+            added_for_quota += 1
+            if selected_cost >= cost_budget:
+                return [_record_id(record) for record in selected]
 
-    if len(selected) < budget:
+    if selected_cost < cost_budget:
         fallback_pool = [
             candidate
             for candidate in pool
             if _record_id(candidate) not in selected_ids and len(_record_modules(candidate)) <= 2
         ]
         ranked = _rank_policy("top_observed", fallback_pool, model, round_index=round_index)
-        selected.extend(ranked[: budget - len(selected)])
-    return [_record_id(record) for record in selected[: max(0, budget)]]
+        for candidate in ranked:
+            candidate_cost = _record_cost(candidate)
+            if selected_cost + candidate_cost > cost_budget:
+                continue
+            selected.append(candidate)
+            selected_ids.add(_record_id(candidate))
+            selected_cost += candidate_cost
+            if selected_cost >= cost_budget:
+                break
+    return [_record_id(record) for record in selected]
 
 
 def pure_uncertainty(
@@ -310,7 +341,7 @@ def pure_uncertainty(
         model,
         round_index=round_index,
     )
-    return [_record_id(candidate) for candidate in ranked[: max(0, budget)]]
+    return [_record_id(candidate) for candidate in _take_within_budget(ranked, budget)]
 
 
 def pure_lattice_repair(
@@ -330,7 +361,7 @@ def pure_lattice_repair(
         model,
         round_index=round_index,
     )
-    return [_record_id(candidate) for candidate in ranked[: max(0, budget)]]
+    return [_record_id(candidate) for candidate in _take_within_budget(ranked, budget)]
 
 
 def mechanism_aware(
@@ -356,7 +387,7 @@ def mechanism_aware(
         round_index=round_index,
         ablation=ablation,
     )
-    return [_record_id(candidate) for candidate in ranked[: max(0, budget)]]
+    return [_record_id(candidate) for candidate in _take_within_budget(ranked, budget)]
 
 
 POLICY_REGISTRY: dict[str, PolicyCallable] = {
@@ -390,6 +421,8 @@ def _candidate_pool(
     for candidate in candidates:
         candidate_id = _record_id(candidate)
         if candidate_id in observed_ids:
+            continue
+        if not _record_selectable(candidate):
             continue
         unique.setdefault(candidate_id, candidate)
     return list(unique.values())
@@ -765,8 +798,7 @@ def _module_universe(
 
 
 def _design_feasible(modules: tuple[str, ...]) -> bool:
-    module_set = set(modules)
-    return not any(set(pair).issubset(module_set) for pair in FORBIDDEN_DESIGN_PAIRS)
+    return not has_forbidden_module_pair(modules)
 
 
 def _parse_variant_id(variant_id: str) -> tuple[str, tuple[str, ...]]:
@@ -783,6 +815,39 @@ def _policy_ablation(candidates: Sequence[PolicyRecord]) -> str | None:
         if ablation:
             return str(ablation)
     return None
+
+
+def _cost_budget(budget: int | float) -> float:
+    return max(0.0, float(budget))
+
+
+def _take_within_budget(records: Sequence[PolicyRecord], budget: int | float) -> list[PolicyRecord]:
+    selected: list[PolicyRecord] = []
+    total_cost = 0.0
+    cost_budget = _cost_budget(budget)
+    for record in records:
+        cost = _record_cost(record)
+        if total_cost + cost > cost_budget:
+            continue
+        selected.append(record)
+        total_cost += cost
+    return selected
+
+
+def _record_cost(record: PolicyRecord) -> float:
+    value = _record_value(record, "cost")
+    if value is None:
+        return 1.0
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _record_selectable(record: PolicyRecord) -> bool:
+    return _record_value(record, "feasibility_status") != "infeasible" and _design_feasible(
+        _record_modules(record)
+    )
 
 
 def _record_value(record: Any, key: str) -> Any:

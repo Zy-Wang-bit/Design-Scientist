@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from design_scientist.artifacts import FRAMEWORK_ARTIFACTS
 from design_scientist.cli import build_parser, main
+from design_scientist.framework_validation import CRITICAL_FRAMEWORK_ARTIFACTS
 from design_scientist.framework import init_framework
 
 
@@ -37,6 +39,69 @@ def test_cli_help_includes_framework_commands(capsys: pytest.CaptureFixture[str]
     output = capsys.readouterr().out
     assert "init-framework" in output
     assert "review-framework" in output
+
+
+def test_cli_help_marks_run_scientist_as_recommended_and_staged_commands_as_debug(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["--help"])
+
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "recommended full-chain" in output
+    assert "debug/development" in output
+
+
+def test_framework_artifacts_follow_current_validation_contract() -> None:
+    assert set(FRAMEWORK_ARTIFACTS) == set(CRITICAL_FRAMEWORK_ARTIFACTS.values())
+    assert "framework/benchmark_results.csv" not in FRAMEWORK_ARTIFACTS
+
+
+def test_benchmark_methods_default_run_does_not_overwrite_scientist_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "framework_cli"
+    scientist_run = project / "runs" / "synthetic_replay_seed_1729"
+    scientist_run.mkdir(parents=True)
+    (scientist_run / "scientist_journal.json").write_text("{}", encoding="utf-8")
+    sentinel = scientist_run / "benchmark_results.csv"
+    sentinel.write_text("existing scientist benchmark\n", encoding="utf-8")
+
+    assert main(["benchmark-methods", str(project), "--rounds", "1", "--budget", "1"]) == 0
+
+    output = capsys.readouterr().out
+    assert "baseline_synthetic_replay_seed_1729" in output
+    assert sentinel.read_text(encoding="utf-8") == "existing scientist benchmark\n"
+    assert (project / "runs" / "baseline_synthetic_replay_seed_1729" / "benchmark_results.csv").exists()
+
+
+def test_benchmark_methods_rejects_existing_scientist_run_id(tmp_path: Path) -> None:
+    project = tmp_path / "framework_cli"
+    scientist_run = project / "runs" / "scientist_run"
+    scientist_run.mkdir(parents=True)
+    (scientist_run / "scientist_journal.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        main(["benchmark-methods", str(project), "--run-id", "scientist_run"])
+
+    assert exc.value.code == 2
+
+
+def test_readme_and_framework_markdown_do_not_document_failing_staged_review_workflow() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    framework_markdown = Path("output/pdf/design_scientist_framework_explanation.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "run-scientist` is the recommended full-chain CLI path" in readme
+    assert "staged commands are debug/development entry points" in readme
+    assert (
+        "uv run design-scientist benchmark-methods /tmp/my_design_scientist_project --rounds 3\n"
+        "uv run design-scientist review-framework /tmp/my_design_scientist_project"
+    ) not in framework_markdown
 
 
 def test_review_framework_missing_artifacts_reports_without_crashing(

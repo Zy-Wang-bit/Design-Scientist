@@ -10,9 +10,11 @@ import pytest
 from design_scientist.io import read_json
 from design_scientist.literature_pipeline import run_literature_search
 import design_scientist.literature_pipeline as literature_pipeline
+import design_scientist.literature_sources as literature_sources
 from design_scientist.literature_sources import (
     LiteratureSourceTemporarilyUnavailable,
     LiteratureContext,
+    default_fixture_dir,
     dedupe_paper_cards,
     search_arxiv,
     search_biorxiv,
@@ -22,6 +24,24 @@ from design_scientist.literature_sources import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "literature"
+
+
+def test_offline_default_fixture_dir_is_independent_of_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DESIGN_SCIENTIST_LITERATURE_FIXTURES", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    fixture_dir = default_fixture_dir()
+    cards = search_pubmed(
+        LiteratureContext(query="protein engineering antibody", relevance="test"),
+        max_papers=5,
+        cache_dir=tmp_path / "cache",
+        offline_fixtures=True,
+    )
+
+    assert fixture_dir == FIXTURES.resolve()
+    assert len(cards) == 2
 
 
 def test_offline_adapters_standardize_and_dedupe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,6 +253,38 @@ def test_run_literature_search_writes_paper_cards_and_raw_cache(
     assert list(raw_cache.glob("project_query/semantic_scholar/semantic_scholar.json"))
 
 
+def test_run_literature_search_rejects_non_positive_max_papers(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    for max_papers in (0, -1):
+        with pytest.raises(ValueError, match="max_papers must be positive"):
+            run_literature_search(project, max_papers=max_papers, offline_fixtures=True, sources=["pubmed"])
+
+
+def test_missing_offline_fixture_records_source_error_not_ok_empty_cards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing_fixtures = tmp_path / "missing-fixtures"
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("DESIGN_SCIENTIST_LITERATURE_FIXTURES", str(missing_fixtures))
+
+    out = run_literature_search(project, max_papers=5, offline_fixtures=True, sources=["pubmed"])
+    cards = read_json(out)
+    trace = read_json(project / "framework" / "literature_search_trace.json")
+    errors = read_json(project / "framework" / "cache" / "literature_raw" / "source_errors.json")
+
+    assert cards == []
+    assert trace["events"][0]["event"] == "source_error"
+    assert trace["events"][0]["status"] == "error"
+    assert trace["events"][0]["source"] == "pubmed"
+    assert trace["events"][0]["cache_path"] == "framework/cache/literature_raw/project_query/pubmed"
+    assert "missing literature fixture" in trace["events"][0]["reason"].lower()
+    assert errors["errors"][0]["cache_path"] == trace["events"][0]["cache_path"]
+    assert errors["errors"][0]["error_type"] == "FileNotFoundError"
+
+
 def test_run_literature_search_isolates_raw_cache_by_query_and_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -341,17 +393,26 @@ def test_semantic_scholar_pipeline_skips_without_key_but_reads_offline_fixture(
 
     run_literature_search(project, max_papers=5, sources=["semantic_scholar"])
     online_trace = read_json(project / "framework" / "literature_search_trace.json")
-    assert online_trace["events"] == [
-        {
-            "event": "source_skip",
-            "status": "skipped",
-            "query_id": "project_query",
-            "source": "semantic_scholar",
-            "raw_count": 0,
-            "normalized_count": 0,
-            "reason": "missing_s2_api_key",
-        }
-    ]
+    assert len(online_trace["events"]) == 1
+    skip_event = online_trace["events"][0]
+    assert skip_event["event"] == "source_skip"
+    assert skip_event["status"] == "skipped"
+    assert skip_event["query_id"] == "project_query"
+    assert skip_event["source"] == "semantic_scholar"
+    assert skip_event["raw_count"] == 0
+    assert skip_event["normalized_count"] == 0
+    assert skip_event["reason"] == "missing_s2_api_key"
+    assert skip_event["cache_path"] == "framework/cache/literature_raw/project_query/semantic_scholar"
+    assert set(skip_event) >= {
+        "event",
+        "status",
+        "query_id",
+        "source",
+        "raw_count",
+        "normalized_count",
+        "reason",
+        "cache_path",
+    }
 
     monkeypatch.setenv("DESIGN_SCIENTIST_LITERATURE_FIXTURES", str(FIXTURES))
     run_literature_search(project, max_papers=5, offline_fixtures=True, sources=["semantic_scholar"])
@@ -365,6 +426,103 @@ def test_semantic_scholar_pipeline_skips_without_key_but_reads_offline_fixture(
     assert offline_trace["events"][0]["raw_count"] == 2
     assert offline_trace["events"][0]["normalized_count"] == 2
     assert "cache_path" in offline_trace["events"][0]
+
+
+def test_pubmed_live_adapter_reads_existing_raw_cache_before_network_calls(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "pubmed_esearch.json").write_text(
+        (FIXTURES / "pubmed_esearch.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (cache / "pubmed_efetch.xml").write_text(
+        (FIXTURES / "pubmed_efetch.xml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    class FailingClient:
+        def get(self, *args, **kwargs):
+            raise AssertionError("network should not be called when pubmed raw cache exists")
+
+    cards = search_pubmed(
+        LiteratureContext(query="protein engineering antibody", relevance="test"),
+        max_papers=5,
+        cache_dir=cache,
+        client=FailingClient(),
+    )
+
+    assert len(cards) == 2
+
+
+def test_biorxiv_live_pipeline_reuses_raw_cache_and_records_cache_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    source_cache = project / "framework" / "cache" / "literature_raw" / "project_query" / "biorxiv"
+    source_cache.mkdir(parents=True)
+    (source_cache / "biorxiv.json").write_text(
+        json.dumps(
+            {
+                "collection": [
+                    {
+                        "doi": "10.1101/live-cache",
+                        "title": "Active learning protein engineering from cached preprints",
+                        "abstract": "A cached bioRxiv record for protein engineering.",
+                        "authors": "Ada Lovelace",
+                        "date": "2025-01-01",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_network(*args, **kwargs):
+        raise AssertionError("network should not be called when biorxiv raw cache exists")
+
+    monkeypatch.setattr(literature_sources, "_get_json", fail_network)
+
+    run_literature_search(project, max_papers=5, sources=["biorxiv"])
+    cards = read_json(project / "framework" / "paper_cards.json")
+    trace = read_json(project / "framework" / "literature_search_trace.json")
+    event = trace["events"][0]
+
+    assert [card["doi"] for card in cards] == ["10.1101/live-cache"]
+    assert event["status"] == "ok"
+    assert event["cache_hit"] is True
+    assert event["cache_miss"] is False
+    assert event["network_fetch"] is False
+
+
+def test_biorxiv_live_pipeline_records_cache_miss_network_fetch_and_recent_feed_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+
+    def fake_get_json(*args, **kwargs):
+        return {
+            "collection": [
+                {
+                    "doi": "10.1101/live-fetch",
+                    "title": "Active learning protein engineering from recent feed",
+                    "abstract": "A live bioRxiv record for protein engineering.",
+                    "authors": "Ada Lovelace",
+                    "date": "2025-01-02",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(literature_sources, "_get_json", fake_get_json)
+
+    run_literature_search(project, max_papers=5, sources=["biorxiv"])
+    trace = read_json(project / "framework" / "literature_search_trace.json")
+    event = trace["events"][0]
+
+    assert event["status"] == "ok"
+    assert event["cache_hit"] is False
+    assert event["cache_miss"] is True
+    assert event["network_fetch"] is True
+    assert event["behavior"] == "recent_feed_scan"
 
 
 def test_run_literature_search_records_source_errors_and_continues(

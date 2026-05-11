@@ -21,6 +21,17 @@ REQUIRED_PROJECT_FILES = tuple(rel for rel in PROJECT_ARTIFACTS if not rel.start
 REQUIRED_STATE_FILES = tuple(rel for rel in PROJECT_ARTIFACTS if rel.startswith("state/"))
 REQUIRED_RUN_FILES = RUN_ARTIFACTS
 FRAMEWORK_WARNING_FILES = FRAMEWORK_VALIDATION_ARTIFACTS
+CANDIDATE_POOL_REQUIRED_COLUMNS = ("candidate_id", "feasibility_status", "cost")
+PANEL_REQUIRED_COLUMNS = (
+    "candidate_id",
+    "operator",
+    "category",
+    "target_system",
+    "background",
+    "modules",
+    "feasibility_status",
+    "cost",
+)
 
 
 def _finding(
@@ -44,20 +55,29 @@ def _load_optional_json(path: Path, findings: list[ValidationFinding]) -> Any:
         return None
 
 
-def _load_csv_records(path: Path, findings: list[ValidationFinding]) -> list[dict[str, str]] | None:
+def _load_csv_table(
+    path: Path,
+    findings: list[ValidationFinding],
+) -> tuple[list[dict[str, str]], list[str]] | None:
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             fieldnames = list(reader.fieldnames or [])
-            return [
+            records = [
                 {column: ("" if row.get(column) is None else str(row.get(column))) for column in fieldnames}
                 for row in reader
             ]
+            return records, fieldnames
     except Exception as exc:  # pragma: no cover - defensive message path
         findings.append(
             _finding("error", "invalid_csv", f"Cannot read CSV {path}: {exc}", str(path))
         )
         return None
+
+
+def _load_csv_records(path: Path, findings: list[ValidationFinding]) -> list[dict[str, str]] | None:
+    table = _load_csv_table(path, findings)
+    return table[0] if table is not None else None
 
 
 def _check_identifier_issues(
@@ -98,6 +118,102 @@ def _check_csv_artifact_if_exists(path: Path, artifact: str, findings: list[Vali
     records = _load_csv_records(path, findings)
     if records is not None:
         _check_identifier_issues(records, artifact=artifact, findings=findings)
+
+
+def _check_required_columns(
+    columns: list[str],
+    required: tuple[str, ...],
+    *,
+    code: str,
+    artifact: str,
+    findings: list[ValidationFinding],
+) -> None:
+    column_set = set(columns)
+    for column in required:
+        if column not in column_set:
+            findings.append(
+                _finding(
+                    "error",
+                    code,
+                    f"{artifact} is missing required column: {column}.",
+                    artifact,
+                )
+            )
+
+
+def _validate_panel_artifacts(
+    candidate_rows: list[dict[str, str]],
+    candidate_columns: list[str],
+    panel_rows: list[dict[str, str]],
+    panel_columns: list[str],
+    *,
+    candidate_artifact: str,
+    panel_artifact: str,
+    findings: list[ValidationFinding],
+) -> None:
+    _check_required_columns(
+        candidate_columns,
+        CANDIDATE_POOL_REQUIRED_COLUMNS,
+        code="missing_candidate_pool_column",
+        artifact=candidate_artifact,
+        findings=findings,
+    )
+    _check_required_columns(
+        panel_columns,
+        PANEL_REQUIRED_COLUMNS,
+        code="missing_panel_column",
+        artifact=panel_artifact,
+        findings=findings,
+    )
+    if "candidate_id" not in candidate_columns or "candidate_id" not in panel_columns:
+        return
+
+    candidate_by_id = {
+        row.get("candidate_id", ""): row
+        for row in candidate_rows
+        if row.get("candidate_id", "")
+    }
+    candidate_ids = set(candidate_by_id)
+    panel_ids = [row.get("candidate_id", "") for row in panel_rows if row.get("candidate_id", "")]
+
+    outside_pool = sorted(set(panel_ids) - candidate_ids)
+    for candidate_id in outside_pool:
+        findings.append(
+            _finding(
+                "error",
+                "panel_candidate_not_in_pool",
+                f"Panel candidate {candidate_id} is not present in candidate_pool.csv.",
+                panel_artifact,
+            )
+        )
+
+    duplicate_ids = sorted(candidate_id for candidate_id in set(panel_ids) if panel_ids.count(candidate_id) > 1)
+    for candidate_id in duplicate_ids:
+        findings.append(
+            _finding(
+                "error",
+                "panel_duplicate_candidate",
+                f"Panel candidate {candidate_id} appears more than once.",
+                panel_artifact,
+            )
+        )
+
+    infeasible_ids: set[str] = set()
+    for row in panel_rows:
+        candidate_id = row.get("candidate_id", "")
+        panel_status = row.get("feasibility_status", "")
+        pool_status = candidate_by_id.get(candidate_id, {}).get("feasibility_status", "")
+        if panel_status == "infeasible" or pool_status == "infeasible":
+            infeasible_ids.add(candidate_id)
+    for candidate_id in sorted(infeasible_ids):
+        findings.append(
+            _finding(
+                "error",
+                "panel_infeasible_candidate",
+                f"Panel candidate {candidate_id} is marked infeasible.",
+                panel_artifact,
+            )
+        )
 
 
 def _run_dir(project_dir: Path, run_id: str | None) -> Path | None:
@@ -276,16 +392,36 @@ def validate_project(
                         str(metrics),
                     )
                 )
-        _check_csv_artifact_if_exists(
-            selected_run_dir / "candidate_pool.csv",
-            str(selected_run_dir / "candidate_pool.csv"),
-            findings,
-        )
-        _check_csv_artifact_if_exists(
-            selected_run_dir / "panel_recommendation.csv",
-            str(selected_run_dir / "panel_recommendation.csv"),
-            findings,
-        )
+        candidate_pool_path = selected_run_dir / "candidate_pool.csv"
+        panel_recommendation_path = selected_run_dir / "panel_recommendation.csv"
+        candidate_table = None
+        panel_table = None
+        if candidate_pool_path.exists():
+            candidate_table = _load_csv_table(candidate_pool_path, findings)
+            if candidate_table is not None:
+                _check_identifier_issues(
+                    candidate_table[0],
+                    artifact=str(candidate_pool_path),
+                    findings=findings,
+                )
+        if panel_recommendation_path.exists():
+            panel_table = _load_csv_table(panel_recommendation_path, findings)
+            if panel_table is not None:
+                _check_identifier_issues(
+                    panel_table[0],
+                    artifact=str(panel_recommendation_path),
+                    findings=findings,
+                )
+        if candidate_table is not None and panel_table is not None:
+            _validate_panel_artifacts(
+                candidate_table[0],
+                candidate_table[1],
+                panel_table[0],
+                panel_table[1],
+                candidate_artifact=str(candidate_pool_path),
+                panel_artifact=str(panel_recommendation_path),
+                findings=findings,
+            )
         _check_json_artifact_if_exists(
             selected_run_dir / "validation_report.json",
             str(selected_run_dir / "validation_report.json"),
