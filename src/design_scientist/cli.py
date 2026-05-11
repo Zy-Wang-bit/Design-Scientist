@@ -57,8 +57,18 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_methods.add_argument("--budget", type=int, default=24)
     benchmark_methods.add_argument("--run-id")
 
+    read_literature = subparsers.add_parser(
+        "read-literature", help="debug/development: build V3 literature corpus only"
+    )
+    read_literature.add_argument("root")
+
+    extract_mechanisms = subparsers.add_parser(
+        "extract-mechanisms", help="debug/development: extract V3 mechanism cards only"
+    )
+    extract_mechanisms.add_argument("root")
+
     run_scientist = subparsers.add_parser(
-        "run-scientist", help="recommended full-chain framework scientist loop"
+        "run-scientist", help="recommended full-chain V3 mechanism scientist loop"
     )
     run_scientist.add_argument("root")
     run_scientist.add_argument("--max-papers", type=int, default=60)
@@ -66,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_scientist.add_argument("--rounds", type=int, default=3)
     run_scientist.add_argument("--use-codex", action="store_true")
     run_scientist.add_argument("--offline-fixtures", action="store_true")
+    run_scientist.add_argument(
+        "--legacy-v2",
+        action="store_true",
+        help="Use the legacy V2 scientist implementation while the V3 runner is being integrated",
+    )
     run_scientist.add_argument(
         "--allow-degraded-literature",
         action="store_true",
@@ -197,19 +212,66 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Wrote benchmark results: {result['benchmark_results_path']}")
         return 0
+    if args.command == "read-literature":
+        try:
+            from design_scientist.literature_fulltext import build_literature_corpus
+        except ModuleNotFoundError as exc:
+            if exc.name == "design_scientist.literature_fulltext":
+                parser.error(
+                    "read-literature is not available yet: "
+                    "missing design_scientist.literature_fulltext"
+                )
+            raise
+
+        result = build_literature_corpus(args.root)
+        if result is not None:
+            print(f"Built literature corpus: {result}")
+        return 0
+    if args.command == "extract-mechanisms":
+        try:
+            from design_scientist.mechanism_extraction import extract_mechanisms
+        except ModuleNotFoundError as exc:
+            if exc.name == "design_scientist.mechanism_extraction":
+                parser.error(
+                    "extract-mechanisms is not available yet: "
+                    "missing design_scientist.mechanism_extraction"
+                )
+            raise
+
+        result = extract_mechanisms(args.root)
+        if isinstance(result, dict) and "status" in result:
+            print(f"Mechanism extraction {result['status']}")
+            return 0 if result["status"] == "ok" else 1
+        if result is not None:
+            print(f"Extracted mechanisms: {result}")
+        return 0
     if args.command == "run-scientist":
         from design_scientist.method_report import write_method_report
-        from design_scientist.scientist_search import run_scientist_search
 
-        result = run_scientist_search(
-            args.root,
-            max_papers=args.max_papers,
-            nodes=args.nodes,
-            rounds=args.rounds,
-            use_codex=args.use_codex,
-            offline_fixtures=args.offline_fixtures,
-            strict_literature=not args.allow_degraded_literature,
-        )
+        if args.legacy_v2:
+            from design_scientist.scientist_search import run_scientist_search
+
+            result = run_scientist_search(
+                args.root,
+                max_papers=args.max_papers,
+                nodes=args.nodes,
+                rounds=args.rounds,
+                use_codex=args.use_codex,
+                offline_fixtures=args.offline_fixtures,
+                strict_literature=not args.allow_degraded_literature,
+            )
+        else:
+            from design_scientist.scientist_search_v3 import run_scientist_v3
+
+            result = run_scientist_v3(
+                args.root,
+                max_papers=args.max_papers,
+                nodes=args.nodes,
+                rounds=args.rounds,
+                use_codex=args.use_codex,
+                offline_fixtures=args.offline_fixtures,
+                strict_literature=not args.allow_degraded_literature,
+            )
         report_path = write_method_report(args.root, run_id=result["run_id"])
         print(f"Wrote scientist journal: {result['journal_path']}")
         print(f"Wrote method report: {report_path}")

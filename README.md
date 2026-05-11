@@ -66,15 +66,25 @@ python scripts/configure_s2_api_key.py --input ~/Downloads/S2.txt --zshrc ~/.zsh
 
 ## Framework R&D Workflow
 
-Framework R&D is the method-development loop. It should produce literature-backed
-method modules, a registry, replay benchmarks, a scientist journal, a method
-report, and a validation report before any method is treated as usable.
-`run-scientist` is the recommended full-chain CLI path; staged commands are debug/development entry points for inspecting one phase at a time.
+Framework R&D is the method-development loop. V3 is organized as a
+MechanismSpec Kernel plus Literature Engine V3: the literature engine builds a
+full-text corpus, reading trace, mechanism cards, mechanism library, and gap
+matrix; the kernel turns selected mechanisms into executable lifecycle nodes
+with explicit components, claims, stress tests, ablations, and benchmark gates.
+`run-scientist` defaults to this V3 path. Use `--legacy-v2` only when you need
+the older method-module/method-node workflow while migrating artifacts. Staged
+commands are debug/development entry points for inspecting one phase at a time.
 
 ```bash
 design-scientist init-framework /tmp/ds_product --domain "protein_variant_design"
 design-scientist run-scientist /tmp/ds_product
 design-scientist review-framework /tmp/ds_product
+```
+
+Legacy V2 compatibility remains available:
+
+```bash
+design-scientist run-scientist /tmp/ds_product --legacy-v2
 ```
 
 For local smoke tests or deterministic integration runs, use offline fixtures:
@@ -84,8 +94,11 @@ DESIGN_SCIENTIST_LITERATURE_FIXTURES=tests/fixtures/literature \
   design-scientist run-scientist /tmp/ds_product --offline-fixtures
 ```
 
-`run-scientist` writes `runs/<run_id>/scientist_journal.json`,
-`runs/<run_id>/benchmark_results.csv`, `runs/<run_id>/ablation_results.csv`, and
+V3 `run-scientist` writes `runs/<run_id>/scientist_journal.json`,
+`runs/<run_id>/stage_progress.json`, `runs/<run_id>/route_tree.json`,
+`runs/<run_id>/mechanism_benchmark_results.csv`,
+`runs/<run_id>/mechanism_benchmark_summary.csv`,
+`runs/<run_id>/mechanism_ablation_results.csv`, and
 `runs/<run_id>/method_report.md`. Validate that run with:
 
 ```bash
@@ -102,23 +115,29 @@ non-zero exit code if any critical artifact is missing or malformed.
 reported as provenance warnings unless a partial audit output indicates that the
 audit was requested and did not complete cleanly.
 
-`run-scientist` is the recommended full-chain CLI path. It runs literature
-discovery, method extraction, method-node development, synthetic replay ranking,
-report generation, and reviewable artifact wiring. A successful run should
+`run-scientist` is the recommended full-chain CLI path. In V3 it runs
+Literature Engine V3 reading, mechanism extraction, MechanismSpec lifecycle
+node development, mechanism replay ranking, report generation, and reviewable
+artifact wiring. A successful run should
 leave:
 
 - Literature trace and ranking artifacts: `framework/literature_search_plan.json`,
   `framework/literature_search_trace.json`, `framework/citation_graph.json`,
   `framework/paper_scores.csv`, `framework/paper_cards.json`, and
-  `framework/literature_map.md`.
-- Run-level framework artifacts: `runs/<run_id>/scientist_journal.json`,
+  V3 literature artifacts `framework/literature_corpus.jsonl`,
+  `framework/literature_reading_trace.json`, `framework/mechanism_cards.json`,
+  `framework/mechanism_library.json`, and
+  `framework/mechanism_gap_matrix.csv`.
+- Run-level V3 framework artifacts: `runs/<run_id>/scientist_journal.json`,
   `runs/<run_id>/stage_progress.json`, `runs/<run_id>/route_tree.json`,
-  `runs/<run_id>/benchmark_results.csv`, `runs/<run_id>/benchmark_summary.csv`,
-  `runs/<run_id>/ablation_results.csv`, and `runs/<run_id>/method_report.md`.
-- Selected method-node artifacts: `proposal.json`, `novelty_report.json`,
-  `candidate_policy.json`, `benchmark_metrics.json`, `validation_report.json`,
-  `design_space.json`, `candidate_pool.csv`, `candidate_pool.jsonl`, and
-  `candidate_pool_diagnostics.json`.
+  `runs/<run_id>/mechanism_benchmark_results.csv`,
+  `runs/<run_id>/mechanism_benchmark_summary.csv`,
+  `runs/<run_id>/mechanism_ablation_results.csv`, and
+  `runs/<run_id>/method_report.md`.
+- Selected V3 mechanism-node artifacts: `mechanism_spec.json`,
+  `mechanism.py`, `proposal.json`, `ablation_plan.json`,
+  `stress_test_plan.json`, `mechanism_metrics.json`, and
+  `validation_report.json`.
 
 The selected method trace in `scientist_journal.json` links the proposal,
 novelty report, benchmark metrics, literature-backed route, and candidate-pool
@@ -155,9 +174,10 @@ write_method_report("/tmp/ds_product", run_id="<run_id>")
 report = review_framework_run("/tmp/ds_product", run_id="<run_id>")
 ```
 
-`review_framework_run` checks framework spec, literature queries, paper cards,
-method modules, algorithm spec, method registry, Research OS files, reference
-audit outputs, literature plan/trace/citation graph/paper scores, benchmark
-results, optional benchmark summary, ablation results, `scientist_journal.json`,
-selected node artifacts including v2 `proposal.json` and `novelty_report.json`
-when applicable, and `method_report.md`.
+`review_framework_run` detects V3 runs from `scientist_journal.json`
+`version: "v3"`. For V3 it checks the Literature Engine V3 artifacts,
+MechanismSpec node artifacts, required replay baselines, selected eligibility,
+architecture-clone blocking, positive key ablation delta, false-claim-rate
+guardrails, and `method_report.md`. Legacy V2 validation still checks method
+modules, algorithm spec, registry, synthetic replay artifacts, selected
+`proposal.json`/`novelty_report.json`, and the V2 report shape.

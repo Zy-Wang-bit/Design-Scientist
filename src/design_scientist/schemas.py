@@ -286,6 +286,85 @@ class LiteratureQuery:
 
 
 @dataclass
+class MechanismComponent:
+    component_id: str
+    component_type: str
+    description: str = ""
+    inputs: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    assumptions: list[str] = field(default_factory=list)
+    failure_modes: list[str] = field(default_factory=list)
+    literature_refs: list[str] = field(default_factory=list)
+    implementation_ref: str | None = None
+
+
+@dataclass
+class MechanismSpec:
+    mechanism_id: str
+    name: str
+    version: str = "v3"
+    hypothesis: str = ""
+    components: list[MechanismComponent] = field(default_factory=list)
+    state_model: dict[str, Any] = field(default_factory=dict)
+    candidate_generator: dict[str, Any] = field(default_factory=dict)
+    acquisition_objective: dict[str, Any] = field(default_factory=dict)
+    uncertainty_model: dict[str, Any] = field(default_factory=dict)
+    transfer_model: dict[str, Any] = field(default_factory=dict)
+    constraint_handler: dict[str, Any] = field(default_factory=dict)
+    claims: list[str] = field(default_factory=list)
+    stress_test_requirements: list[str] = field(default_factory=list)
+    ablation_targets: list[str] = field(default_factory=list)
+    literature_basis: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MechanismRunRequest:
+    observed: list[dict[str, Any]] = field(default_factory=list)
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    budget: int = 0
+    round_index: int = 0
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MechanismDecision:
+    candidate_ids: list[str] = field(default_factory=list)
+    scores: dict[str, float] = field(default_factory=dict)
+    rationale: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    trace_id: str | None = None
+
+
+@dataclass
+class MechanismTrace:
+    trace_id: str
+    mechanism_id: str
+    stages: list[str] = field(default_factory=list)
+    component_outputs: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class StressTestPlan:
+    plan_id: str
+    worlds: list[dict[str, Any]] = field(default_factory=list)
+    claim_mapping: dict[str, list[str]] = field(default_factory=dict)
+    required_baselines: list[str] = field(default_factory=list)
+    acceptance_criteria: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MechanismAblationResult:
+    mechanism_id: str
+    ablation_id: str
+    removed_components: list[str] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
+    delta_vs_full: dict[str, Any] = field(default_factory=dict)
+    passed: bool | None = None
+
+
+@dataclass
 class PaperCard:
     paper_id: str
     title: str

@@ -44,6 +44,48 @@ FRAMEWORK_ARTIFACTS = (
     "framework/method_registry.yaml",
 )
 
+V3_LITERATURE_CORPUS = "framework/literature_corpus.jsonl"
+V3_LITERATURE_READING_TRACE = "framework/literature_reading_trace.json"
+V3_MECHANISM_CARDS = "framework/mechanism_cards.json"
+V3_MECHANISM_LIBRARY = "framework/mechanism_library.json"
+V3_MECHANISM_GAP_MATRIX = "framework/mechanism_gap_matrix.csv"
+
+V3_MECHANISM_SPEC = "mechanism_spec.json"
+V3_MECHANISM_IMPLEMENTATION = "mechanism.py"
+V3_MECHANISM_PROPOSAL = "proposal.json"
+V3_ABLATION_PLAN = "ablation_plan.json"
+V3_STRESS_TEST_PLAN = "stress_test_plan.json"
+V3_MECHANISM_METRICS = "mechanism_metrics.json"
+V3_MECHANISM_VALIDATION_REPORT = "validation_report.json"
+
+V3_FRAMEWORK_ARTIFACTS = (
+    *FRAMEWORK_BOOTSTRAP_ARTIFACTS,
+    V3_LITERATURE_CORPUS,
+    V3_LITERATURE_READING_TRACE,
+    V3_MECHANISM_CARDS,
+    V3_MECHANISM_LIBRARY,
+    V3_MECHANISM_GAP_MATRIX,
+)
+
+V3_MECHANISM_NODE_ARTIFACTS = (
+    V3_MECHANISM_SPEC,
+    V3_MECHANISM_IMPLEMENTATION,
+    V3_MECHANISM_PROPOSAL,
+    V3_ABLATION_PLAN,
+    V3_STRESS_TEST_PLAN,
+    V3_MECHANISM_METRICS,
+    V3_MECHANISM_VALIDATION_REPORT,
+)
+
+V3_STAGE_SEQUENCE = (
+    "read_literature",
+    "extract_mechanisms",
+    "develop_mechanisms",
+    "stress_test_mechanisms",
+    "ablate_mechanisms",
+    "validate_mechanisms",
+)
+
 LEGACY_PROJECT_EXECUTION_ARTIFACTS = (
     "framework/legacy_seed_paper_cards.json",
     "framework/policy_registry.yaml",

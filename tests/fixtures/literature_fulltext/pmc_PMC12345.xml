@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<article>
+  <front>
+    <article-meta>
+      <title-group>
+        <article-title>Fixture PMC title should not replace metadata title</article-title>
+      </title-group>
+      <abstract>
+        <p>Fixture XML abstract text.</p>
+      </abstract>
+    </article-meta>
+  </front>
+  <body>
+    <sec>
+      <title>Results</title>
+      <p>PMC body text describes batch active learning for constrained protein variant panels.</p>
+      <p>It includes acquisition functions, retrospective masking, and wet-lab guardrails.</p>
+    </sec>
+  </body>
+  <back>
+    <ref-list>
+      <ref>Reference text should not dominate the readable body.</ref>
+    </ref-list>
+  </back>
+</article>

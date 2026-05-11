@@ -21,6 +21,10 @@ def write_method_report(project_dir: str | Path, run_id: str | None = None) -> P
         requested = run_id or "<latest>"
         raise FileNotFoundError(f"No framework run directory found for run_id={requested!r}")
 
+    journal = _load_json(run_dir / "scientist_journal.json")
+    if isinstance(journal, dict) and journal.get("version") == "v3":
+        return _write_v3_method_report(root, selected_run_id, run_dir, journal)
+
     framework_dir = root / "framework"
     spec = _load_yaml(framework_dir / "framework_spec.yaml")
     reference_audit_text = _read_text(framework_dir / "reference_audit.md")
@@ -49,7 +53,6 @@ def write_method_report(project_dir: str | Path, run_id: str | None = None) -> P
     ablation_rows = _read_csv(run_dir / "ablation_results.csv")
     stage_progress = _load_json(run_dir / "stage_progress.json")
     route_tree = _load_json(run_dir / "route_tree.json")
-    journal = _load_json(run_dir / "scientist_journal.json")
     state = _load_json(root / "state" / "design_state.json")
     policy_metrics = _load_json(run_dir / "policy_metrics.json")
 
@@ -142,6 +145,427 @@ def write_method_report(project_dir: str | Path, run_id: str | None = None) -> P
     ensure_dir(out.parent)
     out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return out
+
+
+def _write_v3_method_report(
+    root: Path,
+    run_id: str,
+    run_dir: Path,
+    journal: dict[str, Any],
+) -> Path:
+    framework_dir = root / "framework"
+    spec = _load_yaml(framework_dir / "framework_spec.yaml")
+    literature_queries = _load_yaml(framework_dir / "literature_queries.yaml").get("queries", [])
+    paper_cards = _as_list(_load_json(framework_dir / "paper_cards.json"))
+    literature_plan = _load_json(framework_dir / "literature_search_plan.json")
+    literature_trace = _load_json(framework_dir / "literature_search_trace.json")
+    citation_graph = _load_json(framework_dir / "citation_graph.json")
+    paper_scores = _read_csv(framework_dir / "paper_scores.csv")
+    literature_corpus = _read_jsonl(framework_dir / "literature_corpus.jsonl")
+    reading_trace = _load_json(framework_dir / "literature_reading_trace.json")
+    mechanism_cards = _v3_collection(_load_json(framework_dir / "mechanism_cards.json"))
+    mechanism_library = _v3_collection(_load_json(framework_dir / "mechanism_library.json"))
+    mechanism_gap_rows = _read_csv(framework_dir / "mechanism_gap_matrix.csv")
+    stage_progress = _load_json(run_dir / "stage_progress.json")
+    route_tree = _load_json(run_dir / "route_tree.json")
+    benchmark_rows = _read_csv(run_dir / "mechanism_benchmark_results.csv")
+    benchmark_summary_rows = _read_csv(run_dir / "mechanism_benchmark_summary.csv")
+    ablation_rows = _read_csv(run_dir / "mechanism_ablation_results.csv")
+
+    selected_node = _selected_node_record(journal)
+    selected_summary = _selected_node_summary(journal, selected_node)
+    mechanism_spec = _selected_json_artifact(root, selected_node, "mechanism_spec", "mechanism_spec.json")
+    proposal = _selected_json_artifact(root, selected_node, "proposal", "proposal.json")
+    ablation_plan = _selected_json_artifact(root, selected_node, "ablation_plan", "ablation_plan.json")
+    stress_test_plan = _selected_json_artifact(root, selected_node, "stress_test_plan", "stress_test_plan.json")
+    mechanism_metrics = _selected_json_artifact(root, selected_node, "mechanism_metrics", "mechanism_metrics.json")
+    validation_report = _selected_json_artifact(root, selected_node, "validation_report", "validation_report.json")
+    selected_mechanism = _v3_selected_mechanism_name(selected_summary, mechanism_spec, mechanism_metrics)
+    selected_summary_row = _v3_find_row(benchmark_summary_rows, selected_mechanism)
+    failed_nodes = _failed_nodes(journal)
+
+    lines: list[str] = [
+        f"# V3 Method Report: {run_id}",
+        "",
+        f"Project directory: `{root}`",
+        f"Run directory: `{_rel(run_dir, root)}`",
+        f"Framework: `{spec.get('framework_id', root.name)}`",
+        f"Domain: {spec.get('domain', 'not recorded')}",
+        "",
+        "V3 is organized as a MechanismSpec Kernel backed by Literature Engine V3. "
+        "This report summarizes mechanism evidence and does not convert synthetic replay into wet-lab proof.",
+        "",
+    ]
+
+    lines.extend(
+        _v3_literature_engine_section(
+            root,
+            literature_queries,
+            literature_plan,
+            literature_trace,
+            citation_graph,
+            paper_scores,
+            paper_cards,
+            literature_corpus,
+            reading_trace,
+        )
+    )
+    lines.extend(_v3_mechanism_library_section(root, mechanism_cards, mechanism_library, mechanism_gap_rows))
+    lines.extend(_stage_progress_section(root, run_dir, stage_progress))
+    lines.extend(_route_tree_section(root, run_dir, route_tree))
+    lines.extend(_v3_mechanism_spec_section(selected_summary, mechanism_spec, proposal))
+    lines.extend(_v3_stress_tests_section(stress_test_plan))
+    lines.extend(_v3_baseline_comparison_section(root, run_dir, benchmark_rows, benchmark_summary_rows, selected_summary_row))
+    lines.extend(_v3_ablation_section(root, run_dir, ablation_plan, ablation_rows))
+    lines.extend(
+        _v3_selected_mechanism_section(
+            selected_summary,
+            selected_mechanism,
+            selected_summary_row,
+            mechanism_metrics,
+            validation_report,
+        )
+    )
+    lines.extend(_v3_failed_nodes_section(failed_nodes))
+    lines.extend(_v3_unsupported_claims_section(journal, mechanism_metrics, validation_report))
+    lines.extend(_artifact_paths_section(_v3_artifact_paths(root, run_dir, selected_node)))
+
+    out = run_dir / "method_report.md"
+    ensure_dir(out.parent)
+    out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return out
+
+
+def _v3_literature_engine_section(
+    root: Path,
+    literature_queries: Any,
+    literature_plan: Any,
+    literature_trace: Any,
+    citation_graph: Any,
+    paper_scores: list[dict[str, str]],
+    paper_cards: list[dict[str, Any]],
+    literature_corpus: list[dict[str, Any]],
+    reading_trace: Any,
+) -> list[str]:
+    lines = [
+        "## Literature Engine V3",
+        "",
+        "Artifacts: "
+        f"`{_rel(root / 'framework' / 'literature_corpus.jsonl', root)}`, "
+        f"`{_rel(root / 'framework' / 'literature_reading_trace.json', root)}`, "
+        f"`{_rel(root / 'framework' / 'paper_cards.json', root)}`",
+        "",
+        f"Literature corpus records: {len(literature_corpus)}",
+        f"Paper cards reviewed: {len(paper_cards)}",
+        f"Paper score rows: {len(paper_scores)}",
+    ]
+    queries = literature_queries if isinstance(literature_queries, list) else []
+    plan_queries = literature_plan.get("queries") if isinstance(literature_plan, dict) else []
+    if isinstance(plan_queries, list) and plan_queries:
+        queries = plan_queries
+    lines.extend(["", "Queries:"])
+    if queries:
+        for query in queries[:8]:
+            if isinstance(query, dict):
+                lines.append(f"- `{query.get('query_id', 'query')}`: {_one_line(query.get('query'))}")
+    else:
+        lines.append("- No literature queries were loaded.")
+
+    trace_events = literature_trace.get("events") if isinstance(literature_trace, dict) else []
+    reading_events = reading_trace.get("events") if isinstance(reading_trace, dict) else []
+    graph_nodes = citation_graph.get("nodes") if isinstance(citation_graph, dict) else []
+    graph_edges = citation_graph.get("edges") if isinstance(citation_graph, dict) else []
+    lines.extend(
+        [
+            "",
+            "Reading and search trace:",
+            f"- Search trace events: {len(trace_events) if isinstance(trace_events, list) else 0}",
+            f"- Reading trace events: {len(reading_events) if isinstance(reading_events, list) else 0}",
+            f"- Citation graph nodes: {len(graph_nodes) if isinstance(graph_nodes, list) else 0}",
+            f"- Citation graph edges: {len(graph_edges) if isinstance(graph_edges, list) else 0}",
+        ]
+    )
+    if literature_corpus:
+        lines.extend(["", "Corpus records:"])
+        for record in literature_corpus[:8]:
+            lines.append(
+                f"- `{record.get('paper_id', 'paper')}`: "
+                f"{_one_line(record.get('title') or record.get('citation') or record.get('summary'))}"
+            )
+    lines.append("")
+    return lines
+
+
+def _v3_mechanism_library_section(
+    root: Path,
+    mechanism_cards: list[dict[str, Any]],
+    mechanism_library: list[dict[str, Any]],
+    mechanism_gap_rows: list[dict[str, str]],
+) -> list[str]:
+    lines = [
+        "## Mechanism Library",
+        "",
+        "Artifacts: "
+        f"`{_rel(root / 'framework' / 'mechanism_cards.json', root)}`, "
+        f"`{_rel(root / 'framework' / 'mechanism_library.json', root)}`, "
+        f"`{_rel(root / 'framework' / 'mechanism_gap_matrix.csv', root)}`",
+        "",
+        f"Mechanism cards: {len(mechanism_cards)}",
+        f"Mechanism library entries: {len(mechanism_library)}",
+        f"Mechanism gap rows: {len(mechanism_gap_rows)}",
+    ]
+    entries = mechanism_library or mechanism_cards
+    if entries:
+        lines.extend(["", "Mechanisms:"])
+        for mechanism in entries[:10]:
+            components = _v3_component_ids(mechanism.get("components"))
+            claims = _v3_list_text(mechanism.get("claims"))
+            lines.append(
+                f"- `{mechanism.get('mechanism_id') or mechanism.get('name') or 'mechanism'}`: "
+                f"components={components or 'n/a'}; claims={claims or 'n/a'}"
+            )
+    if mechanism_gap_rows:
+        lines.extend(["", "Mechanism gaps:"])
+        for row in mechanism_gap_rows[:8]:
+            lines.append(f"- `{row.get('mechanism_id', 'mechanism')}`: {_one_line(row.get('gap'))}")
+    lines.append("")
+    return lines
+
+
+def _v3_mechanism_spec_section(
+    selected_summary: dict[str, Any],
+    mechanism_spec: Any,
+    proposal: Any,
+) -> list[str]:
+    lines = ["## MechanismSpec Kernel", ""]
+    if not isinstance(mechanism_spec, dict) or not mechanism_spec:
+        lines.extend(["No mechanism_spec.json artifact was loaded for the selected node.", ""])
+        return lines
+    lines.extend(
+        [
+            f"Selected node: `{selected_summary.get('node_id', 'unknown')}`",
+            f"MechanismSpec: `{mechanism_spec.get('mechanism_id') or mechanism_spec.get('name') or 'unknown'}`",
+            f"Version: `{mechanism_spec.get('version', 'v3')}`",
+            "",
+            "MechanismSpec components:",
+        ]
+    )
+    components = mechanism_spec.get("components")
+    if isinstance(components, list) and components:
+        for component in components:
+            if isinstance(component, dict):
+                lines.append(
+                    f"- `{component.get('component_id', 'component')}` "
+                    f"({component.get('component_type', 'component')}): {_one_line(component.get('description'))}"
+                )
+            else:
+                lines.append(f"- {_one_line(component)}")
+    else:
+        lines.append("- No components were recorded.")
+    lines.extend(["", "Mechanism claims:"])
+    claims = _v3_list_items(mechanism_spec.get("claims") or mechanism_spec.get("claim"))
+    if claims:
+        lines.extend(f"- {_one_line(claim)}" for claim in claims)
+    else:
+        lines.append("- No claims were recorded.")
+    literature_basis = _v3_list_items(mechanism_spec.get("literature_basis"))
+    if literature_basis:
+        lines.extend(["", "Literature basis:"])
+        lines.extend(f"- {_one_line(item)}" for item in literature_basis)
+    stress_requirements = _v3_list_items(
+        mechanism_spec.get("stress_test_requirements") or mechanism_spec.get("stress_test_requirement")
+    )
+    if stress_requirements:
+        lines.extend(["", "Stress test requirements:"])
+        lines.extend(f"- {_one_line(item)}" for item in stress_requirements)
+    ablation_targets = _v3_list_items(mechanism_spec.get("ablation_targets"))
+    if ablation_targets:
+        lines.extend(["", "Ablation targets:"])
+        lines.extend(f"- {_one_line(item)}" for item in ablation_targets)
+    if isinstance(proposal, dict) and proposal.get("hypothesis"):
+        lines.extend(["", f"Proposal hypothesis: {_one_line(proposal.get('hypothesis'))}"])
+    lines.append("")
+    return lines
+
+
+def _v3_stress_tests_section(stress_test_plan: Any) -> list[str]:
+    lines = ["## Stress Tests", ""]
+    if not isinstance(stress_test_plan, dict) or not stress_test_plan:
+        lines.extend(["No stress_test_plan.json artifact was loaded for the selected mechanism.", ""])
+        return lines
+    worlds = stress_test_plan.get("worlds")
+    baselines = stress_test_plan.get("required_baselines")
+    lines.append(f"Required baselines: {_v3_list_text(baselines) or 'not recorded'}")
+    lines.extend(["", "Stress-test worlds:"])
+    if isinstance(worlds, list) and worlds:
+        for world in worlds:
+            if isinstance(world, dict):
+                lines.append(f"- `{world.get('world_id', 'world')}`: {_one_line(world.get('purpose') or world.get('claim'))}")
+            else:
+                lines.append(f"- {_one_line(world)}")
+    else:
+        lines.append("- No stress-test worlds were recorded.")
+    criteria = stress_test_plan.get("acceptance_criteria")
+    if criteria:
+        lines.extend(["", f"Acceptance criteria: {_compact_jsonish(criteria)}"])
+    lines.append("")
+    return lines
+
+
+def _v3_baseline_comparison_section(
+    root: Path,
+    run_dir: Path,
+    benchmark_rows: list[dict[str, str]],
+    benchmark_summary_rows: list[dict[str, str]],
+    selected_summary_row: dict[str, str],
+) -> list[str]:
+    lines = [
+        "## Baseline Comparison",
+        "",
+        f"Artifacts: `{_rel(run_dir / 'mechanism_benchmark_results.csv', root)}`, `{_rel(run_dir / 'mechanism_benchmark_summary.csv', root)}`",
+        "",
+    ]
+    if benchmark_summary_rows:
+        preferred = [
+            "rank",
+            "mechanism",
+            "worlds_tested",
+            "majority_win_vs_random_feasible",
+            "majority_win_vs_fixed_mix",
+            "mean_best_feasible_utility",
+            "mean_false_claim_rate",
+            "key_ablation_delta",
+            "architecture_clone",
+            "selected_eligible",
+        ]
+        lines.extend(_markdown_table(preferred, benchmark_summary_rows))
+    else:
+        lines.append("No mechanism_benchmark_summary.csv rows were loaded.")
+    if selected_summary_row:
+        lines.extend(["", "Selected mechanism benchmark gate:"])
+        for key in (
+            "majority_win_vs_random_feasible",
+            "majority_win_vs_fixed_mix",
+            "key_ablation_delta",
+            "mean_false_claim_rate",
+            "selected_eligible",
+        ):
+            if selected_summary_row.get(key) not in (None, ""):
+                lines.append(f"- {key}: {selected_summary_row.get(key)}")
+    if benchmark_rows:
+        lines.extend(["", f"Per-world benchmark rows: {len(benchmark_rows)}"])
+    lines.append("")
+    return lines
+
+
+def _v3_ablation_section(
+    root: Path,
+    run_dir: Path,
+    ablation_plan: Any,
+    ablation_rows: list[dict[str, str]],
+) -> list[str]:
+    lines = [
+        "## Ablation",
+        "",
+        f"Artifact: `{_rel(run_dir / 'mechanism_ablation_results.csv', root)}`",
+        "",
+    ]
+    planned = ablation_plan.get("ablations") if isinstance(ablation_plan, dict) else []
+    lines.append(f"Planned ablations: {len(planned) if isinstance(planned, list) else 0}")
+    if isinstance(planned, list) and planned:
+        for item in planned[:8]:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- `{item.get('ablation_id') or item.get('name') or 'ablation'}`: "
+                    f"{_v3_list_text(item.get('removed_components')) or _one_line(item.get('purpose'))}"
+                )
+    if ablation_rows:
+        preferred = [
+            "world_id",
+            "mechanism",
+            "ablation",
+            "removed_component",
+            "best_feasible_utility",
+            "delta_from_full_best_feasible_utility",
+            "false_claim_rate",
+        ]
+        lines.extend(["", "Ablation results:"])
+        lines.extend(_markdown_table(preferred, ablation_rows))
+    else:
+        lines.extend(["", "No mechanism_ablation_results.csv rows were loaded."])
+    lines.append("")
+    return lines
+
+
+def _v3_selected_mechanism_section(
+    selected_summary: dict[str, Any],
+    selected_mechanism: str | None,
+    selected_summary_row: dict[str, str],
+    mechanism_metrics: Any,
+    validation_report: Any,
+) -> list[str]:
+    lines = ["## Selected Mechanism", ""]
+    if not selected_summary:
+        lines.extend(["No selected mechanism was recorded in scientist_journal.json.", ""])
+        return lines
+    lines.extend(
+        [
+            f"Selected node: `{selected_summary.get('node_id', 'unknown')}`",
+            f"Selected mechanism: `{selected_mechanism or 'unknown'}`",
+            f"Workspace: `{selected_summary.get('workspace', 'unknown')}`",
+        ]
+    )
+    if selected_summary_row:
+        lines.extend(["", "Eligibility summary:"])
+        for key in ("rank", "selected_eligible", "architecture_clone", "key_ablation_delta"):
+            if selected_summary_row.get(key) not in (None, ""):
+                lines.append(f"- {key}: {selected_summary_row.get(key)}")
+    if isinstance(mechanism_metrics, dict) and mechanism_metrics:
+        metrics = mechanism_metrics.get("metrics") if isinstance(mechanism_metrics.get("metrics"), dict) else {}
+        lines.extend(["", "Mechanism metrics:"])
+        for key, value in list(metrics.items())[:10]:
+            lines.append(f"- {key}: {_one_line(value)}")
+        for key in ("selected_eligible", "architecture_clone"):
+            if key in mechanism_metrics:
+                lines.append(f"- {key}: {_one_line(mechanism_metrics.get(key))}")
+    if isinstance(validation_report, dict) and validation_report:
+        lines.extend(["", "Validation report:"])
+        lines.append(f"- valid: {_one_line(validation_report.get('valid', 'n/a'))}")
+        for caveat in _v3_list_items(validation_report.get("caveats"))[:6]:
+            lines.append(f"- caveat: {_one_line(caveat)}")
+    lines.append("")
+    return lines
+
+
+def _v3_failed_nodes_section(failed_nodes: list[dict[str, Any]]) -> list[str]:
+    lines = ["## Failed Nodes", ""]
+    if not failed_nodes:
+        lines.extend(["No failed V3 mechanism nodes were recorded.", ""])
+        return lines
+    for node in failed_nodes:
+        reasons = node.get("reasons") or node.get("failure_reasons") or ["reason not recorded"]
+        lines.append(f"- `{node.get('node_id', 'unknown')}`: {'; '.join(map(str, reasons))}")
+    lines.append("")
+    return lines
+
+
+def _v3_unsupported_claims_section(
+    journal: dict[str, Any],
+    mechanism_metrics: Any,
+    validation_report: Any,
+) -> list[str]:
+    lines = ["## Unsupported Claims and Validation Caveats", ""]
+    claims: list[str] = []
+    claims.extend(str(item) for item in _v3_list_items(journal.get("unsupported_claims")))
+    if isinstance(mechanism_metrics, dict):
+        claims.extend(str(item) for item in _v3_list_items(mechanism_metrics.get("unsupported_claims")))
+    if isinstance(validation_report, dict):
+        claims.extend(str(item) for item in _v3_list_items(validation_report.get("caveats")))
+    claims.append("Synthetic replay ranking does not establish prospective wet-lab superiority.")
+    for claim in _unique(claims):
+        lines.append(f"- {claim}")
+    lines.append("")
+    return lines
 
 
 def _reference_basis_section(
@@ -794,6 +1218,38 @@ def _artifact_paths(root: Path, run_dir: Path, journal: Any) -> dict[str, str]:
     return paths
 
 
+def _v3_artifact_paths(root: Path, run_dir: Path, selected_node: dict[str, Any] | None) -> dict[str, str]:
+    paths = {
+        "framework_spec": _rel(root / "framework" / "framework_spec.yaml", root),
+        "literature_queries": _rel(root / "framework" / "literature_queries.yaml", root),
+        "paper_cards": _rel(root / "framework" / "paper_cards.json", root),
+        "literature_search_plan": _rel(root / "framework" / "literature_search_plan.json", root),
+        "literature_search_trace": _rel(root / "framework" / "literature_search_trace.json", root),
+        "citation_graph": _rel(root / "framework" / "citation_graph.json", root),
+        "paper_scores": _rel(root / "framework" / "paper_scores.csv", root),
+        "literature_corpus": _rel(root / "framework" / "literature_corpus.jsonl", root),
+        "literature_reading_trace": _rel(root / "framework" / "literature_reading_trace.json", root),
+        "mechanism_cards": _rel(root / "framework" / "mechanism_cards.json", root),
+        "mechanism_library": _rel(root / "framework" / "mechanism_library.json", root),
+        "mechanism_gap_matrix": _rel(root / "framework" / "mechanism_gap_matrix.csv", root),
+        "quest": _rel(root / "framework" / "quest.yaml", root),
+        "research_map": _rel(root / "framework" / "research_map.json", root),
+        "findings_memory": _rel(root / "framework" / "findings_memory.jsonl", root),
+        "failure_memory": _rel(root / "framework" / "failure_memory.jsonl", root),
+        "scientist_journal": _rel(run_dir / "scientist_journal.json", root),
+        "stage_progress": _rel(run_dir / "stage_progress.json", root),
+        "route_tree": _rel(run_dir / "route_tree.json", root),
+        "mechanism_benchmark_results": _rel(run_dir / "mechanism_benchmark_results.csv", root),
+        "mechanism_benchmark_summary": _rel(run_dir / "mechanism_benchmark_summary.csv", root),
+        "mechanism_ablation_results": _rel(run_dir / "mechanism_ablation_results.csv", root),
+        "method_report": _rel(run_dir / "method_report.md", root),
+    }
+    if selected_node and isinstance(selected_node.get("artifacts"), dict):
+        for key, value in selected_node["artifacts"].items():
+            paths[f"selected_node_{key}"] = _rel(Path(str(value)), root)
+    return paths
+
+
 def _selected_node_record(journal: Any) -> dict[str, Any] | None:
     if not isinstance(journal, dict):
         return None
@@ -944,6 +1400,82 @@ def _largest_ablation_delta(rows: list[dict[str, str]]) -> tuple[str, str] | Non
     if best is None:
         return None
     return best[0], best[1]
+
+
+def _v3_collection(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        for key in ("mechanisms", "cards", "items"):
+            items = value.get(key)
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def _v3_selected_mechanism_name(
+    selected_summary: dict[str, Any],
+    mechanism_spec: Any,
+    mechanism_metrics: Any,
+) -> str | None:
+    for source in (selected_summary, mechanism_metrics, mechanism_spec):
+        if not isinstance(source, dict):
+            continue
+        for key in (
+            "mechanism",
+            "mechanism_name",
+            "benchmark_mechanism",
+            "benchmark_method",
+            "benchmark_policy_name",
+            "method",
+            "mechanism_id",
+            "name",
+        ):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return None
+
+
+def _v3_find_row(rows: list[dict[str, str]], mechanism: str | None) -> dict[str, str]:
+    if not mechanism:
+        return {}
+    for row in rows:
+        if row.get("mechanism") == mechanism or row.get("method") == mechanism:
+            return dict(row)
+    return {}
+
+
+def _v3_component_ids(value: Any) -> str:
+    items = _v3_list_items(value)
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            label = item.get("component_id") or item.get("name") or item.get("component_type")
+            if label:
+                out.append(str(label))
+        elif item:
+            out.append(str(item))
+    return ", ".join(out)
+
+
+def _v3_list_items(value: Any) -> list[Any]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, list):
+        return [item for item in value if item not in (None, "", [], {})]
+    return [value]
+
+
+def _v3_list_text(value: Any) -> str:
+    out: list[str] = []
+    for item in _v3_list_items(value):
+        if isinstance(item, dict):
+            label = item.get("component_id") or item.get("world_id") or item.get("name") or item.get("id")
+            out.append(_one_line(label or item))
+        else:
+            out.append(_one_line(item))
+    return ", ".join(item for item in out if item)
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

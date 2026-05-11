@@ -96,8 +96,9 @@ def test_readme_and_framework_markdown_do_not_document_failing_staged_review_wor
         encoding="utf-8"
     )
 
-    assert "run-scientist` is the recommended full-chain CLI path" in readme
-    assert "staged commands are debug/development entry points" in readme
+    assert "`run-scientist` is the recommended full-chain CLI path" in readme
+    assert "Staged framework commands are debug/development entry points" in readme
+    assert "--legacy-v2" in readme
     assert (
         "uv run design-scientist benchmark-methods /tmp/my_design_scientist_project --rounds 3\n"
         "uv run design-scientist review-framework /tmp/my_design_scientist_project"
@@ -134,6 +135,7 @@ def test_cli_offline_run_scientist_generates_report_and_validates(
             "--rounds",
             "2",
             "--offline-fixtures",
+            "--legacy-v2",
         ]
     ) == 0
 
