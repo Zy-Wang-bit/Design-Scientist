@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v1</id>
+    <title>Bayesian optimization for protein engineering</title>
+    <summary>Surrogate models and acquisition functions for batch protein design.</summary>
+    <published>2024-01-03T00:00:00Z</published>
+    <author><name>Edsger Dijkstra</name></author>
+    <arxiv:doi>10.48550/arXiv.2401.00001</arxiv:doi>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2401.00002v1</id>
+    <title>Small data active design for antibody variants</title>
+    <summary>Active design for antibody variant panels with constraints.</summary>
+    <published>2024-01-04T00:00:00Z</published>
+    <author><name>Mary Jackson</name></author>
+  </entry>
+</feed>

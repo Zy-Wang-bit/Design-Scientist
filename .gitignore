@@ -1,0 +1,19 @@
+.DS_Store
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+
+# Local scratch outputs from verification and previews.
+tmp/
+
+# Keep runtime projects out of the framework repository by default.
+projects/*/
+!projects/.gitkeep
+
+# Local reference checkouts are large read-only inputs, not part of this repo.
+references/AI-Scientist/
+references/AI-Scientist-v2/
+references/DeepScientist/

@@ -1,0 +1,1172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Design Scientist 框架说明</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17201d;
+      --muted: #5b6762;
+      --line: #d9e1dd;
+      --paper: #f7faf8;
+      --panel: #ffffff;
+      --teal: #0f7c78;
+      --teal-dark: #075b58;
+      --red: #ad4d35;
+      --green: #617536;
+      --gold: #b9812c;
+      --code: #111816;
+      --shadow: 0 18px 50px rgba(23, 32, 29, 0.12);
+      --sidebar: 288px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", sans-serif;
+      font-size: 16px;
+      line-height: 1.68;
+      letter-spacing: 0;
+      overflow-x: hidden;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: var(--sidebar) minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.86);
+      backdrop-filter: blur(18px);
+      padding: 28px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 26px;
+      z-index: 5;
+    }
+
+    .brand {
+      display: grid;
+      gap: 8px;
+    }
+
+    .brand-mark {
+      width: 44px;
+      height: 44px;
+      border: 2px solid var(--ink);
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      color: var(--teal-dark);
+      background: #ffffff;
+    }
+
+    .brand h1 {
+      font-size: 21px;
+      line-height: 1.15;
+      margin: 0;
+    }
+
+    .brand p {
+      color: var(--muted);
+      font-size: 13px;
+      margin: 0;
+      line-height: 1.45;
+    }
+
+    .nav {
+      display: grid;
+      gap: 6px;
+      padding: 4px 0;
+    }
+
+    .nav a {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 38px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      border: 1px solid transparent;
+    }
+
+    .nav a::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--line);
+      flex: 0 0 auto;
+    }
+
+    .nav a.active,
+    .nav a:hover {
+      color: var(--ink);
+      background: #edf5f2;
+      border-color: #c8d9d3;
+    }
+
+    .nav a.active::before,
+    .nav a:hover::before {
+      background: var(--teal);
+    }
+
+    .tools {
+      margin-top: auto;
+      display: grid;
+      gap: 8px;
+    }
+
+    .tool-button {
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--ink);
+      cursor: pointer;
+      padding: 8px 10px;
+      text-align: left;
+    }
+
+    .tool-button:hover,
+    .tool-button:focus-visible {
+      border-color: var(--teal);
+      outline: none;
+    }
+
+    .content {
+      min-width: 0;
+      overflow-x: hidden;
+    }
+
+    .section {
+      min-height: 100vh;
+      padding: 72px 7vw;
+      display: grid;
+      align-content: center;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section:nth-child(even) {
+      background: #ffffff;
+    }
+
+    .section-inner {
+      max-width: 1160px;
+      width: 100%;
+      margin: 0 auto;
+      min-width: 0;
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--teal-dark);
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    h2 {
+      font-size: 42px;
+      line-height: 1.14;
+      margin: 0 0 18px;
+      max-width: 900px;
+      overflow-wrap: anywhere;
+    }
+
+    h3 {
+      font-size: 20px;
+      line-height: 1.3;
+      margin: 0 0 10px;
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    .lead {
+      color: var(--muted);
+      font-size: 20px;
+      line-height: 1.55;
+      max-width: 920px;
+      overflow-wrap: anywhere;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(360px, 0.72fr);
+      gap: 44px;
+      align-items: center;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 28px;
+    }
+
+    .primary-link,
+    .secondary-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 9px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--teal);
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .primary-link {
+      background: var(--teal);
+      color: #ffffff;
+    }
+
+    .secondary-link {
+      background: transparent;
+      color: var(--teal-dark);
+    }
+
+    .status-board {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .status-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status-list {
+      display: grid;
+      padding: 14px 16px 18px;
+      gap: 12px;
+    }
+
+    .status-row {
+      display: grid;
+      grid-template-columns: 116px minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+    }
+
+    .status-row strong {
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .bar {
+      height: 14px;
+      border-radius: 999px;
+      background: #e9efec;
+      overflow: hidden;
+    }
+
+    .bar span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+    }
+
+    .bar.teal span {
+      width: 92%;
+      background: var(--teal);
+    }
+
+    .bar.green span {
+      width: 78%;
+      background: var(--green);
+    }
+
+    .bar.gold span {
+      width: 65%;
+      background: var(--gold);
+    }
+
+    .bar.red span {
+      width: 38%;
+      background: var(--red);
+    }
+
+    .grid-2,
+    .grid-3 {
+      display: grid;
+      gap: 18px;
+      margin-top: 28px;
+    }
+
+    .grid-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 20px;
+      min-height: 190px;
+    }
+
+    .card p,
+    .card li {
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .mode-card {
+      min-height: 250px;
+      display: grid;
+      align-content: space-between;
+      border-top: 5px solid var(--teal);
+    }
+
+    .mode-card.execution {
+      border-top-color: var(--red);
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 14px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 4px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+      background: #f9fbfa;
+    }
+
+    .architecture-map {
+      margin-top: 30px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .layer {
+      display: grid;
+      grid-template-columns: 180px minmax(0, 1fr);
+      align-items: stretch;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+
+    .layer-title {
+      background: #edf5f2;
+      color: var(--teal-dark);
+      font-weight: 800;
+      padding: 16px;
+      display: grid;
+      align-content: center;
+    }
+
+    .layer-copy {
+      padding: 16px 18px;
+      color: var(--muted);
+    }
+
+    .loop {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 30px;
+      align-items: stretch;
+    }
+
+    .loop-step {
+      min-height: 124px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+      position: relative;
+      display: grid;
+      align-content: start;
+      gap: 8px;
+    }
+
+    .loop-step::after {
+      content: "";
+      position: absolute;
+      right: -7px;
+      top: 50%;
+      width: 12px;
+      height: 12px;
+      border-top: 2px solid var(--teal);
+      border-right: 2px solid var(--teal);
+      transform: translateY(-50%) rotate(45deg);
+      background: var(--paper);
+      z-index: 1;
+    }
+
+    .loop-step:last-child::after {
+      display: none;
+    }
+
+    .loop-step strong {
+      font-size: 14px;
+      line-height: 1.25;
+    }
+
+    .loop-step span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.38;
+    }
+
+    .artifact-table {
+      width: 100%;
+      margin-top: 28px;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      overflow: hidden;
+      display: table;
+    }
+
+    .artifact-table th,
+    .artifact-table td {
+      text-align: left;
+      vertical-align: top;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .artifact-table th {
+      background: #edf5f2;
+      color: var(--teal-dark);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .artifact-table td {
+      color: var(--muted);
+    }
+
+    .artifact-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    code,
+    pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      color: var(--code);
+      background: #eef3f1;
+      padding: 1px 5px;
+      border-radius: 5px;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 26px 0 0;
+      background: #101816;
+      color: #e9f4ef;
+      border-radius: 8px;
+      padding: 18px;
+      overflow-x: auto;
+      line-height: 1.55;
+      font-size: 14px;
+    }
+
+    .metric-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 16px;
+      min-height: 122px;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 24px;
+      line-height: 1.2;
+      color: var(--teal-dark);
+      margin-bottom: 8px;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .callout {
+      margin-top: 28px;
+      border-left: 5px solid var(--red);
+      background: #fff8f5;
+      padding: 18px 20px;
+      border-radius: 0 8px 8px 0;
+      color: #4f2d25;
+    }
+
+    .compact-list {
+      margin: 12px 0 0;
+      padding-left: 18px;
+    }
+
+    .compact-list li {
+      margin: 6px 0;
+    }
+
+    .handoff-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .handoff-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 16px;
+      display: grid;
+      gap: 6px;
+      min-height: 112px;
+    }
+
+    .handoff-item strong {
+      color: var(--ink);
+    }
+
+    .handoff-item span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 14px;
+      margin-top: 28px;
+    }
+
+    .presentation-status {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      min-width: 128px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: var(--shadow);
+      padding: 9px 12px;
+      color: var(--muted);
+      font-size: 13px;
+      display: none;
+      z-index: 10;
+    }
+
+    body.presentation-mode {
+      overflow: hidden;
+    }
+
+    body.presentation-mode .sidebar {
+      transform: translateX(-100%);
+    }
+
+    body.presentation-mode .shell {
+      grid-template-columns: 1fr;
+    }
+
+    body.presentation-mode .section {
+      display: none;
+      min-height: 100vh;
+      padding: 64px 8vw;
+    }
+
+    body.presentation-mode .section.current {
+      display: grid;
+    }
+
+    body.presentation-mode .presentation-status {
+      display: block;
+    }
+
+    @media (max-width: 1120px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        position: relative;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .nav {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .hero-grid,
+      .grid-2,
+      .grid-3,
+      .metric-strip,
+      .handoff-list {
+        grid-template-columns: 1fr;
+      }
+
+      .loop {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .loop-step::after {
+        display: none;
+      }
+    }
+
+    @media (max-width: 720px) {
+      body {
+        font-size: 15px;
+      }
+
+      .section {
+        min-height: auto;
+        display: block;
+        padding: 48px 20px;
+      }
+
+      .sidebar {
+        padding: 22px 18px;
+        gap: 18px;
+      }
+
+      .nav {
+        grid-template-columns: 1fr;
+      }
+
+      h2 {
+        font-size: 30px;
+      }
+
+      .lead {
+        font-size: 17px;
+      }
+
+      .hero-grid {
+        grid-template-columns: 1fr;
+        gap: 28px;
+      }
+
+      .status-row,
+      .layer {
+        grid-template-columns: 1fr;
+      }
+
+      .loop {
+        grid-template-columns: 1fr;
+      }
+
+      .artifact-table {
+        display: block;
+        overflow-x: auto;
+      }
+
+      p,
+      .card p,
+      .card li,
+      .handoff-item span,
+      .layer-copy,
+      .loop-step span {
+        overflow-wrap: anywhere;
+      }
+    }
+
+    @media print {
+      body {
+        background: #ffffff;
+        color: #000000;
+      }
+
+      .shell {
+        display: block;
+      }
+
+      .sidebar,
+      .presentation-status,
+      .hero-actions {
+        display: none;
+      }
+
+      .section {
+        min-height: auto;
+        display: block;
+        padding: 26mm 18mm;
+        border-bottom: 0;
+        page-break-after: always;
+        background: #ffffff;
+      }
+
+      .section:last-child {
+        page-break-after: auto;
+      }
+
+      h2 {
+        font-size: 28px;
+      }
+
+      .card,
+      .metric,
+      .handoff-item,
+      .status-board,
+      .layer,
+      .loop-step {
+        box-shadow: none;
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="页面导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">DS</div>
+        <h1>Design Scientist</h1>
+        <p>本地长期运行的计算科研系统，用于数据驱动、多轮迭代的 variant design。</p>
+      </div>
+
+      <nav class="nav" aria-label="章节">
+        <a href="#overview" class="active">定位</a>
+        <a href="#architecture">架构</a>
+        <a href="#workflow">流程</a>
+        <a href="#evidence">证据</a>
+        <a href="#benchmark">Benchmark</a>
+        <a href="#handoff">交付</a>
+      </nav>
+
+      <div class="tools">
+        <button class="tool-button" type="button" id="presentationToggle">进入演示模式</button>
+        <button class="tool-button" type="button" onclick="window.print()">打印 / 导出 PDF</button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section class="section current" id="overview" data-title="定位">
+        <div class="section-inner hero-grid">
+          <div>
+            <p class="eyebrow">Framework Brief</p>
+            <h2>不是普通实验流水线，而是会持续改进计算设计方法的 Research OS。</h2>
+            <p class="lead">
+              Design Scientist 面向 wet-lab variant design：已有多轮实验数据、目标明确、约束真实存在，并且每一轮新数据都要更新长期研究状态，而不是让策略从零开始。
+            </p>
+            <p>
+              框架分成两种工作模式：<strong>Framework R&D</strong> 负责发明、实现、对照和消融新的计算设计方法；<strong>Project execution</strong> 使用当前通过验证的方法，为具体项目产出候选池、推荐面板和 human review packet。
+            </p>
+            <div class="hero-actions">
+              <a class="primary-link" href="#workflow">看核心循环</a>
+              <a class="secondary-link" href="../pdf/Design Scientist 框架说明.pdf">打开现有 PDF</a>
+            </div>
+          </div>
+
+          <div class="status-board" aria-label="框架状态摘要">
+            <div class="status-head">
+              <span>Current local status</span>
+              <span>offline framework loop</span>
+            </div>
+            <div class="status-list">
+              <div class="status-row">
+                <strong>Artifacts</strong>
+                <div class="bar teal"><span></span></div>
+              </div>
+              <div class="status-row">
+                <strong>Replay suite</strong>
+                <div class="bar green"><span></span></div>
+              </div>
+              <div class="status-row">
+                <strong>Human gates</strong>
+                <div class="bar gold"><span></span></div>
+              </div>
+              <div class="status-row">
+                <strong>Live search</strong>
+                <div class="bar red"><span></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="architecture" data-title="架构">
+        <div class="section-inner">
+          <p class="eyebrow">System Architecture</p>
+          <h2>五层结构把参考仓库、文献、方法节点、benchmark 和真实项目交付拆开。</h2>
+          <p class="lead">
+            关键设计原则是：参考材料只读、方法节点隔离、结论必须落到 artifact，最终裁判由 deterministic benchmark 和 validation 完成。
+          </p>
+
+          <div class="architecture-map" aria-label="Design Scientist 架构层">
+            <div class="layer">
+              <div class="layer-title">Reference layer</div>
+              <div class="layer-copy">保留 AI-Scientist、AI-Scientist-v2 和 DeepScientist 作为只读参考，通过 <code>audit-references</code> 生成可追踪的 reference artifacts。</div>
+            </div>
+            <div class="layer">
+              <div class="layer-title">Research OS layer</div>
+              <div class="layer-copy">每个长期任务被初始化成 quest，维护 <code>quest.yaml</code>、<code>research_map.json</code>、findings memory 和 failure memory。</div>
+            </div>
+            <div class="layer">
+              <div class="layer-title">Literature layer</div>
+              <div class="layer-copy">文献检索、paper card 标准化、method module 抽取和 method registry 共同构成方法发明的输入。</div>
+            </div>
+            <div class="layer">
+              <div class="layer-title">Scientist manager</div>
+              <div class="layer-copy">把一次 scientist run 拆成 baseline reproduction、ideation、implementation、repair、ablation、selection 和 report。</div>
+            </div>
+            <div class="layer">
+              <div class="layer-title">Design kernel</div>
+              <div class="layer-copy">核心 experiment 不是训练模型，而是选择 candidate selection policy，在 synthetic multi-world replay 中比较策略表现。</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="workflow" data-title="流程">
+        <div class="section-inner">
+          <p class="eyebrow">Persistent Design Loop</p>
+          <h2>每轮新数据进入同一个状态更新循环，避免策略记忆只停留在对话里。</h2>
+          <p class="lead">
+            这个循环既服务 Framework R&D，也服务 Project execution。区别只在于前者评估方法，后者把当前可信方法用于实际候选推荐。
+          </p>
+
+          <div class="loop" aria-label="Design Scientist 持久设计循环">
+            <div class="loop-step">
+              <strong>standardized data</strong>
+              <span>只读取 data contract 允许的标准化表。</span>
+            </div>
+            <div class="loop-step">
+              <strong>evidence update</strong>
+              <span>构建 evidence cards，标注证据层级和限制。</span>
+            </div>
+            <div class="loop-step">
+              <strong>design state</strong>
+              <span>更新长期项目状态，而不是重启研究策略。</span>
+            </div>
+            <div class="loop-step">
+              <strong>candidate generation</strong>
+              <span>使用明确 operators 生成候选和对照。</span>
+            </div>
+            <div class="loop-step">
+              <strong>panel selection</strong>
+              <span>按预算选择下一批实验面板。</span>
+            </div>
+            <div class="loop-step">
+              <strong>validation</strong>
+              <span>检查 unsupported claims、identifier 和 artifact 完整性。</span>
+            </div>
+            <div class="loop-step">
+              <strong>new data merge</strong>
+              <span>新数据先进入 schema audit，再进入下一轮状态。</span>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <article class="card mode-card">
+              <div>
+                <h3>Framework R&D</h3>
+                <p>开发新的计算设计方法。关注 method hypothesis、literature basis、baseline 对照、ablation、novelty score 和 failure mode。</p>
+              </div>
+              <div class="tag-row">
+                <span class="tag">method nodes</span>
+                <span class="tag">benchmark suite</span>
+                <span class="tag">selected method</span>
+              </div>
+            </article>
+            <article class="card mode-card execution">
+              <div>
+                <h3>Project execution</h3>
+                <p>把当前可信方法用于具体项目，产出 candidate pool、panel recommendation、policy comparison、validation report 和 human review packet。</p>
+              </div>
+              <div class="tag-row">
+                <span class="tag">candidate pool</span>
+                <span class="tag">panel recommendation</span>
+                <span class="tag">human review</span>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="evidence" data-title="证据">
+        <div class="section-inner">
+          <p class="eyebrow">Evidence Discipline</p>
+          <h2>生命科学设计里，claim 的边界比页面好看更重要。</h2>
+          <p class="lead">
+            框架把 evidence 明确分层，禁止把近似证据、描述事实或模型推导包装成因果结论。anti-HBsAg 示例里，sdAb 和 1E62 的角色也被分开处理。
+          </p>
+
+          <div class="grid-3">
+            <article class="card">
+              <h3><code>primary_matched</code></h3>
+              <p>精确匹配的主要实验对比，可用于强证据判断，但仍需保留来源和轮次。</p>
+            </article>
+            <article class="card">
+              <h3><code>secondary_near_matched</code></h3>
+              <p>近似匹配证据，只能支持受限判断，不能直接上升为模块因果结论。</p>
+            </article>
+            <article class="card">
+              <h3><code>descriptive</code> / <code>model_derived</code></h3>
+              <p>描述性事实或模型生成信息，必须和真实实验观察分开标注。</p>
+            </article>
+          </div>
+
+          <div class="callout">
+            <strong>Identifier guard:</strong>
+            <span>框架显式保护 <code>1E62</code> 这类 identifier，避免 pandas 或 CSV 工具把它误读成科学计数法 <code>1e+62</code>。validation 会拒绝残留错误 identifier 的 artifact。</span>
+          </div>
+
+          <pre><code>select_batch(observed, candidates, budget, round_index, rng) -> list[str]</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="benchmark" data-title="Benchmark">
+        <div class="section-inner">
+          <p class="eyebrow">Deterministic Benchmark</p>
+          <h2>LLM 可以生成和批判方法，但不能用解释替代选择结果。</h2>
+          <p class="lead">
+            所有策略必须通过同一个 policy API，在相同输入、预算、模拟世界和指标下比较。selected method 需要在多数 synthetic worlds 中击败 baseline，并且不能退化成 baseline clone。
+          </p>
+
+          <div class="metric-strip">
+            <div class="metric">
+              <strong>5</strong>
+              <span>synthetic worlds: additive、epistatic、confounded transfer、noisy endpoint、sparse early round。</span>
+            </div>
+            <div class="metric">
+              <strong>2+</strong>
+              <span>最低 baseline 对照：random feasible 与 fixed mix，并检测 source baseline overlap。</span>
+            </div>
+            <div class="metric">
+              <strong>0</strong>
+              <span>不允许 unsupported claim 成为方法优势；false claim rate 不能变差。</span>
+            </div>
+            <div class="metric">
+              <strong>1</strong>
+              <span>最终 selected branch 进入 method report，失败路径写入 failure memory。</span>
+            </div>
+          </div>
+
+          <table class="artifact-table">
+            <thead>
+              <tr>
+                <th>Artifact</th>
+                <th>Why it matters</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>scientist_journal.json</code></td>
+                <td>记录文献快照、node、benchmark、selected node 和失败路径。</td>
+              </tr>
+              <tr>
+                <td><code>benchmark_results.csv</code></td>
+                <td>逐方法、逐 synthetic world 保存可比较指标。</td>
+              </tr>
+              <tr>
+                <td><code>novelty_report.json</code></td>
+                <td>检测 selection overlap 和 behavioral baseline clone。</td>
+              </tr>
+              <tr>
+                <td><code>method_report.md</code></td>
+                <td>把方法假设、证据、胜负、失败模式和下一轮建议写成人可审查报告。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="handoff" data-title="交付">
+        <div class="section-inner">
+          <p class="eyebrow">Human Handoff</p>
+          <h2>框架交付的是候选决策证据，不是自动下实验单。</h2>
+          <p class="lead">
+            Human review 是系统设计的一部分。尤其在真实 wet-lab 前，panel recommendation 必须经过人工检查，确认数据、约束、证据层级和 unsupported claims 都可接受。
+          </p>
+
+          <div class="handoff-list">
+            <div class="handoff-item">
+              <strong>Quest 定义后</strong>
+              <span>检查 domain、objective、可用数据和约束是否准确。</span>
+            </div>
+            <div class="handoff-item">
+              <strong>文献检索后</strong>
+              <span>检查 paper cards 是否偏题，是否漏掉关键方法方向。</span>
+            </div>
+            <div class="handoff-item">
+              <strong>方法节点生成后</strong>
+              <span>看 proposal 是否真的提出 acquisition、allocation、uncertainty 或 transfer 新机制。</span>
+            </div>
+            <div class="handoff-item">
+              <strong>Benchmark 后</strong>
+              <span>检查 selected method 是否只是在某个 synthetic world 过拟合。</span>
+            </div>
+            <div class="handoff-item">
+              <strong>Validation error 时</strong>
+              <span>人工决定修复数据、修复代码、降低 claim，还是停止推进。</span>
+            </div>
+            <div class="handoff-item">
+              <strong>真实实验前</strong>
+              <span>审查 <code>human_review_packet.md</code>，再决定是否进入湿实验。</span>
+            </div>
+          </div>
+
+          <pre><code>uv run design-scientist run-scientist /tmp/my_design_scientist_project \
+  --offline-fixtures \
+  --max-papers 60 \
+  --nodes 4 \
+  --rounds 3
+
+uv run design-scientist review-framework /tmp/my_design_scientist_project</code></pre>
+
+          <p class="footer-note">
+            当前 HTML 是对 <code>output/pdf/design_scientist_framework_explanation.md</code> 的演示化重组；PDF 仍保留为正式发送版本。
+          </p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="presentation-status" id="presentationStatus" aria-live="polite">Slide 1 / 6</div>
+
+  <script>
+    const sections = Array.from(document.querySelectorAll(".section"));
+    const navLinks = Array.from(document.querySelectorAll(".nav a"));
+    const presentationToggle = document.getElementById("presentationToggle");
+    const presentationStatus = document.getElementById("presentationStatus");
+    let currentIndex = 0;
+
+    function setCurrent(index, options = {}) {
+      currentIndex = Math.max(0, Math.min(index, sections.length - 1));
+      sections.forEach((section, sectionIndex) => {
+        section.classList.toggle("current", sectionIndex === currentIndex);
+      });
+      navLinks.forEach((link, linkIndex) => {
+        link.classList.toggle("active", linkIndex === currentIndex);
+      });
+      presentationStatus.textContent = `Slide ${currentIndex + 1} / ${sections.length}`;
+      if (options.scroll !== false && !document.body.classList.contains("presentation-mode")) {
+        sections[currentIndex].scrollIntoView({ block: "start" });
+      }
+    }
+
+    function setPresentationMode(enabled) {
+      document.body.classList.toggle("presentation-mode", enabled);
+      presentationToggle.textContent = enabled ? "退出演示模式" : "进入演示模式";
+      setCurrent(currentIndex);
+    }
+
+    presentationToggle.addEventListener("click", () => {
+      setPresentationMode(!document.body.classList.contains("presentation-mode"));
+    });
+
+    navLinks.forEach((link, index) => {
+      link.addEventListener("click", () => {
+        setCurrent(index);
+      });
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (!document.body.classList.contains("presentation-mode")) {
+        return;
+      }
+      if (event.key === "ArrowRight" || event.key === "PageDown" || event.key === " ") {
+        event.preventDefault();
+        setCurrent(currentIndex + 1);
+      }
+      if (event.key === "ArrowLeft" || event.key === "PageUp") {
+        event.preventDefault();
+        setCurrent(currentIndex - 1);
+      }
+      if (event.key === "Escape") {
+        setPresentationMode(false);
+      }
+    });
+
+    const observer = new IntersectionObserver((entries) => {
+      if (document.body.classList.contains("presentation-mode")) {
+        return;
+      }
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (!visible) {
+        return;
+      }
+      const index = sections.indexOf(visible.target);
+      if (index >= 0) {
+        currentIndex = index;
+        navLinks.forEach((link, linkIndex) => {
+          link.classList.toggle("active", linkIndex === currentIndex);
+        });
+      }
+    }, { threshold: [0.35, 0.55, 0.75] });
+
+    sections.forEach((section) => observer.observe(section));
+    setCurrent(0, { scroll: false });
+  </script>
+</body>
+</html>

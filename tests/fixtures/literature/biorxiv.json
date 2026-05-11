@@ -1,0 +1,18 @@
+{
+  "collection": [
+    {
+      "doi": "10.1101/2024.01.01.123456",
+      "title": "Active learning for antibody protein engineering",
+      "authors": "Ada Lovelace; Grace Hopper",
+      "date": "2024-01-01",
+      "abstract": "A bioRxiv version of a batch active learning antibody protein engineering study."
+    },
+    {
+      "doi": "10.1101/2024.02.02.222222",
+      "title": "pH dependent antibody binding design with constrained optimization",
+      "authors": "Barbara Liskov",
+      "date": "2024-02-02",
+      "abstract": "Protein engineering workflow for pH dependent antibody binding."
+    }
+  ]
+}

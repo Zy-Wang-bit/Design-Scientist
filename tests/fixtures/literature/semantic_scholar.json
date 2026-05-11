@@ -1,0 +1,26 @@
+{
+  "data": [
+    {
+      "paperId": "S2DUPLICATE",
+      "title": "Active learning for antibody protein engineering",
+      "abstract": "Semantic Scholar record for the same antibody protein engineering paper.",
+      "authors": [{"name": "Ada Lovelace"}],
+      "year": 2024,
+      "venue": "Protein Engineering Journal",
+      "url": "https://www.semanticscholar.org/paper/S2DUPLICATE",
+      "publicationDate": "2024-01-01",
+      "externalIds": {"DOI": "10.1101/2024.01.01.123456", "PubMed": "1001"}
+    },
+    {
+      "paperId": "S2UNIQUE",
+      "title": "Decision value acquisition for wet lab protein design",
+      "abstract": "Decision value acquisition for constrained wet lab design.",
+      "authors": [{"name": "Donald Knuth"}],
+      "year": 2022,
+      "venue": "Machine Learning Biology",
+      "url": "https://www.semanticscholar.org/paper/S2UNIQUE",
+      "publicationDate": "2022-05-05",
+      "externalIds": {"DOI": "10.9999/decision-value"}
+    }
+  ]
+}

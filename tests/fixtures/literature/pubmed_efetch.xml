@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>1001</PMID>
+      <Article>
+        <Journal><Title>Protein Engineering Journal</Title></Journal>
+        <ArticleTitle>Active learning for antibody protein engineering</ArticleTitle>
+        <Abstract><AbstractText>Batch active learning improves antibody design under sparse measurements.</AbstractText></Abstract>
+        <AuthorList>
+          <Author><ForeName>Ada</ForeName><LastName>Lovelace</LastName></Author>
+          <Author><ForeName>Grace</ForeName><LastName>Hopper</LastName></Author>
+        </AuthorList>
+        <Journal><JournalIssue><PubDate><Year>2024</Year></PubDate></JournalIssue></Journal>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="doi">10.1101/2024.01.01.123456</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>1002</PMID>
+      <Article>
+        <Journal><Title>Computational Biology Reports</Title></Journal>
+        <ArticleTitle>Matched contrast design for protein variant panels</ArticleTitle>
+        <Abstract><AbstractText>Matched contrasts reduce confounding in small protein engineering panels.</AbstractText></Abstract>
+        <AuthorList>
+          <Author><ForeName>Katherine</ForeName><LastName>Johnson</LastName></Author>
+        </AuthorList>
+        <Journal><JournalIssue><PubDate><Year>2023</Year></PubDate></JournalIssue></Journal>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="doi">10.5555/matched-contrast</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
