@@ -23,6 +23,33 @@ python -m pip install -e ".[dev]"
 
 When running without installation, prefix commands with `PYTHONPATH=src`.
 
+## Codex Skill Installation
+
+The Codex skill is packaged in `skills/design-scientist/`. Install it on another
+machine after cloning this repository:
+
+```bash
+mkdir -p ~/.codex/skills
+rm -rf ~/.codex/skills/design-scientist
+cp -R skills/design-scientist ~/.codex/skills/design-scientist
+```
+
+If the machine does not already have the repository checkout, clone first:
+
+```bash
+mkdir -p ~/Research
+git clone https://github.com/Zy-Wang-bit/Design-Scientist.git ~/Research/Design-Scientist
+cd ~/Research/Design-Scientist
+uv sync
+mkdir -p ~/.codex/skills
+rm -rf ~/.codex/skills/design-scientist
+cp -R skills/design-scientist ~/.codex/skills/design-scientist
+```
+
+Restart Codex after copying the skill so the new metadata is loaded. The skill
+does not contain private anti-HBsAg project data; keep project-specific context
+in project directories or local-only skill references.
+
 ## Environment Configuration
 
 Live literature search can use these environment variables:

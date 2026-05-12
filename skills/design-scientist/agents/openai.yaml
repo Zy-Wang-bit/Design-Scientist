@@ -1,0 +1,7 @@
+interface:
+  display_name: "Design Scientist"
+  short_description: "Data-grounded active design workflows"
+  default_prompt: "Use $design-scientist to update a real-data design project and recommend the next experimental panel."
+
+policy:
+  allow_implicit_invocation: true
