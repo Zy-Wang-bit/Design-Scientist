@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from design_scientist.artifacts import V3_MECHANISM_NODE_ARTIFACTS
 from design_scientist.cli import main
 from design_scientist.framework import init_framework
@@ -93,6 +95,28 @@ def test_generated_nodes_contain_v3_mechanism_artifacts(
     assert mechanism_spec["stress_test_requirements"]
 
 
+def test_offline_local_fallback_does_not_select_mechanism_aware_wrapper(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = _init_project(tmp_path, monkeypatch)
+
+    result = run_scientist_v3(
+        project,
+        max_papers=5,
+        nodes=1,
+        rounds=1,
+        offline_fixtures=True,
+    )
+
+    assert result["selected_node"] is not None
+    selected = result["selected_node"]
+    assert "mechanism_aware" not in selected["node_id"]
+    workspace = Path(selected["workspace"])
+    proposal = json.loads((workspace / "proposal.json").read_text(encoding="utf-8"))
+    assert "mechanism_aware" not in proposal.get("reused_components", [])
+
+
 def test_failing_v3_node_does_not_abort_and_appends_failure_memory(
     tmp_path: Path,
     monkeypatch,
@@ -132,7 +156,72 @@ def test_failing_v3_node_does_not_abort_and_appends_failure_memory(
     )
 
 
-def test_cli_run_scientist_defaults_to_v3_and_legacy_flag_uses_v2(
+def test_duplicate_generated_mechanism_names_fail_before_benchmark(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = _init_project(tmp_path, monkeypatch)
+    backend = DuplicateNameV3Backend()
+
+    result = run_scientist_v3(
+        project,
+        max_papers=5,
+        nodes=2,
+        rounds=1,
+        use_codex=True,
+        backend=backend,
+        offline_fixtures=True,
+    )
+
+    journal = json.loads(Path(result["journal_path"]).read_text(encoding="utf-8"))
+    duplicate_nodes = [
+        node
+        for node in journal["nodes"]
+        if any("duplicate generated mechanism name" in reason for reason in node["failure_reasons"])
+    ]
+    assert len(duplicate_nodes) == 1
+    assert duplicate_nodes[0]["status"] == "failed"
+    assert "benchmark_metrics" not in duplicate_nodes[0]
+
+    with Path(journal["benchmark"]["mechanism_benchmark_summary_path"]).open(
+        "r",
+        encoding="utf-8",
+        newline="",
+    ) as handle:
+        summary_rows = list(csv.DictReader(handle))
+    generated_rows = [row for row in summary_rows if row["mechanism"] == "fake_backend_mechanism"]
+    assert len(generated_rows) == 1
+
+
+def test_all_failed_nodes_do_not_complete_implementation_or_ablation_stages(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = _init_project(tmp_path, monkeypatch)
+    backend = AlwaysFailingV3Backend()
+
+    result = run_scientist_v3(
+        project,
+        max_papers=5,
+        nodes=2,
+        rounds=1,
+        use_codex=True,
+        backend=backend,
+        offline_fixtures=True,
+    )
+
+    stage_progress = json.loads(Path(result["stage_progress_path"]).read_text(encoding="utf-8"))
+    stages = {stage["stage"]: stage for stage in stage_progress["stages"]}
+
+    assert result["selected_node"] is None
+    assert result["selected_node_id"] is None
+    assert stages["mechanism_implementation"]["status"] == "failed"
+    assert stages["ablation_stress"]["status"] == "failed"
+    assert all(node["status"] == "failed" for node in result["nodes"])
+    assert not any(node.get("selected") for node in result["nodes"])
+
+
+def test_cli_run_scientist_uses_v3_and_rejects_legacy_flag(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -149,22 +238,15 @@ def test_cli_run_scientist_defaults_to_v3_and_legacy_flag_uses_v2(
             "selected_node": {"node_id": "node_01_v3"},
         }
 
-    def fake_v2(root: str | Path, **kwargs) -> dict[str, object]:
-        calls.append(f"v2:{Path(root).name}:{kwargs['nodes']}")
-        return {
-            "run_id": "v2_unit",
-            "journal_path": str(Path(root) / "runs" / "v2_unit" / "scientist_journal.json"),
-            "selected_node": {"node_id": "node_01_v2"},
-        }
-
     monkeypatch.setattr("design_scientist.method_report.write_method_report", fake_report)
     monkeypatch.setattr("design_scientist.scientist_search_v3.run_scientist_v3", fake_v3)
-    monkeypatch.setattr("design_scientist.scientist_search.run_scientist_search", fake_v2)
 
     assert main(["run-scientist", str(tmp_path / "default"), "--nodes", "4"]) == 0
-    assert main(["run-scientist", str(tmp_path / "legacy"), "--legacy-v2", "--nodes", "5"]) == 0
+    with pytest.raises(SystemExit) as exc:
+        main(["run-scientist", str(tmp_path / "legacy"), "--legacy-v2", "--nodes", "5"])
 
-    assert calls == ["v3:default:4", "v2:legacy:5"]
+    assert exc.value.code == 2
+    assert calls == ["v3:default:4"]
 
 
 def test_cli_returns_failure_when_v3_selects_no_node(
@@ -206,6 +288,44 @@ class MixedV3Backend:
                 "mechanism_name": workspace.name,
                 "files_written": ["mechanism.py"],
                 "contract_notes": [],
+            },
+            returncode=0,
+        )
+
+
+class DuplicateNameV3Backend:
+    def __init__(self) -> None:
+        self.tasks: list[WorkspaceAgentTask] = []
+
+    def run_task(self, task: WorkspaceAgentTask) -> WorkspaceAgentResult:
+        self.tasks.append(task)
+        _write_valid_mechanism(Path(task.workspace))
+        return WorkspaceAgentResult(
+            summary="duplicate-name V3 backend completed",
+            structured={
+                "summary": "duplicate-name V3 backend completed",
+                "mechanism_name": "fake_backend_mechanism",
+                "files_written": ["mechanism.py"],
+                "contract_notes": [],
+            },
+            returncode=0,
+        )
+
+
+class AlwaysFailingV3Backend:
+    def __init__(self) -> None:
+        self.tasks: list[WorkspaceAgentTask] = []
+
+    def run_task(self, task: WorkspaceAgentTask) -> WorkspaceAgentResult:
+        self.tasks.append(task)
+        _write_invalid_mechanism(Path(task.workspace))
+        return WorkspaceAgentResult(
+            summary="invalid V3 backend completed",
+            structured={
+                "summary": "invalid V3 backend completed",
+                "mechanism_name": Path(task.workspace).name,
+                "files_written": ["mechanism.py"],
+                "contract_notes": ["intentionally invalid for regression test"],
             },
             returncode=0,
         )

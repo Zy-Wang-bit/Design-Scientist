@@ -3,12 +3,36 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="design-scientist")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    visible_commands = (
+        "init",
+        "init-framework",
+        "audit-references",
+        "literature-search",
+        "read-literature",
+        "extract-mechanisms",
+        "run-scientist",
+        "review-framework",
+        "build-state",
+        "literature",
+        "hypotheses",
+        "retrospective",
+        "merge-data",
+        "run-dry-panel",
+        "run-full",
+        "review",
+        "codex-task",
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="{" + ",".join(visible_commands) + "}",
+    )
 
     init_parser = subparsers.add_parser("init", help="Initialize a project skeleton")
     init_parser.add_argument("project_dir")
@@ -36,27 +60,6 @@ def build_parser() -> argparse.ArgumentParser:
     literature_search.add_argument("--offline-fixtures", action="store_true")
     literature_search.add_argument("--sources", nargs="*")
 
-    extract_methods = subparsers.add_parser(
-        "extract-methods", help="debug/development: extract method modules only"
-    )
-    extract_methods.add_argument("root")
-
-    develop_method = subparsers.add_parser(
-        "develop-method", help="debug/development: develop and rank method nodes only"
-    )
-    develop_method.add_argument("root")
-    develop_method.add_argument("--nodes", type=int, default=3)
-    develop_method.add_argument("--use-codex", action="store_true")
-    develop_method.add_argument("--run-id")
-
-    benchmark_methods = subparsers.add_parser(
-        "benchmark-methods", help="debug/development: run baseline-only synthetic replay benchmarks"
-    )
-    benchmark_methods.add_argument("root")
-    benchmark_methods.add_argument("--rounds", type=int, default=3)
-    benchmark_methods.add_argument("--budget", type=int, default=24)
-    benchmark_methods.add_argument("--run-id")
-
     read_literature = subparsers.add_parser(
         "read-literature", help="debug/development: build V3 literature corpus only"
     )
@@ -77,11 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_scientist.add_argument("--use-codex", action="store_true")
     run_scientist.add_argument("--offline-fixtures", action="store_true")
     run_scientist.add_argument(
-        "--legacy-v2",
-        action="store_true",
-        help="Use the legacy V2 scientist implementation while the V3 runner is being integrated",
-    )
-    run_scientist.add_argument(
         "--allow-degraded-literature",
         action="store_true",
         help="Continue method development when literature search or extraction fails",
@@ -98,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_state.add_argument("project_dir")
 
     literature = subparsers.add_parser(
-        "literature", help="Legacy project execution: create seed cards and gap matrix"
+        "literature", help="Project execution: create seed cards and gap matrix"
     )
     literature.add_argument("project_dir")
 
@@ -174,44 +172,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Wrote paper cards: {out}")
         return 0
-    if args.command == "extract-methods":
-        from design_scientist.method_extraction import extract_methods
-
-        result = extract_methods(args.root)
-        print(f"Method extraction {result['status']}: {result.get('method_module_count', 0)} modules")
-        return 0 if result["status"] == "ok" else 1
-    if args.command == "develop-method":
-        from design_scientist.scientist_search import develop_method
-
-        result = develop_method(
-            args.root,
-            nodes=args.nodes,
-            use_codex=args.use_codex,
-            run_id=args.run_id,
-        )
-        print(f"Wrote scientist journal: {result['journal_path']}")
-        if not result.get("selected_node"):
-            print("No valid selected method node was produced.")
-            return 1
-        return 0
-    if args.command == "benchmark-methods":
-        from design_scientist.synthetic_replay import DEFAULT_RUN_ID, run_synthetic_benchmark
-
-        run_id = args.run_id or f"baseline_{DEFAULT_RUN_ID}"
-        run_dir = Path(args.root).expanduser().resolve() / "runs" / run_id
-        if (run_dir / "scientist_journal.json").exists():
-            parser.error(
-                "benchmark-methods refuses to write into an existing scientist run; "
-                "choose a baseline-only --run-id or omit --run-id to use the baseline default"
-            )
-        result = run_synthetic_benchmark(
-            args.root,
-            run_id=run_id,
-            rounds=args.rounds,
-            budget=args.budget,
-        )
-        print(f"Wrote benchmark results: {result['benchmark_results_path']}")
-        return 0
     if args.command == "read-literature":
         try:
             from design_scientist.literature_fulltext import build_literature_corpus
@@ -248,35 +208,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run-scientist":
         from design_scientist.method_report import write_method_report
 
-        if args.legacy_v2:
-            from design_scientist.scientist_search import run_scientist_search
+        from design_scientist.scientist_search_v3 import run_scientist_v3
 
-            result = run_scientist_search(
-                args.root,
-                max_papers=args.max_papers,
-                nodes=args.nodes,
-                rounds=args.rounds,
-                use_codex=args.use_codex,
-                offline_fixtures=args.offline_fixtures,
-                strict_literature=not args.allow_degraded_literature,
-            )
-        else:
-            from design_scientist.scientist_search_v3 import run_scientist_v3
-
-            result = run_scientist_v3(
-                args.root,
-                max_papers=args.max_papers,
-                nodes=args.nodes,
-                rounds=args.rounds,
-                use_codex=args.use_codex,
-                offline_fixtures=args.offline_fixtures,
-                strict_literature=not args.allow_degraded_literature,
-            )
+        result = run_scientist_v3(
+            args.root,
+            max_papers=args.max_papers,
+            nodes=args.nodes,
+            rounds=args.rounds,
+            use_codex=args.use_codex,
+            offline_fixtures=args.offline_fixtures,
+            strict_literature=not args.allow_degraded_literature,
+        )
+        _normalize_v3_cli_mechanism_metrics(result)
         report_path = write_method_report(args.root, run_id=result["run_id"])
         print(f"Wrote scientist journal: {result['journal_path']}")
         print(f"Wrote method report: {report_path}")
         if not result.get("selected_node"):
-            print("No valid selected method node was produced.")
+            print("No valid selected mechanism node was produced.")
             return 1
         return 0
     if args.command == "review-framework":
@@ -284,7 +232,10 @@ def main(argv: list[str] | None = None) -> int:
 
         from design_scientist.framework_validation import review_framework_run
 
-        report = review_framework_run(args.root, run_id=args.run_id)
+        try:
+            report = review_framework_run(args.root, run_id=args.run_id)
+        except ValueError as exc:
+            parser.error(str(exc))
         if args.json:
             print(json.dumps(report, indent=2, sort_keys=False))
         else:
@@ -356,6 +307,41 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error(f"Unknown command: {args.command}")
     return 2
+
+
+def _normalize_v3_cli_mechanism_metrics(result: dict[str, object]) -> None:
+    selected_node = result.get("selected_node")
+    if not isinstance(selected_node, dict):
+        return
+    artifacts = selected_node.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return
+    metrics_value = artifacts.get("mechanism_metrics")
+    if not isinstance(metrics_value, str):
+        return
+
+    metrics_path = Path(metrics_value).expanduser()
+    if not metrics_path.is_file():
+        return
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(metrics, dict):
+        return
+
+    changed = False
+    mechanism = selected_node.get("mechanism") or selected_node.get("node_id")
+    if isinstance(mechanism, str) and mechanism and metrics.get("mechanism") != mechanism:
+        metrics["mechanism"] = mechanism
+        changed = True
+    summary = metrics.get("mechanism_benchmark_summary")
+    if isinstance(summary, dict) and not isinstance(metrics.get("benchmark_summary"), dict):
+        metrics["benchmark_summary"] = dict(summary)
+        changed = True
+
+    if changed:
+        metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

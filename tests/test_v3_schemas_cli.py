@@ -112,7 +112,12 @@ def test_v3_artifact_constants_freeze_framework_and_node_contracts() -> None:
         "mechanism_metrics.json",
         "validation_report.json",
     )
-    assert artifacts.V3_STAGE_SEQUENCE[:2] == ("read_literature", "extract_mechanisms")
+
+
+def test_v3_stage_sequence_matches_scientist_search_v3() -> None:
+    from design_scientist.scientist_search_v3 import SCIENTIST_V3_STAGES
+
+    assert artifacts.V3_STAGE_SEQUENCE == SCIENTIST_V3_STAGES
 
 
 def test_cli_help_exposes_v3_mechanism_commands(capsys: pytest.CaptureFixture[str]) -> None:
@@ -126,9 +131,11 @@ def test_cli_help_exposes_v3_mechanism_commands(capsys: pytest.CaptureFixture[st
     assert "V3 mechanism scientist loop" in output
     assert "read-literature" in output
     assert "extract-mechanisms" in output
+    assert "develop-method" not in output
+    assert "benchmark-methods" not in output
 
 
-def test_run_scientist_help_exposes_legacy_v2_flag(capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_scientist_help_hides_legacy_v2_flag(capsys: pytest.CaptureFixture[str]) -> None:
     parser = build_parser()
 
     with pytest.raises(SystemExit) as exc:
@@ -136,4 +143,4 @@ def test_run_scientist_help_exposes_legacy_v2_flag(capsys: pytest.CaptureFixture
 
     assert exc.value.code == 0
     output = capsys.readouterr().out
-    assert "--legacy-v2" in output
+    assert "--legacy-v2" not in output

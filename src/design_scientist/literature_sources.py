@@ -43,6 +43,14 @@ class LiteratureSourceTemporarilyUnavailable(RuntimeError):
     """Raised when a live source is rate-limited or temporarily unavailable."""
 
 
+class LiteratureCacheError(ValueError):
+    """Raised when an existing raw cache file is unreadable or malformed."""
+
+
+class LiteratureSourceFormatError(ValueError):
+    """Raised when a live source response is parseable enough to fetch but malformed."""
+
+
 def search_pubmed(
     context: LiteratureContext,
     *,
@@ -63,7 +71,13 @@ def search_pubmed(
     else:
         cached_xml = _read_cached_text(efetch_path)
         if cached_xml is not None:
-            return _parse_pubmed_xml(cached_xml, context)[:max_papers]
+            return _parse_pubmed_xml(
+                cached_xml,
+                context,
+                strict=True,
+                source_label=f"PubMed XML cache {efetch_path}",
+                error_cls=LiteratureCacheError,
+            )[:max_papers]
         raw = _read_cached_json(esearch_path)
         if raw is _CACHE_MISS:
             params = _pubmed_common_params()
@@ -93,7 +107,13 @@ def search_pubmed(
             client=client,
         )
         _write_cache_text(efetch_path, xml_text)
-    return _parse_pubmed_xml(xml_text, context)[:max_papers]
+    return _parse_pubmed_xml(
+        xml_text,
+        context,
+        strict=not offline_fixtures,
+        source_label="PubMed XML response",
+        error_cls=LiteratureSourceFormatError,
+    )[:max_papers]
 
 
 def search_biorxiv(
@@ -162,7 +182,13 @@ def search_arxiv(
     else:
         cached_xml = _read_cached_text(cache_path)
         if cached_xml is not None:
-            xml_text = cached_xml
+            return _parse_arxiv_xml(
+                cached_xml,
+                context,
+                strict=True,
+                source_label=f"arXiv XML cache {cache_path}",
+                error_cls=LiteratureCacheError,
+            )[:max_papers]
         else:
             xml_text = _get_arxiv_text(
                 "https://export.arxiv.org/api/query",
@@ -177,7 +203,13 @@ def search_arxiv(
                 client=client,
             )
             _write_cache_text(cache_path, xml_text)
-    return _parse_arxiv_xml(xml_text, context)[:max_papers]
+    return _parse_arxiv_xml(
+        xml_text,
+        context,
+        strict=not offline_fixtures,
+        source_label="arXiv XML response",
+        error_cls=LiteratureSourceFormatError,
+    )[:max_papers]
 
 
 def search_semantic_scholar(
@@ -300,10 +332,25 @@ def _extract_pubmed_ids(raw: Any) -> list[str]:
     return [str(item) for item in ids if item]
 
 
-def _parse_pubmed_xml(xml_text: str, context: LiteratureContext) -> list[dict[str, Any]]:
+def _parse_pubmed_xml(
+    xml_text: str,
+    context: LiteratureContext,
+    *,
+    strict: bool = False,
+    source_label: str = "PubMed XML",
+    error_cls: type[Exception] = LiteratureSourceFormatError,
+) -> list[dict[str, Any]]:
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError:
+    except ET.ParseError as exc:
+        if strict:
+            raise error_cls(f"Malformed {source_label}: {exc}") from exc
+        return []
+    if _local_xml_name(root.tag) != "PubmedArticleSet":
+        if strict:
+            raise error_cls(
+                f"Malformed {source_label}: expected PubmedArticleSet root, got {_local_xml_name(root.tag)}"
+            )
         return []
     cards = []
     for article in root.findall(".//PubmedArticle"):
@@ -351,10 +398,23 @@ def _parse_pubmed_xml(xml_text: str, context: LiteratureContext) -> list[dict[st
     return [card for card in cards if card]
 
 
-def _parse_arxiv_xml(xml_text: str, context: LiteratureContext) -> list[dict[str, Any]]:
+def _parse_arxiv_xml(
+    xml_text: str,
+    context: LiteratureContext,
+    *,
+    strict: bool = False,
+    source_label: str = "arXiv XML",
+    error_cls: type[Exception] = LiteratureSourceFormatError,
+) -> list[dict[str, Any]]:
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError:
+    except ET.ParseError as exc:
+        if strict:
+            raise error_cls(f"Malformed {source_label}: {exc}") from exc
+        return []
+    if root.tag != "{http://www.w3.org/2005/Atom}feed":
+        if strict:
+            raise error_cls(f"Malformed {source_label}: expected Atom feed root, got {_local_xml_name(root.tag)}")
         return []
     cards = []
     for entry in root.findall("atom:entry", ARXIV_NS):
@@ -632,6 +692,10 @@ def _xml_text(node: ET.Element | None) -> str | None:
     return _clean_str("".join(node.itertext()))
 
 
+def _local_xml_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
 def _read_fixture_json(fixture_dir: str | Path | None, name: str) -> Any:
     path = _fixture_path(fixture_dir, name)
     if not path.exists():
@@ -662,8 +726,10 @@ def _read_cached_json(path: Path) -> Any:
         return _CACHE_MISS
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _CACHE_MISS
+    except OSError as exc:
+        raise LiteratureCacheError(f"Unreadable JSON cache {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise LiteratureCacheError(f"Malformed JSON cache {path}: {exc}") from exc
 
 
 def _read_cached_text(path: Path) -> str | None:
@@ -671,8 +737,8 @@ def _read_cached_text(path: Path) -> str | None:
         return None
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
-        return None
+    except OSError as exc:
+        raise LiteratureCacheError(f"Unreadable text cache {path}: {exc}") from exc
 
 
 def _write_cache_json(path: Path, payload: Any) -> None:

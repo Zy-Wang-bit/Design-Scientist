@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import csv
+import os
 import random
 import re
+import sys
+import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,11 +16,18 @@ from typing import Any
 
 from design_scientist import policies as policy_api
 from design_scientist import synthetic_replay
+from design_scientist.method_nodes import (
+    _is_relative_to,
+    _snapshot_entry,
+    diff_filesystem_snapshots,
+    snapshot_filesystem,
+)
 
 
 DEFAULT_RUN_ID = "mechanism_replay_seed_1729"
 BASELINE_MECHANISM_NAMES = ("random_feasible", "fixed_mix")
 DEFAULT_MECHANISM_NAMES = (*BASELINE_MECHANISM_NAMES, "mechanism_aware")
+CLONE_REFERENCE_MECHANISM_NAMES = DEFAULT_MECHANISM_NAMES
 KEY_ABLATION_NAME = "key_component_removed"
 LIFECYCLE_FUNCTION_NAMES = (
     "fit_state",
@@ -44,6 +54,44 @@ class MechanismLifecycle:
     architecture_clone: bool = False
     claim_guardrail: bool = True
     confounding_correction: bool = True
+
+
+class ReplayPathGuardError(RuntimeError):
+    """Raised when replay lifecycle execution writes outside the project workspace."""
+
+
+_AUDIT_BLOCKED_PROCESS_EVENTS = {
+    "os.exec",
+    "os.fork",
+    "os.forkpty",
+    "os.system",
+    "os.posix_spawn",
+    "os.spawn",
+    "subprocess.Popen",
+}
+_AUDIT_WRITE_PATH_INDEXES = {
+    "os.remove": (0,),
+    "os.unlink": (0,),
+    "os.rmdir": (0,),
+    "os.mkdir": (0,),
+    "os.makedirs": (0,),
+    "os.rename": (0, 1),
+    "os.replace": (0, 1),
+    "os.symlink": (0, 1),
+    "os.link": (0, 1),
+    "os.truncate": (0,),
+    "os.chmod": (0,),
+    "os.chown": (0,),
+    "shutil.copyfile": (0, 1),
+    "shutil.copymode": (0, 1),
+    "shutil.copystat": (0, 1),
+    "shutil.copytree": (0, 1),
+    "shutil.move": (0, 1),
+    "tempfile.mkstemp": (0,),
+    "tempfile.mkdtemp": (0,),
+}
+_REPLAY_AUDIT_GUARD_INSTALLED = False
+_REPLAY_AUDIT_GUARD_ACTIVE = False
 
 
 def make_policy_mechanism(
@@ -139,6 +187,8 @@ def run_mechanism_benchmark(
     benchmark_mechanisms = _with_required_baselines(requested_mechanisms)
     world_ids = world_ids_for_claims(_mechanism_claims(requested_mechanisms))
     world_specs = _select_worlds(world_ids)
+    run_dir = root / "runs" / safe_run_id
+    replay_snapshot_roots = _replay_snapshot_roots(root)
 
     benchmark_rows: list[dict[str, Any]] = []
     ablation_rows: list[dict[str, Any]] = []
@@ -176,6 +226,8 @@ def run_mechanism_benchmark(
                 rounds=rounds,
                 budget=budget,
                 ablation={"name": "none"},
+                project_root=root,
+                snapshot_roots=replay_snapshot_roots,
             )
             for mechanism in benchmark_mechanisms
         }
@@ -198,18 +250,60 @@ def run_mechanism_benchmark(
             )
             benchmark_rows.append(row)
 
-            ablation_specs = _normalize_ablation_specs(
-                _call_plan_ablations(
-                    mechanism,
-                    {
-                        "mechanism": mechanism.name,
-                        "world_id": world.world_id,
-                        "rounds": rounds,
-                        "budget": budget,
-                    },
+            if result.get("status") != "completed":
+                ablation_rows.append(
+                    _ablation_row(
+                        result,
+                        mechanism=mechanism,
+                        truth=truth,
+                        rounds=rounds,
+                        budget=budget,
+                        initial_ids=initial_ids,
+                        observations_by_id=observations_by_id,
+                        reference_selected_ids=reference_selected_ids,
+                        ablation_spec={"name": "none", "is_key": False},
+                        full_best_feasible_utility=0.0,
+                    )
                 )
-            )
+                continue
+
             full_best = float(result["metrics"]["best_feasible_utility"])
+            plan_context = {
+                "mechanism": mechanism.name,
+                "world_id": world.world_id,
+                "rounds": rounds,
+                "budget": budget,
+            }
+            try:
+                raw_ablation_specs = _guarded_replay_call(
+                    lambda: _call_plan_ablations(mechanism, plan_context),
+                    project_root=root,
+                    snapshot_roots=replay_snapshot_roots,
+                )
+            except Exception as exc:  # pragma: no cover - exercised through failed CSV rows
+                ablation_rows.append(
+                    _ablation_row(
+                        _failed_lifecycle_result(
+                            mechanism,
+                            world=world,
+                            initial_ids=initial_ids,
+                            ablation={"name": KEY_ABLATION_NAME},
+                            error=exc,
+                        ),
+                        mechanism=mechanism,
+                        truth=truth,
+                        rounds=rounds,
+                        budget=budget,
+                        initial_ids=initial_ids,
+                        observations_by_id=observations_by_id,
+                        reference_selected_ids=reference_selected_ids,
+                        ablation_spec={"name": KEY_ABLATION_NAME, "is_key": True},
+                        full_best_feasible_utility=full_best,
+                    )
+                )
+                continue
+
+            ablation_specs = _normalize_ablation_specs(raw_ablation_specs)
             for ablation_spec in ablation_specs:
                 ablation_name = str(ablation_spec["name"])
                 if ablation_name == "none":
@@ -224,6 +318,8 @@ def run_mechanism_benchmark(
                         rounds=rounds,
                         budget=budget,
                         ablation=ablation_spec,
+                        project_root=root,
+                        snapshot_roots=replay_snapshot_roots,
                     )
                 ablation_row = _ablation_row(
                     ablation_result,
@@ -245,7 +341,6 @@ def run_mechanism_benchmark(
         mechanisms=benchmark_mechanisms,
     )
 
-    run_dir = root / "runs" / safe_run_id
     benchmark_path = run_dir / "mechanism_benchmark_results.csv"
     summary_path = run_dir / "mechanism_benchmark_summary.csv"
     ablation_path = run_dir / "mechanism_ablation_results.csv"
@@ -394,7 +489,7 @@ def _with_required_baselines(
 ) -> list[MechanismLifecycle]:
     resolved: list[MechanismLifecycle] = []
     seen: set[str] = set()
-    for baseline in BASELINE_MECHANISM_NAMES:
+    for baseline in CLONE_REFERENCE_MECHANISM_NAMES:
         mechanism = BASELINE_MECHANISMS[baseline]
         resolved.append(mechanism)
         seen.add(mechanism.name)
@@ -433,40 +528,63 @@ def _run_lifecycle_safely(
     rounds: int,
     budget: int,
     ablation: Mapping[str, Any],
+    project_root: Path,
+    snapshot_roots: Sequence[Path],
 ) -> dict[str, Any]:
     try:
-        result = _run_lifecycle_replay(
-            mechanism,
-            world=world,
-            variants=variants,
-            observations_by_id=observations_by_id,
-            initial_ids=initial_ids,
-            rounds=rounds,
-            budget=budget,
-            ablation=ablation,
+        result = _guarded_replay_call(
+            lambda: _run_lifecycle_replay(
+                mechanism,
+                world=world,
+                variants=variants,
+                observations_by_id=observations_by_id,
+                initial_ids=initial_ids,
+                rounds=rounds,
+                budget=budget,
+                ablation=ablation,
+            ),
+            project_root=project_root,
+            snapshot_roots=snapshot_roots,
         )
     except Exception as exc:  # pragma: no cover - exercised via CSV status in integration paths
-        return {
-            "world_id": world.world_id,
-            "method": mechanism.name,
-            "ablation": str(ablation.get("name") or "none"),
-            "selected_count": 0,
-            "total_observations": len(initial_ids),
-            "selected_ids": tuple(),
-            "metrics": {
-                "best_feasible_utility": 0.0,
-                "hit_rate": 0.0,
-                "regret_proxy": 1.0,
-                "false_claim_rate": 1.0,
-                "evidence_coverage": 0.0,
-                "round_efficiency": 0.0,
-            },
-            "status": "failed",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+        return _failed_lifecycle_result(
+            mechanism,
+            world=world,
+            initial_ids=initial_ids,
+            ablation=ablation,
+            error=exc,
+        )
     result["status"] = "completed"
     result["error"] = ""
     return result
+
+
+def _failed_lifecycle_result(
+    mechanism: MechanismLifecycle,
+    *,
+    world: synthetic_replay.WorldSpec,
+    initial_ids: list[str],
+    ablation: Mapping[str, Any],
+    error: Exception,
+) -> dict[str, Any]:
+    return {
+        "world_id": world.world_id,
+        "method": mechanism.name,
+        "ablation": str(ablation.get("name") or "none"),
+        "selected_count": 0,
+        "total_observations": len(initial_ids),
+        "selected_ids": tuple(),
+        "metrics": {
+            "best_feasible_utility": 0.0,
+            "hit_rate": 0.0,
+            "regret_proxy": 1.0,
+            "false_claim_rate": 1.0,
+            "evidence_coverage": 0.0,
+            "round_efficiency": 0.0,
+        },
+        "status": "failed",
+        "error": f"{type(error).__name__}: {error}",
+    }
 
 
 def _run_lifecycle_replay(
@@ -685,12 +803,18 @@ def _summary_rows(
             by_world_mechanism,
         )
         false_claim_worse_than_both = mean_false > random_false and mean_false > fixed_false
+        completed_required_rows = _required_rows_completed(
+            mechanism_rows,
+            ablation_rows,
+            mechanism_name,
+        )
         selected_eligible = not (
             architecture_clone
             or not majority_random
             or not majority_fixed
             or key_delta <= 0.0
             or false_claim_worse_than_both
+            or not completed_required_rows
         )
         summary.append(
             {
@@ -747,9 +871,9 @@ def _selection_clone(
     if not mechanism_rows:
         return False
     mechanism_name = str(mechanism_rows[0]["mechanism"])
-    if mechanism_name in BASELINE_MECHANISM_NAMES:
+    if mechanism_name in CLONE_REFERENCE_MECHANISM_NAMES:
         return False
-    for baseline in BASELINE_MECHANISM_NAMES:
+    for baseline in CLONE_REFERENCE_MECHANISM_NAMES:
         comparable = 0
         matching = 0
         for row in mechanism_rows:
@@ -768,9 +892,26 @@ def _key_ablation_delta(ablation_rows: list[dict[str, Any]], mechanism_name: str
     deltas = [
         float(row["delta_from_full_best_feasible_utility"])
         for row in ablation_rows
-        if row["mechanism"] == mechanism_name and row.get("is_key_ablation") == "true"
+        if row["mechanism"] == mechanism_name
+        and row.get("is_key_ablation") == "true"
+        and row.get("status") == "completed"
     ]
     return _round_metric(mean(deltas)) if deltas else 0.0
+
+
+def _required_rows_completed(
+    benchmark_rows: list[dict[str, Any]],
+    ablation_rows: list[dict[str, Any]],
+    mechanism_name: str,
+) -> bool:
+    if any(row.get("status") != "completed" for row in benchmark_rows):
+        return False
+    key_rows = [
+        row
+        for row in ablation_rows
+        if row["mechanism"] == mechanism_name and row.get("is_key_ablation") == "true"
+    ]
+    return not key_rows or all(row.get("status") == "completed" for row in key_rows)
 
 
 def _mean_false_claim(rows: list[dict[str, Any]]) -> float:
@@ -816,6 +957,174 @@ def _normalize_ablation_specs(raw_specs: Any) -> list[dict[str, Any]]:
         else:
             spec["is_key"] = _as_bool(spec.get("is_key", False))
     return specs
+
+
+def _guarded_replay_call(
+    call: Callable[[], Any],
+    *,
+    project_root: Path,
+    snapshot_roots: Sequence[Path],
+) -> Any:
+    _ensure_replay_audit_guard_installed()
+    before = _snapshot_replay_guard(snapshot_roots)
+    result: Any = None
+    call_error: Exception | None = None
+    _set_replay_audit_guard_active(True)
+    try:
+        result = call()
+    except Exception as exc:  # pragma: no cover - returned as failed rows by callers
+        call_error = exc
+    finally:
+        _set_replay_audit_guard_active(False)
+    after = _snapshot_replay_guard(snapshot_roots)
+    filesystem_writes = _replay_filesystem_writes(diff_filesystem_snapshots(before, after))
+    if filesystem_writes:
+        raise ReplayPathGuardError(
+            "filesystem writes outside replay workspace: "
+            + ", ".join(filesystem_writes)
+        )
+    if call_error is not None:
+        raise call_error
+    return result
+
+
+def _replay_filesystem_writes(filesystem_changes: Iterable[Any]) -> list[str]:
+    return sorted(
+        {
+            str(change.path)
+            for change in filesystem_changes
+        }
+    )
+
+
+def _ensure_replay_audit_guard_installed() -> None:
+    global _REPLAY_AUDIT_GUARD_INSTALLED
+    if _REPLAY_AUDIT_GUARD_INSTALLED:
+        return
+
+    def guard(event: str, args: tuple[Any, ...]) -> None:
+        if not _REPLAY_AUDIT_GUARD_ACTIVE:
+            return
+        if event in _AUDIT_BLOCKED_PROCESS_EVENTS:
+            raise ReplayPathGuardError(
+                f"filesystem writes outside replay workspace: blocked process event {event}"
+            )
+        for candidate in _audit_write_paths(event, args):
+            path = _resolve_audit_path(candidate)
+            if path is None:
+                continue
+            raise ReplayPathGuardError(
+                f"filesystem writes outside replay workspace: {path}"
+            )
+
+    sys.addaudithook(guard)
+    _REPLAY_AUDIT_GUARD_INSTALLED = True
+
+
+def _set_replay_audit_guard_active(active: bool) -> None:
+    global _REPLAY_AUDIT_GUARD_ACTIVE
+    _REPLAY_AUDIT_GUARD_ACTIVE = active
+
+
+def _audit_write_paths(event: str, args: tuple[Any, ...]) -> list[Any]:
+    if event == "open":
+        if len(args) >= 3 and _audit_open_requests_write(args[1], args[2]):
+            return [args[0]]
+        return []
+    indexes = _AUDIT_WRITE_PATH_INDEXES.get(event)
+    if indexes is None:
+        return []
+    return [args[index] for index in indexes if index < len(args)]
+
+
+def _audit_open_requests_write(mode: Any, flags: Any) -> bool:
+    if isinstance(mode, str) and any(marker in mode for marker in ("w", "a", "x", "+")):
+        return True
+    if isinstance(flags, int):
+        write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+        return bool(flags & write_flags)
+    return False
+
+
+def _resolve_audit_path(candidate: Any) -> Path | None:
+    if isinstance(candidate, int):
+        return None
+    try:
+        path = Path(os.fsdecode(candidate))
+    except (TypeError, ValueError):
+        return None
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        return path.expanduser().resolve(strict=False)
+    except OSError:
+        return Path(os.path.abspath(os.fspath(path.expanduser())))
+
+
+def _replay_snapshot_roots(project_root: Path) -> list[Path]:
+    return _unique_paths([project_root, *_temporary_guard_roots()])
+
+
+def _snapshot_replay_guard(roots: Iterable[Path]) -> dict[Path, Any]:
+    temp_roots = set(_temporary_guard_roots())
+    recursive_roots = [root for root in roots if root not in temp_roots]
+    snapshot = snapshot_filesystem(recursive_roots)
+    snapshot.update(_snapshot_shallow_roots(temp_roots))
+    return snapshot
+
+
+def _snapshot_shallow_roots(roots: Iterable[Path]) -> dict[Path, Any]:
+    snapshot: dict[Path, Any] = {}
+    for root in _unique_paths(roots):
+        if not root.exists():
+            continue
+        paths = [root]
+        if root.is_dir():
+            try:
+                paths.extend(root.iterdir())
+            except OSError:
+                pass
+        for path in paths:
+            entry = _snapshot_entry(path)
+            if entry is not None:
+                snapshot[_absolute_no_symlink_resolve(path)] = entry
+    return snapshot
+
+
+def _temporary_guard_roots() -> list[Path]:
+    candidates: list[str | Path | None] = [
+        tempfile.gettempdir(),
+        os.environ.get("TMPDIR"),
+        os.environ.get("TEMP"),
+        os.environ.get("TMP"),
+        Path("/tmp"),
+    ]
+    roots: list[Path] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            root = Path(candidate).expanduser().resolve()
+        except OSError:
+            continue
+        if root.exists():
+            roots.append(root)
+    return _unique_paths(roots)
+
+
+def _absolute_no_symlink_resolve(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _unique_paths(paths: Iterable[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
 
 
 def _call_fit_state(mechanism: MechanismLifecycle, context: Mapping[str, Any]) -> Any:

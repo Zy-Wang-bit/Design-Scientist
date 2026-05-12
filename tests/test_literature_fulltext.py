@@ -5,10 +5,13 @@ from pathlib import Path
 
 import pytest
 
+from design_scientist.io import read_json
 from design_scientist.literature_fulltext import build_literature_corpus
+from design_scientist.literature_pipeline import run_literature_search
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "literature_fulltext"
+LITERATURE_FIXTURES = Path(__file__).parent / "fixtures" / "literature"
 REQUIRED_RECORD_FIELDS = {
     "paper_id",
     "source",
@@ -176,6 +179,30 @@ def test_trace_records_per_paper_status_without_api_keys(
     assert trace["summary"]["metadata_only"] == 1
     assert "super-secret-api-key" not in trace_text
     assert "api_key" not in trace_text.lower()
+
+
+def test_default_offline_literature_chain_reads_open_fulltext_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DESIGN_SCIENTIST_LITERATURE_FIXTURES", str(LITERATURE_FIXTURES))
+    monkeypatch.setenv("DESIGN_SCIENTIST_FULLTEXT_FIXTURES", str(FIXTURES))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "project.yaml").write_text(
+        "name: anti-HBsAg pH-dependent antibody design\n"
+        "goal: benchmark active antibody design policies\n",
+        encoding="utf-8",
+    )
+
+    run_literature_search(project, max_papers=6, offline_fixtures=True)
+    corpus_path = build_literature_corpus(project, offline_fixtures=True)
+
+    records = _read_jsonl(corpus_path)
+    trace = read_json(project / "framework" / "literature_reading_trace.json")
+    assert records
+    assert any(record["fulltext_status"] == "open_fulltext" for record in records)
+    assert {record["fulltext_status"] for record in records} != {"metadata_only"}
+    assert trace["summary"]["open_fulltext"] >= 1
 
 
 def _project_with_cards(tmp_path: Path, cards: list[dict]) -> Path:

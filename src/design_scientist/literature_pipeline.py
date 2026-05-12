@@ -13,6 +13,7 @@ from typing import Any
 from design_scientist.io import ensure_dir, read_yaml, write_json
 from design_scientist.literature_sources import (
     LiteratureContext,
+    LiteratureCacheError,
     LiteratureSourceTemporarilyUnavailable,
     default_fixture_dir,
     paper_card_dedupe_key,
@@ -122,7 +123,45 @@ def run_literature_search(
                 raise ValueError(f"Unknown literature source: {source}")
             source_cache_dir = _source_cache_dir(cache_dir, query_id=query["query_id"], source=source)
             pre_cache_files = _cache_files(source_cache_dir)
-            cache_complete = _source_cache_complete(source, source_cache_dir, pre_cache_files)
+            cache_status = _source_cache_status(source, source_cache_dir, pre_cache_files)
+            cache_complete = cache_status == "cache_hit"
+            if cache_status == "cache_error" and not offline_fixtures:
+                exc = _source_cache_error(source, source_cache_dir) or LiteratureCacheError(
+                    f"Malformed literature cache at {source_cache_dir}"
+                )
+                raw_count = _raw_count_for_source(source, source_cache_dir, fallback=0)
+                error = {
+                    "query_id": query["query_id"],
+                    "source": source,
+                    "cache_path": _relative_artifact_path(source_cache_dir, root),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "reason": str(exc),
+                }
+                errors.append(error)
+                event = {
+                    "event": "source_error",
+                    "status": "cache_error",
+                    "query_id": query["query_id"],
+                    "source": source,
+                    "raw_count": raw_count,
+                    "normalized_count": 0,
+                    "reason": str(exc),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+                events.append(
+                    _with_source_event_metadata(
+                        event,
+                        source=source,
+                        source_cache_dir=source_cache_dir,
+                        project_root=root,
+                        offline_fixtures=offline_fixtures,
+                        cache_status="cache_error",
+                        network_fetch=False,
+                    )
+                )
+                continue
             if _should_skip_semantic_scholar(
                 source,
                 offline_fixtures=offline_fixtures,
@@ -144,7 +183,7 @@ def run_literature_search(
                         source_cache_dir=source_cache_dir,
                         project_root=root,
                         offline_fixtures=offline_fixtures,
-                        cache_complete=cache_complete,
+                        cache_status=cache_status,
                         network_fetch=False,
                     )
                 )
@@ -166,7 +205,7 @@ def run_literature_search(
                         source_cache_dir=source_cache_dir,
                         project_root=root,
                         offline_fixtures=offline_fixtures,
-                        cache_complete=cache_complete,
+                        cache_status=cache_status,
                         network_fetch=False,
                     )
                 )
@@ -198,8 +237,8 @@ def run_literature_search(
                         source_cache_dir=source_cache_dir,
                         project_root=root,
                         offline_fixtures=offline_fixtures,
-                        cache_complete=cache_complete,
-                        network_fetch=not cache_complete and not offline_fixtures,
+                        cache_status=cache_status,
+                        network_fetch=cache_status == "cache_miss" and not offline_fixtures,
                     )
                 )
             except LiteratureSourceTemporarilyUnavailable as exc:
@@ -220,12 +259,13 @@ def run_literature_search(
                         source_cache_dir=source_cache_dir,
                         project_root=root,
                         offline_fixtures=offline_fixtures,
-                        cache_complete=cache_complete,
-                        network_fetch=not cache_complete and not offline_fixtures,
+                        cache_status=cache_status,
+                        network_fetch=cache_status == "cache_miss" and not offline_fixtures,
                     )
                 )
                 cooldown_sources.add(source)
             except Exception as exc:
+                is_cache_error = cache_status == "cache_error" or isinstance(exc, LiteratureCacheError)
                 raw_count = _raw_count_for_source(source, source_cache_dir, fallback=0)
                 error = {
                     "query_id": query["query_id"],
@@ -238,7 +278,7 @@ def run_literature_search(
                 errors.append(error)
                 event = {
                     "event": "source_error",
-                    "status": "error",
+                    "status": "cache_error" if is_cache_error else "error",
                     "query_id": query["query_id"],
                     "source": source,
                     "raw_count": raw_count,
@@ -254,8 +294,10 @@ def run_literature_search(
                         source_cache_dir=source_cache_dir,
                         project_root=root,
                         offline_fixtures=offline_fixtures,
-                        cache_complete=cache_complete,
-                        network_fetch=not cache_complete and not offline_fixtures,
+                        cache_status="cache_error" if is_cache_error else cache_status,
+                        network_fetch=(
+                            not is_cache_error and cache_status == "cache_miss" and not offline_fixtures
+                        ),
                     )
                 )
                 if source == "arxiv" and not offline_fixtures:
@@ -414,13 +456,15 @@ def _with_source_event_metadata(
     source_cache_dir: Path,
     project_root: Path,
     offline_fixtures: bool,
-    cache_complete: bool,
+    cache_status: str,
     network_fetch: bool,
 ) -> dict[str, Any]:
     event = _with_cache_metadata(event, source_cache_dir=source_cache_dir, project_root=project_root)
     if not offline_fixtures:
-        event["cache_hit"] = bool(cache_complete)
-        event["cache_miss"] = not cache_complete
+        event["cache_status"] = cache_status
+        event["cache_hit"] = cache_status == "cache_hit"
+        event["cache_miss"] = cache_status == "cache_miss"
+        event["cache_error"] = cache_status == "cache_error"
         event["network_fetch"] = bool(network_fetch)
     if source == "biorxiv" and not offline_fixtures:
         event["behavior"] = "recent_feed_scan"
@@ -434,16 +478,69 @@ def _cache_files(source_cache_dir: Path) -> list[Path]:
 
 
 def _source_cache_complete(source: str, source_cache_dir: Path, cache_files: list[Path]) -> bool:
+    return _source_cache_status(source, source_cache_dir, cache_files) == "cache_hit"
+
+
+def _source_cache_status(source: str, source_cache_dir: Path, cache_files: list[Path]) -> str:
+    source_name = "semantic_scholar" if source == "s2" else source
+    if _source_cache_error(source, source_cache_dir) is not None:
+        return "cache_error"
+    if source_name == "pubmed":
+        path = source_cache_dir / "pubmed_efetch.xml"
+        if path.exists():
+            return "cache_hit"
+        return "cache_miss"
+    if source_name == "biorxiv":
+        return "cache_hit" if _read_cache_json(source_cache_dir / "biorxiv.json") is not None else "cache_miss"
+    if source_name == "arxiv":
+        path = source_cache_dir / "arxiv.xml"
+        if path.exists():
+            return "cache_hit"
+        return "cache_miss"
+    if source_name == "semantic_scholar":
+        return "cache_hit" if _read_cache_json(source_cache_dir / "semantic_scholar.json") is not None else "cache_miss"
+    return "cache_hit" if cache_files else "cache_miss"
+
+
+def _source_cache_error(source: str, source_cache_dir: Path) -> LiteratureCacheError | None:
     source_name = "semantic_scholar" if source == "s2" else source
     if source_name == "pubmed":
-        return (source_cache_dir / "pubmed_efetch.xml").exists()
+        efetch_path = source_cache_dir / "pubmed_efetch.xml"
+        if efetch_path.exists():
+            reason = _pubmed_xml_cache_error(efetch_path)
+            if reason:
+                return LiteratureCacheError(f"Malformed PubMed XML cache {efetch_path}: {reason}")
+            return None
+        esearch_path = source_cache_dir / "pubmed_esearch.json"
+        reason = _json_cache_error(esearch_path)
+        if reason:
+            return LiteratureCacheError(reason)
+        return None
     if source_name == "biorxiv":
-        return _read_cache_json(source_cache_dir / "biorxiv.json") is not None
+        reason = _json_cache_error(source_cache_dir / "biorxiv.json")
+        return LiteratureCacheError(reason) if reason else None
     if source_name == "arxiv":
-        return (source_cache_dir / "arxiv.xml").exists()
+        path = source_cache_dir / "arxiv.xml"
+        if not path.exists():
+            return None
+        reason = _arxiv_xml_cache_error(path)
+        return LiteratureCacheError(f"Malformed arXiv XML cache {path}: {reason}") if reason else None
     if source_name == "semantic_scholar":
-        return _read_cache_json(source_cache_dir / "semantic_scholar.json") is not None
-    return bool(cache_files)
+        reason = _json_cache_error(source_cache_dir / "semantic_scholar.json")
+        return LiteratureCacheError(reason) if reason else None
+    return None
+
+
+def _json_cache_error(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        return f"Unreadable JSON cache {path}: {exc}"
+    except json.JSONDecodeError as exc:
+        return f"Malformed JSON cache {path}: {exc}"
+    return None
 
 
 def _relative_artifact_path(path: Path, project_root: Path) -> str:
@@ -503,12 +600,36 @@ def _count_pubmed_articles(path: Path) -> int | None:
     return len(root.findall(".//PubmedArticle"))
 
 
+def _pubmed_xml_cache_error(path: Path) -> str | None:
+    try:
+        root = ET.fromstring(path.read_text(encoding="utf-8"))
+    except (OSError, ET.ParseError) as exc:
+        return str(exc)
+    if _local_xml_name(root.tag) != "PubmedArticleSet":
+        return f"expected PubmedArticleSet root, got {_local_xml_name(root.tag)}"
+    return None
+
+
 def _count_arxiv_entries(path: Path) -> int | None:
     try:
         root = ET.fromstring(path.read_text(encoding="utf-8"))
     except (OSError, ET.ParseError):
         return None
     return len(root.findall("{http://www.w3.org/2005/Atom}entry"))
+
+
+def _arxiv_xml_cache_error(path: Path) -> str | None:
+    try:
+        root = ET.fromstring(path.read_text(encoding="utf-8"))
+    except (OSError, ET.ParseError) as exc:
+        return str(exc)
+    if root.tag != "{http://www.w3.org/2005/Atom}feed":
+        return f"expected Atom feed root, got {_local_xml_name(root.tag)}"
+    return None
+
+
+def _local_xml_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
 def _annotate_cards(

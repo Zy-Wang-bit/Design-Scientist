@@ -146,6 +146,40 @@ def test_malformed_backend_output_falls_back_and_records_warning(tmp_path: Path)
     assert all(REQUIRED_CARD_FIELDS <= set(card) for card in cards)
 
 
+def test_backend_accepts_empty_chunk_cards_and_preserves_other_chunk_cards(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _write_corpus(
+        project,
+        [
+            {
+                "paper_id": "paper_without_mechanism",
+                "title": "Protein assay report",
+                "abstract": "This chunk has measurements but no reusable active design mechanism.",
+            },
+            {
+                "paper_id": "paper_with_mechanism",
+                "title": "Batch active learning for protein engineering",
+                "abstract": "Surrogate acquisition functions guide feasible variant batches.",
+            },
+        ],
+    )
+    card = _complete_card(source_paper_ids=["paper_with_mechanism"])
+    backend = FakeBackend(
+        [
+            ModelResponse(text="", structured={"mechanism_cards": []}),
+            ModelResponse(text="", structured={"mechanism_cards": [card]}),
+        ]
+    )
+
+    result = extract_mechanisms(project, backend=backend, max_chunks=2)
+
+    assert result["status"] == "ok"
+    assert result["fallback_used"] is False
+    assert result["mechanism_cards"] == [card]
+    assert len(backend.requests) == 2
+    assert read_json(project / "framework" / "mechanism_cards.json") == [card]
+
+
 def test_empty_corpus_returns_failure_without_fabricating_library(tmp_path: Path) -> None:
     project = tmp_path / "project"
     _write_corpus(project, [])
@@ -157,6 +191,129 @@ def test_empty_corpus_returns_failure_without_fabricating_library(tmp_path: Path
     assert result["mechanism_cards"] == []
     assert not (project / "framework" / "mechanism_library.json").exists()
     assert not (project / "framework" / "mechanism_cards.json").exists()
+
+
+def test_heuristic_active_learning_provenance_excludes_generic_protein_engineering_records(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _write_corpus(
+        project,
+        [
+            {
+                "paper_id": "generic_protein_engineering",
+                "title": "General protein engineering survey",
+                "abstract": "Protein engineering studies variant libraries and assay measurements.",
+            },
+            {
+                "paper_id": "active_learning_source",
+                "title": "Batch active learning acquisition for protein engineering",
+                "abstract": (
+                    "Active learning uses surrogate uncertainty and acquisition functions "
+                    "for feasible variant design."
+                ),
+            },
+        ],
+    )
+
+    result = extract_mechanisms(project)
+
+    by_id = {card["mechanism_id"]: card for card in result["mechanism_cards"]}
+    active_card = by_id["active_learning_acquisition"]
+    assert "active_learning_source" in active_card["source_paper_ids"]
+    assert "generic_protein_engineering" not in active_card["source_paper_ids"]
+
+
+def test_heuristic_optional_fields_ignore_unrelated_records_outside_provenance(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _write_corpus(
+        project,
+        [
+            {
+                "paper_id": "active_learning_source",
+                "title": "Batch active learning acquisition for protein engineering",
+                "abstract": "Active learning acquisition ranks feasible variant batches.",
+            },
+            {
+                "paper_id": "unrelated_benchmark_source",
+                "title": "Retrospective uncertainty calibration benchmark",
+                "abstract": (
+                    "This unrelated benchmark discusses posterior variance, calibration, "
+                    "masking, and replay for a separate evaluation workflow."
+                ),
+            },
+        ],
+    )
+
+    result = extract_mechanisms(project)
+
+    by_id = {card["mechanism_id"]: card for card in result["mechanism_cards"]}
+    active_card = by_id["active_learning_acquisition"]
+    assert active_card["source_paper_ids"] == ["active_learning_source"]
+    assert active_card["uncertainty_model"] == ""
+    assert active_card["stress_tests"] == []
+
+
+def test_heuristic_guardrail_provenance_excludes_generic_antibody_developability(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _write_corpus(
+        project,
+        [
+            {
+                "paper_id": "generic_antibody_developability",
+                "title": "Antibody developability and coverage review",
+                "abstract": "Antibody developability programs track coverage and assay liabilities.",
+            },
+            {
+                "paper_id": "mechanism_guardrail_source",
+                "title": "Mechanism-aware guardrail design for pH-dependent antibodies",
+                "abstract": (
+                    "A mechanism-aware design separates guardrail endpoints from "
+                    "acidic release and neutral binding claims."
+                ),
+            },
+        ],
+    )
+
+    result = extract_mechanisms(project)
+
+    by_id = {card["mechanism_id"]: card for card in result["mechanism_cards"]}
+    guardrail_card = by_id["mechanism_guardrail_design"]
+    assert guardrail_card["source_paper_ids"] == ["mechanism_guardrail_source"]
+
+
+def test_normalized_backend_request_text_does_not_duplicate_literature_corpus_chunks(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    evidence_sentence = "Unique active learning acquisition evidence."
+    _write_corpus(
+        project,
+        [
+            {
+                "paper_id": "paper_1",
+                "title": "Chunked paper",
+                "text": evidence_sentence,
+                "chunks": [
+                    {
+                        "chunk_id": "paper_1::chunk_1",
+                        "text": evidence_sentence,
+                    }
+                ],
+            }
+        ],
+    )
+    backend = FakeBackend([ModelResponse(text="", structured={"mechanism_cards": [_complete_card()]})])
+
+    extract_mechanisms(project, backend=backend)
+
+    request_payload = json.loads(backend.requests[0].messages[1]["content"])
+    request_text = request_payload["records"][0]["text"]
+    assert request_text.count(evidence_sentence) == 1
 
 
 def test_gap_matrix_flags_missing_mechanism_fields(tmp_path: Path) -> None:

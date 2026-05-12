@@ -6,6 +6,7 @@ from pathlib import Path
 
 from design_scientist.framework_validation import review_framework_run
 from design_scientist.method_report import write_method_report
+from design_scientist.scientist_search_v3 import SCIENTIST_V3_STAGES
 
 
 def test_complete_v3_framework_run_validates(tmp_path: Path) -> None:
@@ -41,6 +42,167 @@ def test_v3_validation_rejects_selected_node_missing_mechanism_spec(tmp_path: Pa
     assert "missing_selected_node_mechanism_spec" in _error_codes(report)
 
 
+def test_v3_validation_rejects_selected_node_that_is_not_completed(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    journal_path = project / "runs" / "v3_unit" / "scientist_journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    selected = next(node for node in journal["nodes"] if node["node_id"] == journal["selected_node_id"])
+    selected["status"] = "failed"
+    selected["contract"] = {"valid": True}
+    selected["valid"] = True
+    _write_json(journal_path, journal)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "selected_node_not_completed" in _error_codes(report)
+
+
+def test_v3_validation_rejects_selected_node_failing_static_lifecycle_contract(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    workspace = _selected_workspace(project)
+    sentinel = workspace / "executed_untrusted_code.txt"
+    (workspace / "mechanism.py").write_text(
+        "from pathlib import Path\n"
+        "def select_batch(*args, **kwargs):\n"
+        "    return []\n"
+        "def run(workspace):\n"
+        "    Path(workspace, 'executed_untrusted_code.txt').write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "selected_node_lifecycle_contract_invalid" in _error_codes(report)
+    assert not sentinel.exists()
+
+
+def test_v3_validation_rejects_selected_node_empty_semantic_artifact_shells(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    workspace = _selected_workspace(project)
+    for filename in (
+        "proposal.json",
+        "ablation_plan.json",
+        "stress_test_plan.json",
+        "mechanism_metrics.json",
+    ):
+        _write_json(workspace / filename, {"notes": []})
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert {
+        "selected_node_proposal_semantic_empty",
+        "selected_node_ablation_plan_semantic_empty",
+        "selected_node_stress_test_plan_semantic_empty",
+        "selected_node_mechanism_metrics_semantic_empty",
+    } <= _error_codes(report)
+
+
+def test_v3_validation_accepts_runner_shaped_mechanism_metrics(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    workspace = _selected_workspace(project)
+    _write_json(
+        workspace / "mechanism_metrics.json",
+        {
+            "node_id": "node_literature_kernel",
+            "mechanism_benchmark_summary": {
+                "mechanism": "literature_kernel",
+                "mean_best_feasible_utility": "0.875",
+                "mean_false_claim_rate": "0.025",
+                "key_ablation_delta": "0.12",
+                "selected_eligible": "true",
+            },
+            "ranking_score": 1.2,
+            "selected_eligible": True,
+        },
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert report["valid"]
+    assert "selected_node_mechanism_metrics_semantic_empty" not in _error_codes(report)
+
+
+def test_v3_validation_rejects_non_contract_stage_progress_json(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    write_method_report(project, run_id="v3_unit")
+    _write_json(project / "runs" / "v3_unit" / "stage_progress.json", {"arbitrary": "json"})
+
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "stage_progress_invalid_contract" in _error_codes(report)
+
+
+def test_v3_validation_rejects_non_contract_route_tree_json(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    write_method_report(project, run_id="v3_unit")
+    _write_json(project / "runs" / "v3_unit" / "route_tree.json", {"arbitrary": "json"})
+
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "route_tree_invalid_contract" in _error_codes(report)
+
+
+def test_v3_validation_rejects_stage_progress_without_selected_node(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    write_method_report(project, run_id="v3_unit")
+    stage_path = project / "runs" / "v3_unit" / "stage_progress.json"
+    stage_progress = json.loads(stage_path.read_text(encoding="utf-8"))
+    stage_progress.pop("selected_node_id")
+    _write_json(stage_path, stage_progress)
+
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "stage_progress_invalid_contract" in _error_codes(report)
+
+
+def test_v3_validation_rejects_route_tree_selected_node_not_selected_or_connected(
+    tmp_path: Path,
+) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    write_method_report(project, run_id="v3_unit")
+    route_path = project / "runs" / "v3_unit" / "route_tree.json"
+    route_tree = json.loads(route_path.read_text(encoding="utf-8"))
+    route_tree["nodes"][0]["selected"] = False
+    route_tree["nodes"][0]["status"] = "failed"
+    route_tree["edges"] = []
+    _write_json(route_path, route_tree)
+
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "route_tree_invalid_contract" in _error_codes(report)
+
+
+def test_v3_validation_rejects_selected_mechanism_missing_from_benchmark_results_and_summary(
+    tmp_path: Path,
+) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    run_dir = project / "runs" / "v3_unit"
+    for filename in ("mechanism_benchmark_results.csv", "mechanism_benchmark_summary.csv"):
+        path = run_dir / filename
+        rows = [row for row in _read_csv_rows(path) if row["mechanism"] != "literature_kernel"]
+        _write_csv(path, rows)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert {
+        "selected_mechanism_missing_benchmark_results",
+        "selected_mechanism_missing_benchmark_summary",
+    } <= _error_codes(report)
+
+
 def test_v3_validation_rejects_selected_architecture_clone(tmp_path: Path) -> None:
     project = _build_v3_framework_run(tmp_path)
     metrics_path = _selected_workspace(project) / "mechanism_metrics.json"
@@ -69,6 +231,24 @@ def test_v3_validation_rejects_selected_eligible_false(tmp_path: Path) -> None:
 
     assert not report["valid"]
     assert "selected_mechanism_not_eligible" in _error_codes(report)
+
+
+def test_v3_validation_rejects_metrics_eligible_when_summary_ineligible(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    metrics_path = _selected_workspace(project) / "mechanism_metrics.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics["selected_eligible"] = True
+    _write_json(metrics_path, metrics)
+    _rewrite_summary_row(project, {"selected_eligible": "false"})
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert {
+        "selected_mechanism_not_eligible",
+        "selected_mechanism_eligibility_mismatch",
+    } <= _error_codes(report)
 
 
 def test_v3_validation_requires_required_baseline_summary_rows(tmp_path: Path) -> None:
@@ -234,7 +414,22 @@ def _build_v3_framework_run(tmp_path: Path) -> Path:
     )
     (workspace / "mechanism.py").write_text(
         "def fit_state(context=None):\n"
-        "    return context or {}\n",
+        "    return context or {}\n"
+        "\n"
+        "def generate_candidates(state=None, budget=1):\n"
+        "    return []\n"
+        "\n"
+        "def score_candidates(state=None, candidates=None):\n"
+        "    return []\n"
+        "\n"
+        "def select_panel(state=None, scored_candidates=None, budget=1):\n"
+        "    return []\n"
+        "\n"
+        "def plan_ablations(mechanism_spec=None):\n"
+        "    return []\n"
+        "\n"
+        "def run(workspace):\n"
+        "    return None\n",
         encoding="utf-8",
     )
     _write_json(
@@ -262,7 +457,15 @@ def _build_v3_framework_run(tmp_path: Path) -> Path:
             "mechanism": "literature_kernel",
             "selected_eligible": True,
             "architecture_clone": False,
-            "metrics": {"mean_best_feasible_utility": 0.875},
+            "metrics": {
+                "mean_best_feasible_utility": 0.875,
+                "mean_false_claim_rate": 0.025,
+                "key_ablation_delta": 0.12,
+            },
+            "benchmark_summary": {
+                "mean_best_feasible_utility": 0.875,
+                "mean_false_claim_rate": 0.025,
+            },
             "unsupported_claims": ["Synthetic replay does not prove wet-lab superiority."],
         },
     )
@@ -277,17 +480,38 @@ def _build_v3_framework_run(tmp_path: Path) -> Path:
     _write_json(
         run_dir / "stage_progress.json",
         {
+            "version": "v3",
+            "stage_sequence": list(SCIENTIST_V3_STAGES),
             "stages": [
-                {"stage_id": "read_literature", "status": "completed"},
-                {"stage_id": "validate_mechanisms", "status": "completed"},
-            ]
+                {"stage": stage, "status": "completed", "artifacts": [], "errors": []}
+                for stage in SCIENTIST_V3_STAGES
+            ],
+            "selected_node_id": "node_literature_kernel",
         },
     )
     _write_json(
         run_dir / "route_tree.json",
         {
-            "selected_path": ["node_literature_kernel"],
-            "nodes": [{"node_id": "node_literature_kernel", "status": "selected"}],
+            "version": "v3",
+            "stage_sequence": list(SCIENTIST_V3_STAGES),
+            "root": {
+                "node_id": "root",
+                "stage": "mechanism_ideation",
+                "status": "completed",
+            },
+            "nodes": [
+                {
+                    "node_id": "node_literature_kernel",
+                    "parent_id": "root",
+                    "stage": "mechanism_implementation",
+                    "status": "completed",
+                    "workspace": str(workspace),
+                    "selected": True,
+                    "artifacts": {},
+                }
+            ],
+            "edges": [{"source": "root", "target": "node_literature_kernel"}],
+            "selected_node_id": "node_literature_kernel",
         },
     )
     _write_csv(

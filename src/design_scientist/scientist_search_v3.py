@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import shutil
 import time
 from pathlib import Path
@@ -49,7 +50,7 @@ SCIENTIST_V3_STAGES = (
 )
 
 NODE_BASELINE_ORDER = (
-    "mechanism_aware",
+    "literature_delta",
     "fixed_mix",
     "random_feasible",
     "pure_lattice_repair",
@@ -111,6 +112,7 @@ def run_scientist_v3(
     node_records: list[dict[str, Any]] = []
     valid_lifecycles: list[dict[str, Any]] = []
     node_by_mechanism: dict[str, dict[str, Any]] = {}
+    generated_mechanism_names: set[str] = set()
     agent_backend = _resolve_backend(use_codex, backend)
 
     planned_nodes = _planned_nodes(nodes)
@@ -169,16 +171,43 @@ def run_scientist_v3(
         )
         node_records.append(record)
         if status == "completed":
-            lifecycle = _lifecycle_from_execution(record, execution)
-            valid_lifecycles.append(lifecycle)
-            node_by_mechanism[lifecycle["name"]] = record
+            mechanism_name = _generated_lifecycle_name(
+                record=record,
+                execution=execution,
+                agent_result=agent_result,
+            )
+            record["mechanism"] = mechanism_name
+            duplicate_reason = _generated_name_rejection_reason(
+                mechanism_name,
+                seen=generated_mechanism_names,
+            )
+            if duplicate_reason:
+                record["status"] = "failed"
+                record.setdefault("failure_reasons", []).append(duplicate_reason)
+                contract = record.setdefault("contract", {})
+                contract["valid"] = False
+                failure_kinds = contract.setdefault("failure_kinds", [])
+                if "duplicate_mechanism_name" not in failure_kinds:
+                    failure_kinds.append("duplicate_mechanism_name")
+                contract_errors = contract.setdefault("errors", [])
+                if duplicate_reason not in contract_errors:
+                    contract_errors.append(duplicate_reason)
+            else:
+                generated_mechanism_names.add(mechanism_name)
+                lifecycle = _lifecycle_from_execution(record, execution)
+                valid_lifecycles.append(lifecycle)
+                node_by_mechanism[lifecycle["name"]] = record
 
     stage_states["mechanism_implementation"]["status"] = (
-        "completed" if node_records else "failed"
+        "completed" if valid_lifecycles else "failed"
     )
     stage_states["mechanism_implementation"]["artifacts"] = [
         record["workspace"] for record in node_records
     ]
+    if not valid_lifecycles:
+        stage_states["mechanism_implementation"]["errors"] = [
+            "no generated mechanism nodes passed validation"
+        ]
 
     mechanisms: list[Any] = [*valid_lifecycles, "mechanism_aware"]
     benchmark = run_mechanism_benchmark(
@@ -210,12 +239,19 @@ def run_scientist_v3(
     for record in node_records:
         record["selected"] = record["node_id"] == selected_node_id
 
-    stage_states["ablation_stress"]["status"] = "completed"
-    stage_states["ablation_stress"]["artifacts"] = [
-        benchmark.get("mechanism_benchmark_results_path"),
-        benchmark.get("mechanism_benchmark_summary_path"),
-        benchmark.get("mechanism_ablation_results_path"),
-    ]
+    if valid_lifecycles:
+        stage_states["ablation_stress"]["status"] = "completed"
+        stage_states["ablation_stress"]["artifacts"] = [
+            benchmark.get("mechanism_benchmark_results_path"),
+            benchmark.get("mechanism_benchmark_summary_path"),
+            benchmark.get("mechanism_ablation_results_path"),
+        ]
+    else:
+        stage_states["ablation_stress"]["status"] = "failed"
+        stage_states["ablation_stress"]["artifacts"] = []
+        stage_states["ablation_stress"]["errors"] = [
+            "no generated mechanism nodes were available for ablation stress"
+        ]
     stage_states["selection_report"]["status"] = (
         "completed" if selected_node is not None else "failed"
     )
@@ -428,6 +464,7 @@ def _write_local_mechanism_node(
         from __future__ import annotations
 
         import json
+        from itertools import combinations
         from pathlib import Path
 
         from design_scientist import policies as policy_api
@@ -437,6 +474,15 @@ def _write_local_mechanism_node(
         SOURCE_BASELINE_FAMILY = {baseline_family!r}
         TOP_PAPERS = {top_papers!r}
         MECHANISM_IDS = {mechanism_ids!r}
+        TARGET_BACKGROUND = "transfer_bg"
+        PRIOR_INTERACTION_PAIRS = (
+            ("HD110H", "HG56H"),
+            ("HD110H", "HN54H"),
+            ("HG56H", "HV105H"),
+            ("HN54H", "HV105H"),
+            ("HD110H", "LT47Y"),
+        )
+        RISK_MODULES = ("HA23K", "SY92F", "KD31N")
 
 
         def _write_json(path: Path, payload: dict) -> None:
@@ -449,6 +495,35 @@ def _write_local_mechanism_node(
                     return "random_feasible"
                 return SOURCE_BASELINE_FAMILY
             return "random_feasible"
+
+
+        def _candidate_id(candidate):
+            return str(
+                candidate.get("variant_id")
+                or candidate.get("candidate_id")
+                or candidate.get("id")
+                or candidate.get("name")
+            )
+
+
+        def _mechanism_delta_score(candidate):
+            modules = tuple(candidate.get("modules") or ())
+            background = str(candidate.get("background") or "")
+            target_background = str(candidate.get("target_background") or TARGET_BACKGROUND)
+            target_bonus = 1.0 if background == target_background else 0.0
+            interaction_bonus = 0.0
+            for pair in combinations(modules, 2):
+                if tuple(sorted(pair)) in PRIOR_INTERACTION_PAIRS:
+                    interaction_bonus += 1.0
+            repair_bonus = 0.45 if "HD110H" in modules and "LT47Y" in modules else 0.0
+            risk_penalty = sum(1.0 for module in modules if module in RISK_MODULES)
+            return (
+                2.0 * target_bonus
+                + 0.35 * len(modules)
+                + 0.65 * interaction_bonus
+                + repair_bonus
+                - 0.55 * risk_penalty
+            )
 
 
         def fit_state(context):
@@ -466,8 +541,7 @@ def _write_local_mechanism_node(
             scored = []
             for candidate in candidates:
                 item = dict(candidate)
-                modules = item.get("modules") or ()
-                item["v3_mechanism_score"] = len(modules) + (1 if item.get("background") == item.get("target_background") else 0)
+                item["v3_mechanism_score"] = _mechanism_delta_score(item)
                 scored.append(item)
             return scored
 
@@ -482,13 +556,21 @@ def _write_local_mechanism_node(
                     state["round_index"],
                     rng,
                 )
-            return policy_api.mechanism_aware(
-                state["observed_records"],
+            delta_ranked = sorted(
                 candidates,
-                budget,
-                state["round_index"],
-                rng,
+                key=lambda candidate: (
+                    float(candidate.get("v3_mechanism_score", _mechanism_delta_score(candidate))),
+                    _candidate_id(candidate),
+                ),
+                reverse=True,
             )
+            selected = []
+            for candidate in delta_ranked:
+                candidate_id = _candidate_id(candidate)
+                selected.append(candidate_id)
+                if len(selected) >= budget:
+                    break
+            return selected
 
 
         def plan_ablations(state):
@@ -760,6 +842,53 @@ def _lifecycle_from_execution(
         "claim_guardrail": True,
         "confounding_correction": True,
     }
+
+
+def _generated_lifecycle_name(
+    *,
+    record: dict[str, Any],
+    execution: MechanismNodeExecutionResult,
+    agent_result: dict[str, Any] | None,
+) -> str:
+    candidates: list[Any] = []
+    mechanism_spec = execution.artifacts.get(V3_MECHANISM_SPEC)
+    if isinstance(mechanism_spec, dict):
+        candidates.extend(
+            [
+                mechanism_spec.get("mechanism_id"),
+                mechanism_spec.get("name"),
+            ]
+        )
+    if isinstance(agent_result, dict):
+        structured = agent_result.get("structured")
+        if isinstance(structured, dict):
+            candidates.append(structured.get("mechanism_name"))
+    candidates.append(record.get("node_id"))
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        text = str(candidate).strip()
+        if text:
+            return _safe_generated_name(text)
+    return _safe_generated_name("generated_mechanism")
+
+
+def _generated_name_rejection_reason(
+    mechanism_name: str,
+    *,
+    seen: set[str],
+) -> str | None:
+    if mechanism_name in seen:
+        return f"duplicate generated mechanism name: {mechanism_name}"
+    if mechanism_name in NONSELECTABLE_BASELINES:
+        return f"duplicate generated mechanism name: {mechanism_name} collides with a reserved baseline"
+    return None
+
+
+def _safe_generated_name(name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._-")
+    return safe or "generated_mechanism"
 
 
 def _failure_reasons(execution: MechanismNodeExecutionResult) -> list[str]:

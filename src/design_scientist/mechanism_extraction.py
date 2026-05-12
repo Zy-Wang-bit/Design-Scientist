@@ -75,7 +75,18 @@ HEURISTIC_TEMPLATES: tuple[dict[str, Any], ...] = (
             "protein engineering",
             "variant design",
         ),
+        "source_keywords": (
+            "active learning",
+            "batch active",
+            "bayesian optimization",
+            "acquisition",
+            "expected improvement",
+            "uncertainty sampling",
+            "surrogate",
+            "posterior",
+        ),
         "min_score": 2,
+        "source_min_score": 2,
         "problem_setting": (
             "Select experimental candidates in a batch-limited design loop using "
             "observed sequence-function measurements."
@@ -196,6 +207,18 @@ HEURISTIC_TEMPLATES: tuple[dict[str, Any], ...] = (
             "antibody",
         ),
         "min_score": 2,
+        "source_keywords": (
+            "mechanism-aware",
+            "mechanism aware",
+            "guardrail",
+            "neutral binding",
+            "acidic release",
+            "ph-dependent",
+            "ph dependent",
+            "endpoint stratified",
+            "guardrail endpoints",
+        ),
+        "source_min_score": 1,
         "problem_setting": (
             "Improve a target mechanism while preserving required assay, coverage, "
             "or developability guardrails."
@@ -369,9 +392,17 @@ def _normalize_corpus_record(raw: dict[str, Any], *, index: int) -> dict[str, An
         paper_id = f"paper_{index}"
     title = _clean_text(raw.get("title"))
     text_parts = [title]
-    for field in ("abstract", "summary", "full_text", "text", "body", "content", "methods"):
+    for field in ("abstract", "summary"):
         text_parts.append(_text_from_value(raw.get(field)))
-    text_parts.append(_text_from_value(raw.get("chunks")))
+    body_parts = [
+        _text_from_value(raw.get(field))
+        for field in ("full_text", "text", "body", "content", "methods")
+    ]
+    body_text = "\n".join(part for part in body_parts if part)
+    if body_text:
+        text_parts.append(body_text)
+    else:
+        text_parts.append(_text_from_value(raw.get("chunks")))
     text = "\n".join(part for part in text_parts if part)
     return {
         "paper_id": paper_id,
@@ -500,7 +531,7 @@ def _cards_from_backend_payload(payload: Any) -> list[dict[str, Any]] | None:
     if not isinstance(payload, dict):
         return None
     raw_cards = payload.get("mechanism_cards")
-    if not isinstance(raw_cards, list) or not raw_cards:
+    if not isinstance(raw_cards, list):
         return None
 
     cards: list[dict[str, Any]] = []
@@ -547,14 +578,21 @@ def _heuristic_cards(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         score = _keyword_score(corpus_text, template["keywords"])
         if score < int(template["min_score"]):
             continue
-        source_records = [
-            record for record in records if _keyword_score(record["text"], template["keywords"]) > 0
-        ]
-        cards.append(_card_from_template(template, source_records or records, corpus_text))
+        source_records = _source_records_for_template(records, template)
+        if not source_records:
+            continue
+        source_text = "\n".join(record["text"] for record in source_records)
+        cards.append(_card_from_template(template, source_records, source_text))
 
     if not cards:
         return [_manual_review_card(records)]
     return cards
+
+
+def _source_records_for_template(records: list[dict[str, Any]], template: dict[str, Any]) -> list[dict[str, Any]]:
+    keywords = template.get("source_keywords") or template["keywords"]
+    min_score = int(template.get("source_min_score", max(int(template["min_score"]), 3)))
+    return [record for record in records if _keyword_score(record["text"], keywords) >= min_score]
 
 
 def _card_from_template(

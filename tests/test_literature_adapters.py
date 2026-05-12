@@ -12,6 +12,7 @@ from design_scientist.literature_pipeline import run_literature_search
 import design_scientist.literature_pipeline as literature_pipeline
 import design_scientist.literature_sources as literature_sources
 from design_scientist.literature_sources import (
+    LiteratureCacheError,
     LiteratureSourceTemporarilyUnavailable,
     LiteratureContext,
     default_fixture_dir,
@@ -285,6 +286,41 @@ def test_missing_offline_fixture_records_source_error_not_ok_empty_cards(
     assert errors["errors"][0]["error_type"] == "FileNotFoundError"
 
 
+@pytest.mark.parametrize(
+    ("source", "cache_name", "payload"),
+    [
+        ("pubmed", "pubmed_efetch.xml", "<PubmedArticleSet><PubmedArticle>"),
+        ("arxiv", "arxiv.xml", "<feed><entry>"),
+    ],
+)
+def test_corrupt_pubmed_arxiv_xml_cache_is_traced_as_cache_error_not_ok_empty_cards(
+    tmp_path: Path,
+    source: str,
+    cache_name: str,
+    payload: str,
+) -> None:
+    project = tmp_path / "project"
+    source_cache = project / "framework" / "cache" / "literature_raw" / "project_query" / source
+    source_cache.mkdir(parents=True)
+    (source_cache / cache_name).write_text(payload, encoding="utf-8")
+
+    out = run_literature_search(project, max_papers=5, sources=[source])
+    cards = read_json(out)
+    trace = read_json(project / "framework" / "literature_search_trace.json")
+    errors = read_json(project / "framework" / "cache" / "literature_raw" / "source_errors.json")
+
+    assert cards == []
+    assert trace["events"][0]["event"] == "source_error"
+    assert trace["events"][0]["status"] == "cache_error"
+    assert trace["events"][0]["source"] == source
+    assert trace["events"][0]["cache_hit"] is False
+    assert trace["events"][0]["cache_error"] is True
+    assert trace["events"][0]["network_fetch"] is False
+    assert "xml cache" in trace["events"][0]["reason"].lower()
+    assert errors["errors"][0]["source"] == source
+    assert errors["errors"][0]["error_type"] == "LiteratureCacheError"
+
+
 def test_run_literature_search_isolates_raw_cache_by_query_and_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -452,6 +488,116 @@ def test_pubmed_live_adapter_reads_existing_raw_cache_before_network_calls(tmp_p
     )
 
     assert len(cards) == 2
+
+
+@pytest.mark.parametrize("failure_mode", ["corrupt", "unreadable"])
+def test_biorxiv_live_adapter_treats_existing_bad_json_cache_as_cache_error_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cache_path = cache / "biorxiv.json"
+    cache_path.write_text("{bad json" if failure_mode == "corrupt" else "{}", encoding="utf-8")
+    original_read_text = Path.read_text
+    network_calls: list[str] = []
+
+    if failure_mode == "unreadable":
+        def unreadable_cache(self: Path, *args, **kwargs):
+            if self == cache_path:
+                raise OSError("permission denied")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unreadable_cache)
+
+    def fake_get_json(*args, **kwargs):
+        network_calls.append("biorxiv")
+        return {"collection": []}
+
+    monkeypatch.setattr(literature_sources, "_get_json", fake_get_json)
+
+    with pytest.raises(LiteratureCacheError):
+        search_biorxiv(
+            LiteratureContext(query="protein engineering antibody", relevance="test"),
+            max_papers=5,
+            cache_dir=cache,
+        )
+
+    assert network_calls == []
+
+
+def test_run_literature_search_does_not_call_live_fetch_when_existing_xml_cache_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    source_cache = project / "framework" / "cache" / "literature_raw" / "project_query" / "pubmed"
+    source_cache.mkdir(parents=True)
+    cache_path = source_cache / "pubmed_efetch.xml"
+    cache_path.write_text((FIXTURES / "pubmed_efetch.xml").read_text(encoding="utf-8"), encoding="utf-8")
+    original_read_text = Path.read_text
+    network_calls: list[str] = []
+
+    def unreadable_cache(self: Path, *args, **kwargs):
+        if self == cache_path:
+            raise OSError("permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    def fake_get_json(*args, **kwargs):
+        network_calls.append("json")
+        return {"esearchresult": {"idlist": []}}
+
+    def fake_get_text(*args, **kwargs):
+        network_calls.append("text")
+        return ""
+
+    monkeypatch.setattr(Path, "read_text", unreadable_cache)
+    monkeypatch.setattr(literature_sources, "_get_json", fake_get_json)
+    monkeypatch.setattr(literature_sources, "_get_text", fake_get_text)
+
+    out = run_literature_search(project, max_papers=5, sources=["pubmed"])
+    cards = read_json(out)
+    trace = read_json(project / "framework" / "literature_search_trace.json")
+    errors = read_json(project / "framework" / "cache" / "literature_raw" / "source_errors.json")
+    event = trace["events"][0]
+
+    assert cards == []
+    assert network_calls == []
+    assert event["event"] == "source_error"
+    assert event["status"] == "cache_error"
+    assert event["cache_status"] == "cache_error"
+    assert event["cache_hit"] is False
+    assert event["cache_error"] is True
+    assert event["network_fetch"] is False
+    assert "permission denied" in event["reason"].lower()
+    assert errors["errors"][0]["error_type"] == "LiteratureCacheError"
+
+
+def test_run_literature_search_records_corrupt_json_cache_error_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    source_cache = project / "framework" / "cache" / "literature_raw" / "project_query" / "biorxiv"
+    source_cache.mkdir(parents=True)
+    (source_cache / "biorxiv.json").write_text("{bad json", encoding="utf-8")
+    network_calls: list[str] = []
+
+    def fake_get_json(*args, **kwargs):
+        network_calls.append("biorxiv")
+        return {"collection": []}
+
+    monkeypatch.setattr(literature_sources, "_get_json", fake_get_json)
+
+    out = run_literature_search(project, max_papers=5, sources=["biorxiv"])
+    cards = read_json(out)
+    trace = read_json(project / "framework" / "literature_search_trace.json")
+    event = trace["events"][0]
+
+    assert cards == []
+    assert network_calls == []
+    assert event["event"] == "source_error"
+    assert event["status"] == "cache_error"
+    assert event["cache_status"] == "cache_error"
+    assert event["network_fetch"] is False
+    assert event["cache_error"] is True
 
 
 def test_biorxiv_live_pipeline_reuses_raw_cache_and_records_cache_hit(

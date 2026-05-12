@@ -15,7 +15,9 @@ from typing import Any
 
 from design_scientist import artifacts as artifact_constants
 from design_scientist.io import read_json, read_yaml
+from design_scientist.mechanism_nodes import validate_mechanism_node
 from design_scientist.method_extraction import REQUIRED_POLICY_NAMES
+from design_scientist.scientist_search_v3 import SCIENTIST_V3_STAGES
 
 
 CRITICAL_FRAMEWORK_ARTIFACTS: dict[str, str] = {
@@ -181,189 +183,7 @@ def review_framework_run(project_dir: str | Path, run_id: str | None = None) -> 
     """
 
     root, selected_run_id, run_dir = resolve_framework_run(project_dir, run_id=run_id)
-    if _run_journal_version(run_dir) == "v3":
-        return _review_framework_run_v3(root, selected_run_id, run_dir)
-
-    findings: list[dict[str, Any]] = []
-    artifacts: dict[str, str] = {}
-
-    framework_spec = _require_file(
-        root, CRITICAL_FRAMEWORK_ARTIFACTS["framework_spec"], "missing_framework_spec", findings, artifacts
-    )
-    spec_data = _load_yaml_mapping(framework_spec, "framework_spec", findings)
-    if spec_data is not None:
-        _require_mapping_keys(
-            spec_data,
-            ("framework_id", "domain", "artifact_root"),
-            "framework_spec",
-            _rel(framework_spec, root),
-            findings,
-        )
-
-    _validate_reference_audit_artifacts(root, findings, artifacts)
-    _validate_research_os_artifacts(root, findings, artifacts)
-
-    queries_path = _require_file(
-        root,
-        CRITICAL_FRAMEWORK_ARTIFACTS["literature_queries"],
-        "missing_literature_queries",
-        findings,
-        artifacts,
-    )
-    queries_data = _load_yaml_mapping(queries_path, "literature_queries", findings)
-    if queries_data is not None:
-        _validate_literature_queries(queries_data, _rel(queries_path, root), findings)
-
-    cards_path = _require_file(
-        root, CRITICAL_FRAMEWORK_ARTIFACTS["paper_cards"], "missing_paper_cards", findings, artifacts
-    )
-    cards = _load_json(cards_path, "paper_cards", findings)
-    paper_ids = _validate_paper_cards(cards, _rel(cards_path, root), findings)
-    _validate_literature_search_artifacts(root, paper_ids, findings, artifacts)
-
-    modules_path = _require_file(
-        root,
-        CRITICAL_FRAMEWORK_ARTIFACTS["method_modules"],
-        "missing_method_modules",
-        findings,
-        artifacts,
-    )
-    modules_data = _load_json(modules_path, "method_modules", findings)
-    method_modules = _validate_method_modules(modules_data, paper_ids, _rel(modules_path, root), findings)
-
-    for key in ("literature_map", "research_gap_matrix", "method_hypotheses"):
-        _require_file(
-            root,
-            CRITICAL_FRAMEWORK_ARTIFACTS[key],
-            f"missing_{key}",
-            findings,
-            artifacts,
-        )
-
-    algorithm_path = _require_file(
-        root,
-        CRITICAL_FRAMEWORK_ARTIFACTS["algorithm_spec"],
-        "missing_algorithm_spec",
-        findings,
-        artifacts,
-    )
-    algorithm_text = _load_text(algorithm_path, "algorithm_spec", findings)
-    if algorithm_text is not None:
-        for heading in ALGORITHM_REQUIRED_SECTIONS:
-            if heading not in algorithm_text:
-                _add_finding(
-                    findings,
-                    "error",
-                    "algorithm_spec_missing_section",
-                    f"Algorithm spec is missing required section {heading}.",
-                    _rel(algorithm_path, root),
-                )
-        if "Algorithm id:" not in algorithm_text:
-            _add_finding(
-                findings,
-                "warning",
-                "algorithm_spec_missing_id",
-                "Algorithm spec does not include an Algorithm id line.",
-                _rel(algorithm_path, root),
-            )
-
-    registry_path = _require_file(
-        root,
-        CRITICAL_FRAMEWORK_ARTIFACTS["method_registry"],
-        "missing_method_registry",
-        findings,
-        artifacts,
-    )
-    registry_data = _load_yaml_mapping(registry_path, "method_registry", findings)
-    registry_policy_names = _validate_method_registry(registry_data, _rel(registry_path, root), findings)
-
-    if run_dir is None or not run_dir.is_dir():
-        artifact = "runs/<latest>" if selected_run_id is None else f"runs/{selected_run_id}"
-        _add_finding(
-            findings,
-            "error",
-            "missing_run",
-            "No framework run directory was found for validation.",
-            artifact,
-        )
-        return _build_report(root, selected_run_id, run_dir, findings, artifacts)
-
-    artifacts["run_dir"] = str(run_dir)
-    benchmark_path = _require_run_file(
-        root, run_dir, "benchmark_results", "missing_benchmark_results", findings, artifacts
-    )
-    benchmark_rows = _load_csv(benchmark_path, "benchmark_results", findings)
-
-    benchmark_summary_path = _optional_run_file(root, run_dir, "benchmark_summary", findings, artifacts)
-    benchmark_summary_rows = _load_csv(benchmark_summary_path, "benchmark_summary", findings)
-    _validate_benchmark_summary_rows(benchmark_summary_rows, _rel(benchmark_summary_path, root), findings)
-    _validate_optional_run_json_artifact(root, run_dir, "stage_progress", findings, artifacts)
-    _validate_optional_run_json_artifact(root, run_dir, "route_tree", findings, artifacts)
-
-    ablation_path = _require_run_file(
-        root, run_dir, "ablation_results", "missing_ablation_results", findings, artifacts
-    )
-    ablation_rows = _load_csv(ablation_path, "ablation_results", findings)
-    _validate_ablation_rows(ablation_rows, _rel(ablation_path, root), findings)
-
-    journal_path = _require_run_file(
-        root, run_dir, "scientist_journal", "missing_scientist_journal", findings, artifacts
-    )
-    journal = _load_json(journal_path, "scientist_journal", findings)
-    selected_record = _validate_scientist_journal(journal, selected_run_id, _rel(journal_path, root), findings)
-    generated_policy_names = _journal_generated_benchmark_methods(root, journal)
-    _validate_benchmark_rows(
-        benchmark_rows,
-        registry_policy_names,
-        _rel(benchmark_path, root),
-        findings,
-        generated_policy_names,
-    )
-    _validate_selected_method_benchmark_evidence(
-        benchmark_rows,
-        benchmark_summary_rows,
-        selected_record,
-        _rel(benchmark_path, root),
-        _rel(benchmark_summary_path, root),
-        findings,
-    )
-    _validate_selected_method_false_claim_rate(
-        benchmark_rows,
-        benchmark_summary_rows,
-        selected_record,
-        _rel(benchmark_path, root),
-        _rel(benchmark_summary_path, root),
-        findings,
-    )
-    _validate_selected_node_artifacts(root, run_dir, selected_record, findings, artifacts)
-    _validate_selected_trace(root, selected_record, findings)
-    _validate_selected_method_majority_wins(
-        benchmark_rows,
-        benchmark_summary_rows,
-        selected_record,
-        _rel(benchmark_summary_path, root),
-        _rel(benchmark_path, root),
-        findings,
-    )
-
-    method_report_path = _require_run_file(
-        root, run_dir, "method_report", "missing_method_report", findings, artifacts
-    )
-    method_report_text = _load_text(method_report_path, "method_report", findings)
-    if method_report_text is not None:
-        _validate_method_report(method_report_text, _rel(method_report_path, root), findings)
-
-    _validate_state_unsupported_claims(root, findings, artifacts)
-    if method_modules and not any(module.get("source_papers") for module in method_modules):
-        _add_finding(
-            findings,
-            "error",
-            "method_modules_without_sources",
-            "No method module is tied to source papers.",
-            _rel(modules_path, root),
-        )
-
-    return _build_report(root, selected_run_id, run_dir, findings, artifacts)
+    return _review_framework_run_v3(root, selected_run_id, run_dir)
 
 
 def _review_framework_run_v3(
@@ -439,8 +259,20 @@ def _review_framework_run_v3(
     journal = _load_json(journal_path, "scientist_journal", findings)
     selected_record = _validate_v3_scientist_journal(journal, selected_run_id, _rel(journal_path, root), findings)
 
-    _validate_required_v3_run_json(root, run_dir, "stage_progress", findings, artifacts)
-    _validate_required_v3_run_json(root, run_dir, "route_tree", findings, artifacts)
+    stage_progress = _validate_required_v3_run_json(root, run_dir, "stage_progress", findings, artifacts)
+    _validate_v3_stage_progress(
+        stage_progress,
+        selected_record,
+        _rel(run_dir / V3_CRITICAL_RUN_ARTIFACTS["stage_progress"], root),
+        findings,
+    )
+    route_tree = _validate_required_v3_run_json(root, run_dir, "route_tree", findings, artifacts)
+    _validate_v3_route_tree(
+        route_tree,
+        selected_record,
+        _rel(run_dir / V3_CRITICAL_RUN_ARTIFACTS["route_tree"], root),
+        findings,
+    )
 
     benchmark_path = _require_v3_run_file(
         root,
@@ -478,6 +310,12 @@ def _review_framework_run_v3(
         selected_record,
         selected_artifacts.get("mechanism_spec"),
         selected_artifacts.get("mechanism_metrics"),
+    )
+    _validate_v3_mechanism_benchmark_result_coverage(
+        benchmark_rows,
+        selected_mechanism,
+        _rel(benchmark_path, root),
+        findings,
     )
     _validate_v3_mechanism_benchmark_summary(
         summary_rows,
@@ -1986,6 +1824,14 @@ def _validate_v3_scientist_journal(
             "selected_node does not match selected_node_id.",
             artifact,
         )
+    if selected_record.get("status") != "completed":
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_not_completed",
+            f"Selected V3 node {selected_node_id!r} status is {selected_record.get('status')!r}.",
+            artifact,
+        )
     if not _v3_selected_node_valid(selected_record):
         _add_finding(
             findings,
@@ -2022,6 +1868,7 @@ def _validate_v3_selected_node_artifacts(
     allowed_roots = _selected_artifact_allowed_roots(workspace, run_dir)
     artifact_map = selected_record.get("artifacts") if isinstance(selected_record.get("artifacts"), dict) else {}
     loaded_json: dict[str, Any] = {}
+    json_artifacts: dict[str, str] = {}
 
     for filename in artifact_constants.V3_MECHANISM_NODE_ARTIFACTS:
         key = Path(filename).stem
@@ -2041,6 +1888,7 @@ def _validate_v3_selected_node_artifacts(
         if filename.endswith(".json"):
             data = _load_json(path, f"selected_node_{key}", findings)
             loaded_json[key] = data
+            json_artifacts[key] = _rel(path, root)
             if key == "mechanism_spec":
                 _validate_v3_mechanism_spec(data, _rel(path, root), findings)
             elif key == "validation_report" and isinstance(data, dict) and data.get("valid") is not True:
@@ -2052,7 +1900,183 @@ def _validate_v3_selected_node_artifacts(
                     _rel(path, root),
                 )
 
+    _validate_v3_selected_node_workspace_contract(root, workspace, selected_record, findings)
+    _validate_v3_selected_node_semantic_artifacts(loaded_json, json_artifacts, selected_record, findings)
     return loaded_json
+
+
+def _validate_v3_selected_node_workspace_contract(
+    root: Path,
+    workspace: Path | None,
+    selected_record: dict[str, Any],
+    findings: list[dict[str, Any]],
+) -> None:
+    selected_node_id = selected_record.get("node_id")
+    artifact = _rel(workspace, root) if workspace is not None else None
+    if workspace is None:
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_workspace_missing",
+            f"Selected V3 node {selected_node_id!r} is missing its workspace.",
+            artifact,
+        )
+        return
+    if not workspace.is_dir():
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_workspace_missing",
+            f"Selected V3 node {selected_node_id!r} workspace does not exist.",
+            artifact,
+        )
+        return
+
+    validation = validate_mechanism_node(workspace)
+    if validation.valid:
+        return
+
+    details = [
+        *(f"missing {artifact_name}" for artifact_name in validation.missing_artifacts),
+        *validation.malformed_json.values(),
+        *(f"escaping symlink {path}" for path in validation.escaping_symlinks),
+        *validation.errors,
+    ]
+    detail_text = "; ".join(details) if details else "unknown preflight failure"
+    _add_finding(
+        findings,
+        "error",
+        "selected_node_lifecycle_contract_invalid",
+        f"Selected V3 node {selected_node_id!r} failed static/preflight mechanism-node validation: {detail_text}.",
+        artifact,
+    )
+
+
+def _validate_v3_selected_node_semantic_artifacts(
+    loaded_json: dict[str, Any],
+    json_artifacts: dict[str, str],
+    selected_record: dict[str, Any],
+    findings: list[dict[str, Any]],
+) -> None:
+    proposal = loaded_json.get("proposal")
+    if isinstance(proposal, dict):
+        has_mechanism_id = _has_text(proposal.get("mechanism_id")) or _has_text(proposal.get("mechanism"))
+        has_v3_rationale = (
+            _has_text(proposal.get("hypothesis"))
+            or _has_nonempty_semantic_value(proposal.get("literature_gap"))
+            or _has_nonempty_semantic_value(proposal.get("architecture_delta"))
+        )
+        if not (has_mechanism_id and has_v3_rationale):
+            _add_finding(
+                findings,
+                "error",
+                "selected_node_proposal_semantic_empty",
+                "Selected V3 proposal.json must include mechanism_id and a hypothesis, literature_gap, or architecture_delta.",
+                json_artifacts.get("proposal"),
+            )
+
+    ablation_plan = loaded_json.get("ablation_plan")
+    if isinstance(ablation_plan, dict) and not _has_nonempty_json_list(ablation_plan.get("ablations")):
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_ablation_plan_semantic_empty",
+            "Selected V3 ablation_plan.json must include a non-empty ablations list.",
+            json_artifacts.get("ablation_plan"),
+        )
+
+    stress_test_plan = loaded_json.get("stress_test_plan")
+    if isinstance(stress_test_plan, dict) and not any(
+        _has_nonempty_json_list(stress_test_plan.get(key))
+        for key in ("worlds", "stress_tests", "claims")
+    ):
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_stress_test_plan_semantic_empty",
+            "Selected V3 stress_test_plan.json must include worlds, stress_tests, or claims.",
+            json_artifacts.get("stress_test_plan"),
+        )
+
+    mechanism_metrics = loaded_json.get("mechanism_metrics")
+    if isinstance(mechanism_metrics, dict):
+        selected_mechanism = _selected_v3_mechanism_name(
+            selected_record,
+            loaded_json.get("mechanism_spec"),
+            None,
+        )
+        selected_node_id = selected_record.get("node_id") if isinstance(selected_record, dict) else None
+        metrics_mechanism = _v3_mechanism_name_from_mapping(mechanism_metrics)
+        links_selected = bool(metrics_mechanism) and (
+            (selected_mechanism and metrics_mechanism == selected_mechanism)
+            or (selected_node_id and metrics_mechanism == selected_node_id)
+        )
+        has_benchmark_metrics = (
+            _has_nonempty_json_mapping(mechanism_metrics.get("metrics"))
+            or _has_nonempty_json_mapping(mechanism_metrics.get("benchmark_summary"))
+            or _has_nonempty_json_mapping(mechanism_metrics.get("mechanism_benchmark_summary"))
+            or any(
+                mechanism_metrics.get(key) not in (None, "")
+                for key in (
+                    "mean_best_feasible_utility",
+                    "mean_false_claim_rate",
+                    "false_claim_rate",
+                    "key_ablation_delta",
+                )
+            )
+        )
+        if not (links_selected and has_benchmark_metrics):
+            _add_finding(
+                findings,
+                "error",
+                "selected_node_mechanism_metrics_semantic_empty",
+                "Selected V3 mechanism_metrics.json must link to the selected mechanism and include benchmark metrics or summary fields.",
+                json_artifacts.get("mechanism_metrics"),
+            )
+
+
+def _v3_mechanism_name_from_mapping(data: dict[str, Any]) -> str | None:
+    for key in (
+        "mechanism",
+        "mechanism_name",
+        "benchmark_mechanism",
+        "benchmark_method",
+        "benchmark_policy_name",
+        "method",
+        "mechanism_id",
+        "node_id",
+        "name",
+    ):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    for key in ("mechanism_benchmark_summary", "benchmark_summary", "metrics"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            mechanism = _v3_mechanism_name_from_mapping(value)
+            if mechanism:
+                return mechanism
+    return None
+
+
+def _has_nonempty_json_list(value: Any) -> bool:
+    return isinstance(value, list) and any(
+        _has_text(item) or isinstance(item, dict) and bool(item) for item in value
+    )
+
+
+def _has_nonempty_json_mapping(value: Any) -> bool:
+    return isinstance(value, dict) and any(item not in (None, "", [], {}) for item in value.values())
+
+
+def _has_nonempty_semantic_value(value: Any) -> bool:
+    if _has_text(value):
+        return True
+    if isinstance(value, list):
+        return any(_has_nonempty_semantic_value(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_nonempty_semantic_value(item) for item in value.values())
+    return value not in (None, "", [], {})
 
 
 def _resolve_v3_selected_node_artifact(
@@ -2175,6 +2199,38 @@ def _validate_v3_mechanism_benchmark_results(
         )
 
 
+def _validate_v3_mechanism_benchmark_result_coverage(
+    rows: list[dict[str, str]] | None,
+    selected_mechanism: str | None,
+    artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    if rows is None or not rows:
+        return
+    name_column = _v3_name_column(rows)
+    if name_column is None:
+        return
+    mechanisms = {row.get(name_column, "") for row in rows if row.get(name_column)}
+    missing_baselines = [baseline for baseline in REQUIRED_BENCHMARK_BASELINES if baseline not in mechanisms]
+    if missing_baselines:
+        _add_finding(
+            findings,
+            "error",
+            "mechanism_benchmark_results_missing_required_baselines",
+            "mechanism_benchmark_results.csv must include random_feasible and fixed_mix baseline rows. "
+            f"Missing: {', '.join(missing_baselines)}.",
+            artifact,
+        )
+    if selected_mechanism and selected_mechanism not in mechanisms:
+        _add_finding(
+            findings,
+            "error",
+            "selected_mechanism_missing_benchmark_results",
+            f"Selected mechanism {selected_mechanism!r} is missing from mechanism_benchmark_results.csv.",
+            artifact,
+        )
+
+
 def _validate_v3_mechanism_benchmark_summary(
     rows: list[dict[str, str]] | None,
     selected_mechanism: str | None,
@@ -2250,12 +2306,20 @@ def _validate_v3_mechanism_benchmark_summary(
 
     summary_eligible = _truthy(selected_row.get("selected_eligible"))
     metrics_eligible = _truthy(_dict_get(mechanism_metrics, "selected_eligible"))
-    if not (summary_eligible or metrics_eligible):
+    if metrics_eligible and not summary_eligible:
+        _add_finding(
+            findings,
+            "error",
+            "selected_mechanism_eligibility_mismatch",
+            f"Selected V3 mechanism {selected_mechanism!r} is selected_eligible in node metrics but not in benchmark summary.",
+            artifact,
+        )
+    if not summary_eligible:
         _add_finding(
             findings,
             "error",
             "selected_mechanism_not_eligible",
-            f"Selected V3 mechanism {selected_mechanism!r} is not selected_eligible in metrics or benchmark summary.",
+            f"Selected V3 mechanism {selected_mechanism!r} is not selected_eligible in benchmark summary.",
             artifact,
         )
 
@@ -3111,7 +3175,7 @@ def _validate_required_v3_run_json(
     key: str,
     findings: list[dict[str, Any]],
     artifacts: dict[str, str],
-) -> None:
+) -> Any:
     path = _require_v3_run_file(
         root,
         run_dir,
@@ -3122,7 +3186,7 @@ def _validate_required_v3_run_json(
     )
     data = _load_json(path, key, findings)
     if data is None:
-        return
+        return None
     if not isinstance(data, (dict, list)):
         _add_finding(
             findings,
@@ -3131,6 +3195,7 @@ def _validate_required_v3_run_json(
             f"{V3_CRITICAL_RUN_ARTIFACTS[key]} must be a JSON object or list.",
             _rel(path, root),
         )
+        return None
     elif data in ({}, []):
         _add_finding(
             findings,
@@ -3138,6 +3203,132 @@ def _validate_required_v3_run_json(
             f"empty_{key}",
             f"{V3_CRITICAL_RUN_ARTIFACTS[key]} must not be empty.",
             _rel(path, root),
+        )
+    return data
+
+
+def _validate_v3_stage_progress(
+    data: Any,
+    selected_record: dict[str, Any] | None,
+    artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    required_stages = list(SCIENTIST_V3_STAGES)
+    problems: list[str] = []
+    if not isinstance(data, dict):
+        problems.append("must be a JSON object")
+    else:
+        if data.get("version") != "v3":
+            problems.append("version must be 'v3'")
+        if data.get("stage_sequence") != required_stages:
+            problems.append("stage_sequence must list all V3 stages in order")
+        stages = data.get("stages")
+        if not isinstance(stages, list):
+            problems.append("stages must be a list")
+        else:
+            stage_statuses: dict[str, Any] = {}
+            malformed = False
+            for stage in stages:
+                if not isinstance(stage, dict):
+                    malformed = True
+                    continue
+                stage_name = stage.get("stage")
+                status = stage.get("status")
+                if not isinstance(stage_name, str) or not stage_name:
+                    malformed = True
+                    continue
+                stage_statuses[stage_name] = status
+                if not isinstance(status, str) or not status:
+                    malformed = True
+            if malformed:
+                problems.append("each stage must include stage and status")
+            missing = [stage for stage in required_stages if stage not in stage_statuses]
+            if missing:
+                problems.append("missing statuses for V3 stages: " + ", ".join(missing))
+        selected_node_id = data.get("selected_node_id")
+        expected_selected_node_id = selected_record.get("node_id") if isinstance(selected_record, dict) else None
+        if expected_selected_node_id and selected_node_id != expected_selected_node_id:
+            problems.append("selected_node_id must match scientist_journal.json")
+
+    if problems:
+        _add_finding(
+            findings,
+            "error",
+            "stage_progress_invalid_contract",
+            "stage_progress.json does not match the V3 run contract: " + "; ".join(problems) + ".",
+            artifact,
+        )
+
+
+def _validate_v3_route_tree(
+    data: Any,
+    selected_record: dict[str, Any] | None,
+    artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    problems: list[str] = []
+    selected_node_id: str | None = None
+    nodes: Any = None
+    if not isinstance(data, dict):
+        problems.append("must be a JSON object")
+    else:
+        if data.get("version") != "v3":
+            problems.append("version must be 'v3'")
+        if not isinstance(data.get("root"), dict):
+            problems.append("root must be an object")
+        nodes = data.get("nodes")
+        if not isinstance(nodes, list) or not nodes:
+            problems.append("nodes must be a non-empty list")
+        if not isinstance(data.get("edges"), list):
+            problems.append("edges must be a list")
+        raw_selected_node_id = data.get("selected_node_id")
+        if isinstance(raw_selected_node_id, str) and raw_selected_node_id:
+            selected_node_id = raw_selected_node_id
+        else:
+            problems.append("selected_node_id must be a non-empty string")
+
+    if isinstance(nodes, list):
+        selected_route_node: dict[str, Any] | None = None
+        node_ids = {
+            node.get("node_id")
+            for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("node_id"), str)
+        }
+        if selected_node_id and selected_node_id not in node_ids:
+            problems.append(f"selected_node_id {selected_node_id!r} is not present in nodes")
+        for node in nodes:
+            if isinstance(node, dict) and node.get("node_id") == selected_node_id:
+                selected_route_node = node
+                break
+        if selected_node_id and selected_route_node is not None:
+            if selected_route_node.get("selected") is not True:
+                problems.append("selected route node must be marked selected=true")
+            if selected_route_node.get("status") != "completed":
+                problems.append("selected route node must be completed")
+            if selected_route_node.get("stage") not in {"mechanism_implementation", "ablation_stress", "selection_report"}:
+                problems.append("selected route node must belong to a V3 mechanism stage")
+    expected_selected_node_id = selected_record.get("node_id") if isinstance(selected_record, dict) else None
+    if expected_selected_node_id and selected_node_id and selected_node_id != expected_selected_node_id:
+        problems.append("selected_node_id does not match scientist_journal.json")
+    edges = data.get("edges") if isinstance(data, dict) else None
+    if isinstance(edges, list) and selected_node_id:
+        connected = any(
+            isinstance(edge, dict)
+            and edge.get("target") == selected_node_id
+            and isinstance(edge.get("source"), str)
+            and edge.get("source")
+            for edge in edges
+        )
+        if not connected:
+            problems.append("selected route node must have an incoming edge")
+
+    if problems:
+        _add_finding(
+            findings,
+            "error",
+            "route_tree_invalid_contract",
+            "route_tree.json does not match the V3 run contract: " + "; ".join(problems) + ".",
+            artifact,
         )
 
 
@@ -3482,7 +3673,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Print the full validation report as JSON")
     args = parser.parse_args(argv)
 
-    report = review_framework_run(args.project_dir, run_id=args.run_id)
+    try:
+        report = review_framework_run(args.project_dir, run_id=args.run_id)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=False))
     else:

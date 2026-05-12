@@ -71,20 +71,13 @@ MechanismSpec Kernel plus Literature Engine V3: the literature engine builds a
 full-text corpus, reading trace, mechanism cards, mechanism library, and gap
 matrix; the kernel turns selected mechanisms into executable lifecycle nodes
 with explicit components, claims, stress tests, ablations, and benchmark gates.
-`run-scientist` defaults to this V3 path. Use `--legacy-v2` only when you need
-the older method-module/method-node workflow while migrating artifacts. Staged
-commands are debug/development entry points for inspecting one phase at a time.
+`run-scientist` is the V3 full-chain path. Staged commands are
+debug/development entry points for inspecting one V3 phase at a time.
 
 ```bash
 design-scientist init-framework /tmp/ds_product --domain "protein_variant_design"
 design-scientist run-scientist /tmp/ds_product
 design-scientist review-framework /tmp/ds_product
-```
-
-Legacy V2 compatibility remains available:
-
-```bash
-design-scientist run-scientist /tmp/ds_product --legacy-v2
 ```
 
 For local smoke tests or deterministic integration runs, use offline fixtures:
@@ -139,30 +132,19 @@ leave:
   `stress_test_plan.json`, `mechanism_metrics.json`, and
   `validation_report.json`.
 
-The selected method trace in `scientist_journal.json` links the proposal,
-novelty report, benchmark metrics, literature-backed route, and candidate-pool
-artifacts used for review. Candidate pools are emitted in both CSV and JSONL so
-spreadsheet review and machine replay can use the same contract.
-
-No-baseline invention mode is used for literature-gap method nodes. In that
-mode the node should invent from recorded literature gaps rather than declaring
-a simple baseline family as its source, and `review-framework` expects
-non-clone novelty evidence plus the literature gap/rationale in `proposal.json`.
+The selected mechanism trace in `scientist_journal.json` links the proposal,
+MechanismSpec, benchmark metrics, literature-backed route, stress tests,
+ablation plan, and validation report used for review.
 
 Staged framework commands are debug/development entry points:
 
 ```bash
 design-scientist literature-search /tmp/ds_product
-design-scientist extract-methods /tmp/ds_product
-design-scientist develop-method /tmp/ds_product --run-id debug_method_run
-design-scientist benchmark-methods /tmp/ds_product --run-id baseline_synthetic_replay_seed_1729
-python -m design_scientist.method_report /tmp/ds_product --run-id debug_method_run
-design-scientist review-framework /tmp/ds_product --run-id debug_method_run
+design-scientist read-literature /tmp/ds_product
+design-scientist extract-mechanisms /tmp/ds_product
+design-scientist run-scientist /tmp/ds_product --max-papers 60 --nodes 4 --rounds 3
+design-scientist review-framework /tmp/ds_product
 ```
-
-`benchmark-methods` writes baseline-only replay artifacts. When no `--run-id`
-is supplied it uses `baseline_synthetic_replay_seed_1729`; it refuses to write
-into an existing scientist run directory.
 
 Programmatic entry points:
 
@@ -178,6 +160,4 @@ report = review_framework_run("/tmp/ds_product", run_id="<run_id>")
 `version: "v3"`. For V3 it checks the Literature Engine V3 artifacts,
 MechanismSpec node artifacts, required replay baselines, selected eligibility,
 architecture-clone blocking, positive key ablation delta, false-claim-rate
-guardrails, and `method_report.md`. Legacy V2 validation still checks method
-modules, algorithm spec, registry, synthetic replay artifacts, selected
-`proposal.json`/`novelty_report.json`, and the V2 report shape.
+guardrails, and `method_report.md`.

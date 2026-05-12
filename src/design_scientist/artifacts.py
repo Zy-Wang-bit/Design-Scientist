@@ -33,7 +33,7 @@ FRAMEWORK_BOOTSTRAP_DIRS = (
     RUNS_DIR,
 )
 
-FRAMEWORK_ARTIFACTS = (
+LEGACY_FRAMEWORK_ARTIFACTS = (
     *FRAMEWORK_BOOTSTRAP_ARTIFACTS,
     "framework/paper_cards.json",
     "framework/method_modules.json",
@@ -67,6 +67,8 @@ V3_FRAMEWORK_ARTIFACTS = (
     V3_MECHANISM_GAP_MATRIX,
 )
 
+FRAMEWORK_ARTIFACTS = V3_FRAMEWORK_ARTIFACTS
+
 V3_MECHANISM_NODE_ARTIFACTS = (
     V3_MECHANISM_SPEC,
     V3_MECHANISM_IMPLEMENTATION,
@@ -78,12 +80,14 @@ V3_MECHANISM_NODE_ARTIFACTS = (
 )
 
 V3_STAGE_SEQUENCE = (
-    "read_literature",
-    "extract_mechanisms",
-    "develop_mechanisms",
-    "stress_test_mechanisms",
-    "ablate_mechanisms",
-    "validate_mechanisms",
+    "literature_retrieval",
+    "fulltext_reading",
+    "mechanism_extraction",
+    "mechanism_ideation",
+    "mechanism_implementation",
+    "debug_repair",
+    "ablation_stress",
+    "selection_report",
 )
 
 LEGACY_PROJECT_EXECUTION_ARTIFACTS = (

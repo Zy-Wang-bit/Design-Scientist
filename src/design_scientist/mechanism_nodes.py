@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import inspect
 import os
 import subprocess
 import sys
+import tempfile
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +28,7 @@ from design_scientist.method_nodes import (
     _normalize_guard_roots,
     _read_json_object,
     _resolve_workspace,
+    _snapshot_entry,
     _subprocess_env,
 )
 
@@ -52,12 +55,47 @@ FAILURE_TIMEOUT = "timeout"
 FAILURE_MISSING_ARTIFACTS = "missing_artifacts"
 FAILURE_MALFORMED_ARTIFACTS = "malformed_artifacts"
 FAILURE_PATH_GUARD = "path_guard"
+FAILURE_STALE_ARTIFACTS = "stale_artifacts"
 FAILURE_CALLABLE_IMPORT = "callable_import"
 
 _SUBPROCESS_CODE = (
     "from design_scientist.mechanism_nodes import _mechanism_node_subprocess_main\n"
     "_mechanism_node_subprocess_main()\n"
 )
+_PATH_GUARD_ERROR_PREFIX = "path_guard: out_of_bounds_write:"
+_STALE_ARTIFACTS_ERROR_PREFIX = (
+    "stale_artifacts: generated artifacts not updated by run(workspace):"
+)
+_AUDIT_BLOCKED_PROCESS_EVENTS = {
+    "os.exec",
+    "os.fork",
+    "os.forkpty",
+    "os.system",
+    "os.posix_spawn",
+    "os.spawn",
+    "subprocess.Popen",
+}
+_AUDIT_WRITE_PATH_INDEXES = {
+    "os.remove": (0,),
+    "os.unlink": (0,),
+    "os.rmdir": (0,),
+    "os.mkdir": (0,),
+    "os.makedirs": (0,),
+    "os.rename": (0, 1),
+    "os.replace": (0, 1),
+    "os.symlink": (0, 1),
+    "os.link": (0, 1),
+    "os.truncate": (0,),
+    "os.chmod": (0,),
+    "os.chown": (0,),
+    "os.utime": (0,),
+    "shutil.copyfile": (1,),
+    "shutil.copymode": (1,),
+    "shutil.copystat": (1,),
+    "shutil.copytree": (1,),
+    "shutil.move": (0, 1),
+    "shutil.rmtree": (0,),
+}
 
 
 class MechanismNodeError(RuntimeError):
@@ -99,6 +137,7 @@ class MechanismNodeExecutionResult:
     failure_kinds: list[str] = field(default_factory=list)
     missing_artifacts: list[str] = field(default_factory=list)
     malformed_json: dict[str, str] = field(default_factory=dict)
+    stale_artifacts: list[str] = field(default_factory=list)
     out_of_bounds_writes: list[str] = field(default_factory=list)
     escaping_symlinks: list[str] = field(default_factory=list)
     exception: str | None = None
@@ -217,8 +256,8 @@ def execute_mechanism_node(
     """
 
     workspace = _resolve_workspace(node_workspace)
-    snapshot_roots = _normalize_guard_roots(workspace, guard_roots)
-    before = snapshot_filesystem(snapshot_roots)
+    snapshot_roots = _mechanism_snapshot_roots(workspace, guard_roots)
+    before = _snapshot_mechanism_guard(snapshot_roots)
     executed = False
     exception: str | None = None
     errors: list[str] = []
@@ -267,11 +306,37 @@ def execute_mechanism_node(
                 or f"mechanism.py exited with code {subprocess_result.returncode}"
             )
 
-    after = snapshot_filesystem(snapshot_roots)
+    after = _snapshot_mechanism_guard(snapshot_roots)
     filesystem_changes = diff_filesystem_snapshots(before, after)
     out_of_bounds_writes = _out_of_bounds_writes(filesystem_changes, workspace)
+    subprocess_path_guard_errors = _subprocess_path_guard_errors(subprocess_result)
+    out_of_bounds_writes = _merge_unique_strings(
+        [
+            *out_of_bounds_writes,
+            *_subprocess_path_guard_violations(subprocess_result),
+        ]
+    )
     validation = validate_mechanism_node(workspace)
+    parent_stale_artifacts = (
+        _stale_generated_artifacts(before, after, workspace)
+        if not validation.missing_artifacts and not validation.malformed_json
+        else []
+    )
+    stale_artifacts = _merge_unique_strings(
+        [
+            *parent_stale_artifacts,
+            *_subprocess_stale_artifacts(subprocess_result),
+        ]
+    )
     errors.extend(validation.errors)
+    errors.extend(
+        error for error in subprocess_path_guard_errors if error not in errors
+    )
+    if stale_artifacts:
+        errors.append(
+            "Generated V3 artifacts were not created or updated by run(workspace): "
+            + ", ".join(stale_artifacts)
+        )
 
     preliminary_valid = (
         executed
@@ -279,9 +344,10 @@ def execute_mechanism_node(
         and validation.valid
         and not out_of_bounds_writes
         and not errors
+        and not stale_artifacts
     )
     if preliminary_valid:
-        parent_import_before = snapshot_filesystem(snapshot_roots)
+        parent_import_before = _snapshot_mechanism_guard(snapshot_roots)
         try:
             exported_callables = load_mechanism_node_callables(workspace)
         except MechanismNodeContractError as exc:
@@ -290,7 +356,7 @@ def execute_mechanism_node(
         except Exception:
             callable_import_failed = True
             exception = traceback.format_exc()
-        parent_import_after = snapshot_filesystem(snapshot_roots)
+        parent_import_after = _snapshot_mechanism_guard(snapshot_roots)
         parent_import_changes = diff_filesystem_snapshots(
             parent_import_before,
             parent_import_after,
@@ -302,14 +368,29 @@ def execute_mechanism_node(
             if change not in out_of_bounds_writes
         )
 
+    out_of_bounds_writes = _merge_unique_strings(out_of_bounds_writes)
+    if out_of_bounds_writes and not any(_PATH_GUARD_ERROR_PREFIX in error for error in errors):
+        errors.append(
+            f"{_PATH_GUARD_ERROR_PREFIX} filesystem writes detected: "
+            + ", ".join(sorted(out_of_bounds_writes))
+        )
+    errors = _merge_unique_strings(errors)
+
     failure_kinds = _execution_failure_kinds(
         contract_failed=contract_failed,
         subprocess_result=subprocess_result,
         validation=validation,
         out_of_bounds_writes=out_of_bounds_writes,
+        stale_artifacts=stale_artifacts,
+        subprocess_path_guard_failed=bool(subprocess_path_guard_errors),
         callable_import_failed=callable_import_failed,
     )
-    valid = preliminary_valid and not callable_import_failed and not out_of_bounds_writes
+    valid = (
+        preliminary_valid
+        and not callable_import_failed
+        and not out_of_bounds_writes
+        and not stale_artifacts
+    )
     return MechanismNodeExecutionResult(
         workspace=workspace,
         valid=valid,
@@ -317,6 +398,7 @@ def execute_mechanism_node(
         failure_kinds=failure_kinds,
         missing_artifacts=validation.missing_artifacts,
         malformed_json=validation.malformed_json,
+        stale_artifacts=stale_artifacts,
         out_of_bounds_writes=sorted(out_of_bounds_writes),
         escaping_symlinks=validation.escaping_symlinks,
         exception=exception,
@@ -356,6 +438,8 @@ def _execute_mechanism_subprocess(
     *,
     timeout_seconds: float | None,
 ) -> _MechanismNodeSubprocessResult:
+    env = _subprocess_env()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         completed = subprocess.run(
             [
@@ -368,7 +452,7 @@ def _execute_mechanism_subprocess(
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
-            env=_subprocess_env(),
+            env=env,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
@@ -394,18 +478,22 @@ def _execute_mechanism_subprocess(
 
 def _mechanism_node_subprocess_main() -> None:
     workspace = _resolve_workspace(sys.argv[1])
+    _install_mechanism_subprocess_path_guard(workspace)
     node = load_mechanism_node(workspace)
     module = _load_mechanism_module(node)
     runtime_errors = _lifecycle_runtime_errors(module)
     if runtime_errors:
         raise MechanismNodeContractError("; ".join(runtime_errors))
 
-    entrypoint = getattr(module, "run", None)
-    if entrypoint is None:
-        return
-    if not callable(entrypoint):
-        raise MechanismNodeContractError("mechanism.py run attribute must be callable when present")
-    entrypoint(workspace)
+    run_before = snapshot_filesystem([workspace])
+    _call_run_entrypoint(getattr(module, "run"), workspace)
+    run_after = snapshot_filesystem([workspace])
+    stale_artifacts = _stale_generated_artifacts(run_before, run_after, workspace)
+    if stale_artifacts:
+        print(
+            _STALE_ARTIFACTS_ERROR_PREFIX + " " + ", ".join(stale_artifacts),
+            file=sys.stderr,
+        )
 
 
 def _load_mechanism_module(node: MechanismNode) -> Any:
@@ -447,40 +535,50 @@ def _lifecycle_static_errors(mechanism_path: Path) -> list[str]:
         for name in MECHANISM_NODE_LIFECYCLE_CALLABLES
         if name not in defined_functions
     ]
-    if not missing:
-        return []
+    errors: list[str] = []
     if defined_functions == {"select_batch"}:
         return [
             "mechanism.py defines only legacy select_batch; V3 mechanism nodes must define "
             "lifecycle callables: "
             + ", ".join(MECHANISM_NODE_LIFECYCLE_CALLABLES)
         ]
-    return [
-        "mechanism.py missing lifecycle callables: "
-        + ", ".join(missing)
-    ]
+    if missing:
+        errors.append(
+            "mechanism.py missing lifecycle callables: "
+            + ", ".join(missing)
+        )
+    if "run" not in defined_functions:
+        errors.append("mechanism.py must define callable run(workspace)")
+    return errors
 
 
 def _lifecycle_runtime_errors(module: Any) -> list[str]:
+    errors: list[str] = []
     missing_or_not_callable = [
         name
         for name in MECHANISM_NODE_LIFECYCLE_CALLABLES
         if not callable(getattr(module, name, None))
     ]
-    if not missing_or_not_callable:
-        return []
     if callable(getattr(module, "select_batch", None)) and len(missing_or_not_callable) == len(
         MECHANISM_NODE_LIFECYCLE_CALLABLES
     ):
-        return [
+        errors.append(
             "mechanism.py defines only legacy select_batch; V3 mechanism nodes must define "
             "lifecycle callables: "
             + ", ".join(MECHANISM_NODE_LIFECYCLE_CALLABLES)
-        ]
-    return [
-        "mechanism.py missing callable lifecycle attributes: "
-        + ", ".join(missing_or_not_callable)
-    ]
+        )
+    elif missing_or_not_callable:
+        errors.append(
+            "mechanism.py missing callable lifecycle attributes: "
+            + ", ".join(missing_or_not_callable)
+        )
+
+    entrypoint = getattr(module, "run", None)
+    if not callable(entrypoint):
+        errors.append("mechanism.py must define callable run(workspace)")
+    else:
+        errors.extend(_run_entrypoint_signature_errors(entrypoint))
+    return errors
 
 
 def _out_of_bounds_writes(
@@ -494,12 +592,266 @@ def _out_of_bounds_writes(
     ]
 
 
+def _stale_generated_artifacts(
+    before: dict[Path, Any],
+    after: dict[Path, Any],
+    workspace: Path,
+) -> list[str]:
+    stale: list[str] = []
+    for artifact in V3_MECHANISM_NODE_GENERATED_ARTIFACTS:
+        path = _absolute_no_symlink_resolve(workspace / artifact)
+        before_entry = before.get(path)
+        after_entry = after.get(path)
+        if before_entry is not None and after_entry is not None and before_entry == after_entry:
+            stale.append(artifact)
+    return stale
+
+
+def _install_mechanism_subprocess_path_guard(workspace: Path) -> None:
+    allowed_root = workspace.resolve()
+
+    def guard(event: str, args: tuple[Any, ...]) -> None:
+        if event in _AUDIT_BLOCKED_PROCESS_EVENTS:
+            raise MechanismNodeContractError(
+                f"{_PATH_GUARD_ERROR_PREFIX} {event} is outside workspace {allowed_root}"
+            )
+        for candidate in _audit_write_paths(event, args):
+            path = _resolve_audit_path(candidate)
+            if path is None or _is_relative_to(path, allowed_root):
+                continue
+            raise MechanismNodeContractError(
+                f"{_PATH_GUARD_ERROR_PREFIX} {path} is outside workspace {allowed_root}"
+            )
+
+    sys.addaudithook(guard)
+
+
+def _audit_write_paths(event: str, args: tuple[Any, ...]) -> list[Any]:
+    if event == "open":
+        if len(args) >= 3 and _audit_open_requests_write(args[1], args[2]):
+            return [args[0]]
+        return []
+    indexes = _AUDIT_WRITE_PATH_INDEXES.get(event)
+    if indexes is None:
+        return []
+    return [args[index] for index in indexes if index < len(args)]
+
+
+def _audit_open_requests_write(mode: Any, flags: Any) -> bool:
+    if isinstance(mode, str) and any(marker in mode for marker in ("w", "a", "x", "+")):
+        return True
+    if isinstance(flags, int):
+        write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+        return bool(flags & write_flags)
+    return False
+
+
+def _resolve_audit_path(candidate: Any) -> Path | None:
+    if isinstance(candidate, int):
+        return None
+    try:
+        path = Path(os.fsdecode(candidate))
+    except (TypeError, ValueError):
+        return None
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        return path.expanduser().resolve(strict=False)
+    except OSError:
+        return Path(os.path.abspath(os.fspath(path.expanduser())))
+
+
+def _run_entrypoint_signature_errors(entrypoint: Any) -> list[str]:
+    try:
+        signature = inspect.signature(entrypoint)
+    except (TypeError, ValueError):
+        return []
+    parameters = list(signature.parameters.values())
+    if any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in parameters):
+        return []
+    if any(
+        param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        for param in parameters
+    ):
+        return []
+    keyword_workspace = signature.parameters.get("workspace")
+    if keyword_workspace and keyword_workspace.kind == inspect.Parameter.KEYWORD_ONLY:
+        return []
+    return ["mechanism.py run(workspace) must accept the workspace argument"]
+
+
+def _call_run_entrypoint(entrypoint: Any, workspace: Path) -> None:
+    try:
+        signature = inspect.signature(entrypoint)
+    except (TypeError, ValueError):
+        entrypoint(workspace)
+        return
+    parameters = list(signature.parameters.values())
+    if any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in parameters):
+        entrypoint(workspace)
+        return
+    if any(
+        param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        for param in parameters
+    ):
+        entrypoint(workspace)
+        return
+    keyword_workspace = signature.parameters.get("workspace")
+    if keyword_workspace and keyword_workspace.kind == inspect.Parameter.KEYWORD_ONLY:
+        entrypoint(workspace=workspace)
+        return
+    raise MechanismNodeContractError("mechanism.py run(workspace) must accept the workspace argument")
+
+
+def _subprocess_path_guard_errors(
+    subprocess_result: _MechanismNodeSubprocessResult,
+) -> list[str]:
+    errors: list[str] = []
+    for line in _subprocess_output_lines(subprocess_result):
+        if _PATH_GUARD_ERROR_PREFIX not in line:
+            continue
+        errors.append(line[line.index(_PATH_GUARD_ERROR_PREFIX):].strip())
+    return _merge_unique_strings(errors)
+
+
+def _subprocess_path_guard_violations(
+    subprocess_result: _MechanismNodeSubprocessResult,
+) -> list[str]:
+    violations: list[str] = []
+    for error in _subprocess_path_guard_errors(subprocess_result):
+        detail = error.split(_PATH_GUARD_ERROR_PREFIX, 1)[1].strip()
+        path, _, _workspace_detail = detail.partition(" is outside workspace ")
+        if path:
+            violations.append(path)
+    return _merge_unique_strings(violations)
+
+
+def _subprocess_stale_artifacts(
+    subprocess_result: _MechanismNodeSubprocessResult,
+) -> list[str]:
+    artifacts: list[str] = []
+    for line in _subprocess_output_lines(subprocess_result):
+        if _STALE_ARTIFACTS_ERROR_PREFIX not in line:
+            continue
+        detail = line[line.index(_STALE_ARTIFACTS_ERROR_PREFIX) :]
+        detail = detail.removeprefix(_STALE_ARTIFACTS_ERROR_PREFIX).strip()
+        artifacts.extend(
+            artifact.strip()
+            for artifact in detail.split(",")
+            if artifact.strip()
+        )
+    return _merge_unique_strings(artifacts)
+
+
+def _subprocess_output_lines(
+    subprocess_result: _MechanismNodeSubprocessResult,
+) -> list[str]:
+    return [
+        line
+        for output in (subprocess_result.stderr, subprocess_result.stdout)
+        for line in output.splitlines()
+    ]
+
+
+def _merge_unique_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        merged.append(value)
+    return merged
+
+
+def _absolute_no_symlink_resolve(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _mechanism_snapshot_roots(
+    workspace: Path,
+    guard_roots: Iterable[str | Path] | None,
+) -> list[Path]:
+    return _merge_unique_paths(
+        [
+            *_normalize_guard_roots(workspace, guard_roots),
+            *_temporary_guard_roots(),
+        ]
+    )
+
+
+def _snapshot_mechanism_guard(roots: Iterable[Path]) -> dict[Path, Any]:
+    temp_roots = set(_temporary_guard_roots())
+    recursive_roots = [root for root in roots if root not in temp_roots]
+    snapshot = snapshot_filesystem(recursive_roots)
+    snapshot.update(_snapshot_shallow_roots(temp_roots))
+    return snapshot
+
+
+def _snapshot_shallow_roots(roots: Iterable[Path]) -> dict[Path, Any]:
+    snapshot: dict[Path, Any] = {}
+    for root in _merge_unique_paths(roots):
+        if not root.exists():
+            continue
+        paths = [root]
+        if root.is_dir():
+            try:
+                paths.extend(root.iterdir())
+            except OSError:
+                pass
+        for path in paths:
+            entry = _snapshot_entry(path)
+            if entry is not None:
+                snapshot[_absolute_no_symlink_resolve(path)] = entry
+    return snapshot
+
+
+def _temporary_guard_roots() -> list[Path]:
+    candidates: list[str | Path | None] = [
+        tempfile.gettempdir(),
+        os.environ.get("TMPDIR"),
+        os.environ.get("TEMP"),
+        os.environ.get("TMP"),
+        Path("/tmp"),
+    ]
+    roots: list[Path] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            root = _resolve_workspace(candidate)
+        except OSError:
+            continue
+        if root.exists():
+            roots.append(root)
+    return _merge_unique_paths(roots)
+
+
+def _merge_unique_paths(paths: Iterable[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    merged: list[Path] = []
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        merged.append(path)
+    return merged
+
+
 def _execution_failure_kinds(
     *,
     contract_failed: bool,
     subprocess_result: _MechanismNodeSubprocessResult,
     validation: MechanismNodeValidationResult,
     out_of_bounds_writes: list[str],
+    stale_artifacts: list[str],
+    subprocess_path_guard_failed: bool,
     callable_import_failed: bool,
 ) -> list[str]:
     kinds: list[str] = []
@@ -513,8 +865,10 @@ def _execution_failure_kinds(
         kinds.append(FAILURE_MISSING_ARTIFACTS)
     if validation.malformed_json:
         kinds.append(FAILURE_MALFORMED_ARTIFACTS)
-    if out_of_bounds_writes or validation.escaping_symlinks:
+    if out_of_bounds_writes or validation.escaping_symlinks or subprocess_path_guard_failed:
         kinds.append(FAILURE_PATH_GUARD)
+    if stale_artifacts:
+        kinds.append(FAILURE_STALE_ARTIFACTS)
     if callable_import_failed:
         kinds.append(FAILURE_CALLABLE_IMPORT)
     return kinds
@@ -527,6 +881,7 @@ __all__ = [
     "FAILURE_MALFORMED_ARTIFACTS",
     "FAILURE_MISSING_ARTIFACTS",
     "FAILURE_PATH_GUARD",
+    "FAILURE_STALE_ARTIFACTS",
     "FAILURE_SUBPROCESS_NONZERO",
     "FAILURE_TIMEOUT",
     "MECHANISM_NODE_LIFECYCLE_CALLABLES",

@@ -28,20 +28,20 @@ Design Scientist 面向的是数据驱动的 wet-lab variant design，而不是�
 
 Design Scientist 的运行可以看作一个本地 Research OS。它由五层组成：
 
-1. **Reference layer**  
+1. **Reference layer**
    保留 `AI-Scientist`、`AI-Scientist-v2` 和 `DeepScientist` 源码作为只读参考。框架不会从这些仓库直接 import 生产代码，而是通过 `audit-references` 把可借鉴的结构写入 `framework/reference_audit.md` 和 `framework/reference_components.json`。目前借鉴点包括：AI-Scientist v1 的 idea/experiment/writeup/review 产物链，AI-Scientist v2 的 stage manager、tree search 和 journal，DeepScientist 的 quest、findings memory、failure memory、BO 式 exploration/exploitation 和 human takeover。
 
-2. **Research OS layer**  
+2. **Research OS layer**
    每个长期研究任务被初始化成一个 quest。quest 不是一次 run，而是一个可以持续追加发现和失败路径的研究空间。核心文件是 `framework/quest.yaml`、`framework/research_map.json`、`framework/findings_memory.jsonl` 和 `framework/failure_memory.jsonl`。
 
-3. **Literature and method layer**  
-   文献不是装饰，而是方法发明的输入。框架先规划查询，再通过 PubMed、bioRxiv、arXiv 和可选 Semantic Scholar 获取 paper cards，随后抽取 method modules、baseline、evaluation protocol、failure modes 和 reusable ideas，生成 `algorithm_spec.md` 和 `method_registry.yaml`。
+3. **Literature Engine V3 layer**
+   文献不是装饰，而是机制发明的输入。框架先规划查询，再通过 PubMed、bioRxiv、arXiv 和可选 Semantic Scholar 获取 paper cards；随后优先读取 PMC、arXiv、bioRxiv 等开放全文，无法读取全文时降级到标题、摘要和元数据，并在 reading trace 中记录。最终产物是 `literature_corpus.jsonl`、`mechanism_cards.json`、`mechanism_library.json` 和 `mechanism_gap_matrix.csv`。
 
-4. **Scientist manager layer**  
-   参考 AI-Scientist v2，框架把一次科学家循环拆成阶段：baseline reproduction、literature grounded ideation、policy implementation、debug and repair、creative research、ablation and stress、selection and report。每个阶段写入 journal、stage progress 和 route tree。
+4. **Scientist manager layer**
+   参考 AI-Scientist v2，框架把一次科学家循环拆成阶段：literature retrieval、fulltext reading、mechanism extraction、mechanism ideation、mechanism implementation、debug repair、ablation stress、selection report。每个阶段写入 journal、stage progress 和 route tree。
 
-5. **Design kernel layer**  
-   这是本框架和 AI-Scientist 最大的区别。这里的 experiment 不是训练模型，而是提出一个 candidate selection policy，运行多轮 synthetic wet-lab replay，对比 baseline 和 ablation，并验证它是否产生不被数据支持的 claim。
+5. **MechanismSpec kernel layer**
+   这是本框架和 AI-Scientist 最大的区别。这里的 experiment 不是训练模型，也不是只提交一个 batch selector，而是提出一个可执行机制：状态拟合、候选生成、候选评分、面板选择和消融计划都必须显式实现。随后框架运行多轮 synthetic wet-lab replay，对比 baseline 和 ablation，并验证它是否产生不被数据支持的 claim。
 
 ### 3. 形式化问题定义
 
@@ -57,13 +57,17 @@ O_t = {历史实验观察、端点、测量类型、来源、证据层级、轮�
 C_t = {满足基本约束的候选变体、模块组合、对照、重复、lattice repair 设计}
 ```
 
-一个策略 `pi` 接收 `O_t` 和 `C_t`，输出预算为 `B` 的下一批实验：
+一个 V3 mechanism `m` 接收 `O_t`、`C_t`、预算 `B` 和轮次状态，必须实现完整 lifecycle：
 
 ```python
-select_batch(observed, candidates, budget, round_index, rng) -> list[str]
+fit_state(context) -> state
+generate_candidates(state) -> list[Candidate]
+score_candidates(state, candidates) -> list[ScoredCandidate]
+select_panel(state, scored_candidates, budget, rng) -> list[str]
+plan_ablations(state) -> list[AblationSpec]
 ```
 
-这就是当前统一的 policy API。无论是内置 baseline、mechanism-aware 默认策略，还是 Codex 生成的新方法，都必须走同一个 API。这样做的目的很直接：所有方法在相同输入、相同预算、相同模拟世界和相同指标下比较，LLM 不能用文字解释替代实际选择结果。
+这就是当前统一的 MechanismSpec API。内置 baseline 会被包装成 mechanism，Codex 生成的新方法也必须走同一套 lifecycle。这样做的目的很直接：所有机制在相同输入、相同预算、相同模拟世界和相同指标下比较，LLM 不能用文字解释替代实际执行结果。
 
 ### 4. 证据和 claim 的处理方式
 
@@ -78,31 +82,31 @@ select_batch(observed, candidates, budget, round_index, rng) -> list[str]
 
 在代码上，`table_io.py` 和 `validators.py` 强制保护 identifier。典型例子是 `1E62`：CSV 读取时不能被 pandas 自动读成科学计数法。框架会把已知错误形式如 `1e+62` 规范化为 `1E62`，并在 validation 中拒绝 artifact 里残留的 `1e+62`。
 
-### 5. 文献检索 v2 流程
+### 5. Literature Engine V3 流程
 
 文献检索不是单次关键词搜索，而是 staged workflow：
 
-1. **Query planning**  
+1. **Query planning**
    读取 `framework/literature_queries.yaml`。如果用户没有写查询，则从 domain 生成保守 query。
 
-2. **Source search**  
+2. **Source search**
    调用 PubMed、bioRxiv、arXiv 和 Semantic Scholar adapter。Semantic Scholar 只有在 `S2_API_KEY` 存在时 live 启用；没有 key 时记录 skip，不让主流程崩溃。所有 adapter 都有 offline fixture mode，测试不依赖真实网络。
 
-3. **Raw cache**  
+3. **Raw cache**
    原始响应写到 `framework/cache/literature_raw/`，避免结果来源不可追踪。
 
-4. **Normalization**  
+4. **Normalization**
    每篇文献标准化成 paper card，包含 source、query_id、external_id、title、summary、year/date 和 provenance。
 
-5. **Ranking and deduplication**  
+5. **Ranking and deduplication**
    按 source priority、citation count、recency 和 method keyword score 做 deterministic ranking，同时跨来源去重。
 
-6. **Trace and graph**  
+6. **Trace and graph**
    写出 `literature_search_trace.json`、`paper_scores.csv` 和 `citation_graph.json`。后续每个方法假设都应该能追溯到某些 paper cards。
 
-### 6. 从文献到方法模块
+### 6. 从文献到 mechanism library
 
-`extract-methods` 读取 `framework/paper_cards.json`，把文献归纳成可复用的 method modules。当前内置的抽取模板包括：
+`extract-mechanisms` 读取 V3 literature corpus 和 paper cards，把文献归纳成可执行 MechanismSpec 可以引用的 mechanism cards。当前内置抽取重点包括：
 
 - batch active learning for variant design
 - constrained Bayesian optimization
@@ -110,18 +114,15 @@ select_batch(observed, candidates, budget, round_index, rng) -> list[str]
 - matched contrast lattice
 - mechanism-aware antibody design
 
-每个 module 会记录 problem setting、data regime、algorithm family、acquisition mechanism、baselines、evaluation protocol、failure modes 和 reusable ideas。抽取结果写入：
+每个 mechanism card 会记录 problem setting、state model、selection mechanism、stress condition、baseline relation、failure modes 和 reusable ideas。抽取结果写入：
 
-- `framework/method_modules.json`
-- `framework/literature_map.md`
-- `framework/research_gap_matrix.csv`
-- `framework/algorithm_spec.md`
-- `framework/method_registry.yaml`
-- `framework/method_hypotheses.md`
+- `framework/mechanism_cards.json`
+- `framework/mechanism_library.json`
+- `framework/mechanism_gap_matrix.csv`
 
-如果没有可用 paper cards，框架不会伪造方法，而是写 `framework/method_extraction_failure.md` 并返回 failure。这一点很重要：没有文献依据时，系统宁可失败，也不能凭空生成看似合理的算法。
+如果没有可用 paper cards 或 corpus，框架不会伪造机制，而是返回 failure。这一点很重要：没有文献依据时，系统宁可失败，也不能凭空生成看似合理的算法。
 
-### 7. 方法发明：controlled method nodes
+### 7. 方法发明：controlled mechanism nodes
 
 方法发明不是让 LLM 直接改核心框架。框架把每个候选方法放进隔离 node workspace：
 
@@ -129,30 +130,30 @@ select_batch(observed, candidates, budget, round_index, rng) -> list[str]
 runs/<run_id>/nodes/<node_id>/
 ```
 
-每个 method node 必须产出固定文件：
+每个 V3 mechanism node 必须产出固定文件：
 
 - `proposal.json`
-- `method.py`
-- `candidate_policy.json`
-- `novelty_report.json`
-- `benchmark_metrics.json`
+- `mechanism_spec.json`
+- `mechanism.py`
+- `ablation_plan.json`
+- `stress_test_plan.json`
+- `mechanism_metrics.json`
 - `validation_report.json`
-- 兼容旧接口的 `manifest.json`
 
-其中 `method.py` 必须提供可调用的 `select_batch`。`proposal.json` 必须写明 method hypothesis、literature basis、algorithm mechanism、expected advantage、failure modes 和 planned ablations。
+其中 `mechanism.py` 必须提供 lifecycle callable：`fit_state`、`generate_candidates`、`score_candidates`、`select_panel` 和 `plan_ablations`。`proposal.json` 必须写明 mechanism hypothesis、literature basis、architecture delta、expected advantage、failure modes 和 planned ablations。
 
-Codex 可在 node workspace 内生成代码，但不能直接修改主框架。`method_nodes.py` 在执行前后做文件系统 snapshot，并要求所有写入都留在 node workspace 内。越界写入、缺 artifact、malformed JSON、runtime exception、validation_report 非 valid，都会把 node 标记为 invalid。
+Codex 可在 node workspace 内生成代码，但不能直接修改主框架。`mechanism_nodes.py` 在执行前后做文件系统 snapshot，并要求所有写入都留在 node workspace 内。越界写入、缺 artifact、malformed JSON、runtime exception、validation_report 非 valid，都会把 node 标记为 invalid。
 
-### 8. 新颖性和 baseline clone guard
+### 8. Mechanism clone guard
 
-框架不允许一个所谓“新方法”只是 baseline 的换名包装。每个 generated policy 在 replay 中会计算：
+框架不允许一个所谓“新机制”只是 baseline 的换名包装。每个 generated mechanism 在 replay 中会计算：
 
 - `selection_overlap_random_feasible`
 - `selection_overlap_fixed_mix`
 - 与 source baseline 的 selection overlap
-- `novelty_score`
+- architecture clone signal
 
-如果某个 node 与 baseline 的选择完全重合，会被标记为 behavioral baseline clone。clone method 不能成为 selected method。`novelty_report.json` 先由 node 写出初始声明，再由 synthetic replay 的真实测量结果刷新，避免 node 自己虚构新颖性。
+如果某个 node 与 baseline 的选择完全重合，会被标记为 behavioral baseline clone。clone mechanism 不能成为 selected mechanism。replay 结果和 mechanism metrics 共同刷新这些判断，避免 node 自己虚构机制差异。
 
 ### 9. Synthetic multi-world wet-lab replay
 
@@ -174,10 +175,10 @@ Benchmark 不是单世界模拟，而是 multi-world suite：
 - false claim rate
 - evidence coverage
 - round efficiency
-- novelty score
+- mechanism novelty score
 - baseline overlap
 
-一个 selected method 必须在多数世界中击败 `random_feasible` 和 `fixed_mix`，false claim rate 不能变差，并且 novelty 不能退化为 baseline clone。如果没有方法通过，run 仍会生成完整报告，但 `review-framework` 返回 error。
+一个 selected mechanism 必须在多数世界中击败 `random_feasible` 和 `fixed_mix`，false claim rate 不能变差，并且架构新颖性不能退化为 baseline clone。如果没有机制通过，run 仍会生成完整报告，但 `review-framework` 返回 error。
 
 ### 10. Deterministic selection
 
@@ -204,9 +205,9 @@ ranking_score
 - `runs/<run_id>/scientist_journal.json`
 - `runs/<run_id>/stage_progress.json`
 - `runs/<run_id>/route_tree.json`
-- `runs/<run_id>/benchmark_results.csv`
-- `runs/<run_id>/benchmark_summary.csv`
-- `runs/<run_id>/ablation_results.csv`
+- `runs/<run_id>/mechanism_benchmark_results.csv`
+- `runs/<run_id>/mechanism_benchmark_summary.csv`
+- `runs/<run_id>/mechanism_ablation_results.csv`
 - `runs/<run_id>/method_report.md`
 
 同时，Research OS 会向：
@@ -222,9 +223,9 @@ ranking_score
 
 1. **定义 quest 时**：确认 domain、objective、可用数据和约束是否准确。
 2. **文献检索后**：检查 paper cards 是否偏题，是否缺关键方法方向。
-3. **方法抽取后**：判断 method modules 是否合理，是否需要手工加入领域方法。
+3. **机制抽取后**：判断 mechanism cards 和 gap matrix 是否合理，是否需要手工补充文献、修改 query 或增加人工机制假设。
 4. **Codex node 生成后**：检查 proposal 是否真正提出了新机制，而不是包装 baseline。
-5. **benchmark 后**：检查 selected method 是否只是 synthetic world 过拟合。
+5. **benchmark 后**：检查 selected mechanism 是否只是 synthetic world 过拟合。
 6. **validation 出 error 时**：必须人工决定修复数据、修复代码、降低 claim，还是停止推进。
 7. **进入真实 wet-lab 前**：任何 panel recommendation 都必须通过 human review packet，不应直接当作最终实验单。
 
@@ -266,11 +267,7 @@ design-scientist = "design_scientist.cli:main"
 
 主要命令分为两组。
 
-Framework R&D 命令中，`run-scientist` 是推荐的 full-chain 路径。当前默认是 **V3：MechanismSpec Kernel + Literature Engine V3**。Literature Engine V3 负责形成 `literature_corpus.jsonl`、reading trace、mechanism cards、mechanism library 和 gap matrix；MechanismSpec Kernel 负责把候选方法固定成有 components、claims、stress tests、ablations 和 benchmark gates 的可执行 mechanism node。若需要旧版 method-module/method-node 流程，可以显式加 `--legacy-v2`：
-
-```bash
-design-scientist run-scientist /tmp/my_design_scientist_project --legacy-v2
-```
+Framework R&D 命令中，`run-scientist` 是推荐的 full-chain 路径。当前默认是 **V3：MechanismSpec Kernel + Literature Engine V3**。Literature Engine V3 负责形成 `literature_corpus.jsonl`、reading trace、mechanism cards、mechanism library 和 gap matrix；MechanismSpec Kernel 负责把候选方法固定成有 components、claims、stress tests、ablations 和 benchmark gates 的可执行 mechanism node。
 
 其余分阶段命令主要用于 debug/development：
 
@@ -278,9 +275,8 @@ design-scientist run-scientist /tmp/my_design_scientist_project --legacy-v2
 design-scientist init-framework
 design-scientist audit-references
 design-scientist literature-search
-design-scientist extract-methods
-design-scientist develop-method
-design-scientist benchmark-methods
+design-scientist read-literature
+design-scientist extract-mechanisms
 design-scientist run-scientist
 design-scientist review-framework
 ```
@@ -316,19 +312,20 @@ design-scientist codex-task
 | `research_os.py` | quest、research map、findings memory、failure memory 的创建和 JSONL 追加。 |
 | `reference_audit.py` | 对 AI-Scientist v1/v2 和 DeepScientist 的本地参考仓库做 deterministic audit，写 reference audit artifacts。 |
 | `literature_sources.py` | PubMed、bioRxiv、arXiv、Semantic Scholar adapter，支持 live search、raw cache 和 offline fixtures。 |
-| `literature_pipeline.py` | Literature Search v2 主流程：query planning、source search、ranking、dedupe、trace、citation graph、paper cards。 |
+| `literature_pipeline.py` | Literature Engine 的 query planning、source search、ranking、dedupe、trace、citation graph、paper cards。 |
 | `literature_fulltext.py` | Literature Engine V3 的 full-text/corpus 读取层，写 `literature_corpus.jsonl` 和 `literature_reading_trace.json`。 |
-| `literature.py` | 早期项目执行路径中的 seed paper cards 和 gap matrix 工具，主要保留兼容旧流程。 |
-| `method_extraction.py` | 从 paper cards 抽取 method modules、literature map、gap matrix、algorithm spec、method registry 和 method hypotheses。 |
+| `literature.py` | 项目执行路径中的 seed paper cards 和 gap matrix 工具。 |
+| `method_extraction.py` | 保留的离线归纳工具；V3 主路径使用 `mechanism_extraction.py`。 |
 | `mechanism_extraction.py` | V3 mechanism card/library/gap matrix 抽取，把文献方法转成 MechanismSpec 可用的机制条目。 |
-| `methods.py` | 早期方法假设生成工具，主要服务 project execution 的旧入口。 |
-| `policies.py` | 统一 policy API 和 baseline/default policies，包括 `random_feasible`、`top_observed`、`greedy_utility`、`fixed_mix`、`pure_uncertainty`、`pure_lattice_repair`、`mechanism_aware`。 |
+| `methods.py` | 项目执行路径中的方法假设生成工具。 |
+| `policies.py` | baseline/default policies，包括 `random_feasible`、`top_observed`、`greedy_utility`、`fixed_mix`、`pure_uncertainty`、`pure_lattice_repair`、`mechanism_aware`；V3 benchmark 会把它们包装成 mechanisms。 |
 | `synthetic_replay.py` | 多世界 synthetic wet-lab replay benchmark。定义 latent module effects、interaction、noise、multi-objective utility、metrics、summary 和 ablation 输出。 |
-| `method_nodes.py` | method node contract、加载、执行、artifact validation、path guard、baseline clone 初步检查。 |
+| `method_nodes.py` | 保留的节点执行工具；V3 主路径使用 `mechanism_nodes.py`。 |
 | `mechanism_nodes.py` | V3 mechanism node lifecycle contract、path guard、artifact validation，要求固定产出 `mechanism_spec.json`、`mechanism.py`、stress/ablation/metrics/validation artifacts。 |
 | `mechanism_replay.py` | V3 mechanism lifecycle replay benchmark，写 `mechanism_benchmark_results.csv`、`mechanism_benchmark_summary.csv` 和 `mechanism_ablation_results.csv`。 |
-| `scientist_search.py` | scientist loop 编排。负责 literature/extraction gate、node 生成、Codex backend 调用、node execution、benchmark ranking、journal、stage progress、route tree 和 memory 追加。 |
-| `framework_validation.py` | `review-framework` 的实现；根据 `scientist_journal.json` 的 `version: "v3"` 切换到 V3 artifact、MechanismSpec、baseline gate、selected eligibility、architecture clone 和 report 验证。 |
+| `scientist_search_v3.py` | V3 scientist loop 编排。负责 literature/fulltext/mechanism extraction gate、node 生成、Codex backend 调用、mechanism node execution、benchmark ranking、journal、stage progress、route tree 和 memory 追加。 |
+| `scientist_search.py` | 保留的旧研究循环模块；CLI full-chain 不再调用它。 |
+| `framework_validation.py` | `review-framework` 的实现；V3 artifact contract、MechanismSpec、baseline gate、selected eligibility、architecture clone 和 report 验证的唯一真源。 |
 | `method_report.py` | 从 journal、literature、benchmark、node artifacts 生成 `method_report.md`；V3 report 会总结 literature corpus、mechanism library、MechanismSpec components/claims/stress tests、ablation、baseline comparison 和 caveats。 |
 | `backends/base.py` | 定义 `ModelBackend` 和 `WorkspaceAgentBackend` protocol。 |
 | `backends/codex_cli.py` | 本地 Codex CLI backend，通过 `codex exec` 执行 read-only 或 workspace-write 任务，支持 `--output-schema`。 |
@@ -338,10 +335,10 @@ design-scientist codex-task
 | `candidates.py` | Project execution 的候选生成 operators，例如 add module、remove module、complete missing edge、complete square、coverage validation、repeat/control。 |
 | `acquisition.py` | 候选和 panel 的机制感知打分函数。 |
 | `panel.py` | project execution 的 panel selection 和 baseline comparison。 |
-| `search.py` | 旧版 controlled search，用于 dry-panel 项目执行路径。 |
+| `search.py` | controlled search，用于 dry-panel 项目执行路径。 |
 | `pipeline.py` | 高层 project execution pipeline，包括 `run_dry_panel` 和 `run_full_workflow`。 |
 | `reporting.py` | 写 human review packet。 |
-| `journal.py` | 旧版 design journal 读写。 |
+| `journal.py` | project execution design journal 读写。 |
 | `retrospective.py` | project execution 的 retrospective policy evaluation。 |
 | `hypotheses.py` | project execution 的 hypothesis board 构建。 |
 | `project_history.py` | 项目历史事件 JSON 追加。 |
@@ -358,9 +355,9 @@ design-scientist codex-task
 | `test_reference_audit.py` | reference audit artifacts。 |
 | `test_research_os.py` | quest、research map、findings/failure memory。 |
 | `test_literature_adapters.py`、`test_literature_methods.py`、`test_method_extraction.py` | 文献 adapter、paper card、method extraction。 |
-| `test_policy_api.py`、`test_synthetic_replay.py` | policy API、多世界 replay、baseline metrics、majority gates。 |
-| `test_method_nodes.py`、`test_scientist_search.py` | method node contract、path guard、fake Codex、scientist journal、baseline clone rejection。 |
-| `test_framework_validation.py` | review-framework 的 artifact 和 selected method 验证。 |
+| `test_policy_api.py`、`test_synthetic_replay.py` | baseline policy、多世界 replay、baseline metrics、majority gates。 |
+| `test_mechanism_nodes_v3.py`、`test_scientist_search_v3.py` | V3 mechanism node contract、path guard、fake Codex、scientist journal、architecture clone rejection。 |
+| `test_framework_validation.py` | review-framework 的 artifact 和 selected mechanism 验证。 |
 | `test_table_io.py`、`test_state_build.py`、`test_search_and_validation.py` | identifier-safe IO、1E62 修复、project state 和 validation。 |
 | `test_project_init.py`、`test_full_workflow.py`、`test_panel_selection.py`、`test_retrospective.py`、`test_hypotheses.py`、`test_data_merge.py`、`test_codex_backend.py` | 旧项目执行路径、数据合并、Codex backend 和 panel 相关行为。 |
 
@@ -391,12 +388,7 @@ uv run design-scientist run-scientist /tmp/my_design_scientist_project \
 uv run design-scientist review-framework /tmp/my_design_scientist_project
 ```
 
-这条命令默认走 V3。只有在需要复查旧版 method-module 流程时才使用：
-
-```bash
-uv run design-scientist run-scientist /tmp/my_design_scientist_project \
-  --legacy-v2
-```
+这条命令默认走 V3，并写出可审查的 mechanism run artifacts。
 
 如果要做真实文献检索，可以设置：
 
@@ -418,21 +410,17 @@ uv run design-scientist run-scientist /tmp/my_design_scientist_project \
 uv run design-scientist review-framework /tmp/my_design_scientist_project
 ```
 
-分阶段命令只作为 debug/development 入口。V3 调试时优先拆 `read-literature`、`extract-mechanisms` 和后续 mechanism run；旧版 V2 调试才使用 `literature-search`、`extract-methods`、`develop-method`、`benchmark-methods`。若故意拆开运行，需要在 `review-framework` 前写出 `method_report.md`；`benchmark-methods` 默认写入独立的 baseline-only run：
+分阶段命令只作为 debug/development 入口。V3 调试时优先拆 `literature-search`、`read-literature`、`extract-mechanisms` 和后续 mechanism run。若故意拆开运行，需要在 `review-framework` 前写出 `method_report.md`：
 
 ```bash
+uv run design-scientist literature-search /tmp/my_design_scientist_project --max-papers 60
 uv run design-scientist read-literature /tmp/my_design_scientist_project
 uv run design-scientist extract-mechanisms /tmp/my_design_scientist_project
-uv run design-scientist literature-search /tmp/my_design_scientist_project --max-papers 60
-uv run design-scientist extract-methods /tmp/my_design_scientist_project
-uv run design-scientist develop-method /tmp/my_design_scientist_project --nodes 4
-uv run design-scientist benchmark-methods /tmp/my_design_scientist_project \
-  --run-id baseline_synthetic_replay_seed_1729 \
+uv run design-scientist run-scientist /tmp/my_design_scientist_project \
+  --max-papers 60 \
+  --nodes 4 \
   --rounds 3
-uv run python -m design_scientist.method_report /tmp/my_design_scientist_project \
-  --run-id <debug_run_id>
-uv run design-scientist review-framework /tmp/my_design_scientist_project \
-  --run-id <debug_run_id>
+uv run design-scientist review-framework /tmp/my_design_scientist_project
 ```
 
 如果要让本地 Codex 参与生成 method node：
@@ -467,25 +455,25 @@ uv run design-scientist review /path/to/project
 
 从用户角度，建议在这些时刻停下来检查：
 
-1. **`init-framework` 后**  
+1. **`init-framework` 后**
    检查 `framework/quest.yaml` 和 `framework/literature_queries.yaml`。如果 domain 写错，后续文献和方法都会偏。
 
 2. **V3 literature 阶段后**
    检查 `paper_cards.json`、`paper_scores.csv`、`literature_search_trace.json`、`literature_corpus.jsonl` 和 `literature_reading_trace.json`。确认文献是否真的围绕方法，而不是只围绕具体生物对象。
 
 3. **`extract-mechanisms` 后**
-   检查 `mechanism_cards.json`、`mechanism_library.json` 和 `mechanism_gap_matrix.csv`。如果文献抽取太弱，需要人工补充 paper cards、修改 query，或暂时用 `--legacy-v2` 复查旧流程。
+   检查 `mechanism_cards.json`、`mechanism_library.json` 和 `mechanism_gap_matrix.csv`。如果文献抽取太弱，需要人工补充 paper cards 或修改 query。
 
 4. **mechanism node 生成后**
    检查每个 node 的 `mechanism_spec.json`、`mechanism.py`、`proposal.json`、`stress_test_plan.json` 和 `ablation_plan.json`。重点看 components、claims、stress tests 是否对齐，而不只是 baseline 换皮。
 
-5. **`benchmark-methods` 或 `run-scientist` 后**  
+5. **`run-scientist` 后**
    V3 检查 `mechanism_benchmark_results.csv`、`mechanism_benchmark_summary.csv`、`mechanism_ablation_results.csv`。Selected mechanism 必须多数世界击败 `random_feasible` 和 `fixed_mix`、`key_ablation_delta > 0`、`selected_eligible=true`，且不能是 `architecture_clone`。
 
-6. **`review-framework` 报 error 时**  
+6. **`review-framework` 报 error 时**
    必须人工处理。error 代表缺关键 artifact、selected node 无效、baseline clone、majority win 不达标、identifier 不可信或 report 不完整。
 
-7. **真实 wet-lab 前**  
+7. **真实 wet-lab 前**
    即使 dry-run panel 通过 validation，也需要看 `human_review_packet.md`。框架输出的是候选决策证据，不是自动下实验单。
 
 ### 8. 框架最终会给出什么结果

@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from design_scientist.artifacts import (
-    FRAMEWORK_ARTIFACTS,
     FRAMEWORK_BOOTSTRAP_DIRS,
     FRAMEWORK_SPEC,
     LITERATURE_QUERIES,
+    V3_FRAMEWORK_ARTIFACTS,
     missing_artifacts,
 )
 from design_scientist.io import ensure_dir, write_yaml
@@ -65,5 +65,5 @@ def init_framework(
 
 def review_framework(root: str | Path) -> dict[str, list[str]]:
     """Return missing framework artifacts; this is intentionally non-throwing."""
-    missing = missing_artifacts(root, FRAMEWORK_ARTIFACTS)
+    missing = missing_artifacts(root, V3_FRAMEWORK_ARTIFACTS)
     return {"missing_artifacts": missing}
