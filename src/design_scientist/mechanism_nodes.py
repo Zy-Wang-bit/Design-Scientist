@@ -778,16 +778,18 @@ def _mechanism_snapshot_roots(
     workspace: Path,
     guard_roots: Iterable[str | Path] | None,
 ) -> list[Path]:
-    return _merge_unique_paths(
-        [
-            *_normalize_guard_roots(workspace, guard_roots),
-            *_temporary_guard_roots(),
-        ]
-    )
+    roots = [*_normalize_guard_roots(workspace, guard_roots)]
+    if _snapshot_temporary_guard_roots_enabled():
+        roots.extend(_temporary_guard_roots())
+    return _merge_unique_paths(roots)
 
 
 def _snapshot_mechanism_guard(roots: Iterable[Path]) -> dict[Path, Any]:
-    temp_roots = set(_temporary_guard_roots())
+    temp_roots = (
+        set(_temporary_guard_roots())
+        if _snapshot_temporary_guard_roots_enabled()
+        else set()
+    )
     recursive_roots = [root for root in roots if root not in temp_roots]
     snapshot = snapshot_filesystem(recursive_roots)
     snapshot.update(_snapshot_shallow_roots(temp_roots))
@@ -831,6 +833,14 @@ def _temporary_guard_roots() -> list[Path]:
         if root.exists():
             roots.append(root)
     return _merge_unique_paths(roots)
+
+
+def _snapshot_temporary_guard_roots_enabled() -> bool:
+    return os.environ.get("DESIGN_SCIENTIST_SNAPSHOT_TEMP_ROOTS", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _merge_unique_paths(paths: Iterable[Path]) -> list[Path]:

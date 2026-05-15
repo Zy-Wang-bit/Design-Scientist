@@ -1062,11 +1062,18 @@ def _resolve_audit_path(candidate: Any) -> Path | None:
 
 
 def _replay_snapshot_roots(project_root: Path) -> list[Path]:
-    return _unique_paths([project_root, *_temporary_guard_roots()])
+    roots = [project_root]
+    if _snapshot_temporary_guard_roots_enabled():
+        roots.extend(_temporary_guard_roots())
+    return _unique_paths(roots)
 
 
 def _snapshot_replay_guard(roots: Iterable[Path]) -> dict[Path, Any]:
-    temp_roots = set(_temporary_guard_roots())
+    temp_roots = (
+        set(_temporary_guard_roots())
+        if _snapshot_temporary_guard_roots_enabled()
+        else set()
+    )
     recursive_roots = [root for root in roots if root not in temp_roots]
     snapshot = snapshot_filesystem(recursive_roots)
     snapshot.update(_snapshot_shallow_roots(temp_roots))
@@ -1110,6 +1117,14 @@ def _temporary_guard_roots() -> list[Path]:
         if root.exists():
             roots.append(root)
     return _unique_paths(roots)
+
+
+def _snapshot_temporary_guard_roots_enabled() -> bool:
+    return os.environ.get("DESIGN_SCIENTIST_SNAPSHOT_TEMP_ROOTS", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _absolute_no_symlink_resolve(path: Path) -> Path:
