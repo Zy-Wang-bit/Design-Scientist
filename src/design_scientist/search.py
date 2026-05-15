@@ -24,6 +24,24 @@ CODEX_CONTRACT_SCHEMA: dict[str, Any] = {
 }
 
 NODE_REQUIRED_ARTIFACTS = NODE_ARTIFACTS
+CANDIDATE_CSV_COLUMNS = [
+    "candidate_id",
+    "variant_id",
+    "operator",
+    "category",
+    "target_system",
+    "background",
+    "target_background",
+    "modules",
+    "feasibility_status",
+    "cost",
+    "rationale",
+    "evidence_refs",
+    "score_components",
+    "risk_flags",
+    "required_measurements",
+]
+PANEL_CSV_COLUMNS = CANDIDATE_CSV_COLUMNS
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | None = None) -> None:
@@ -101,8 +119,8 @@ def run_controlled_search(
             "used_codex": False,
         }
 
-        _write_csv(node_dir / "candidate_pool.csv", candidate_rows)
-        _write_csv(node_dir / "panel_recommendation.csv", panel_rows)
+        _write_csv(node_dir / "candidate_pool.csv", candidate_rows, fieldnames=CANDIDATE_CSV_COLUMNS)
+        _write_csv(node_dir / "panel_recommendation.csv", panel_rows, fieldnames=PANEL_CSV_COLUMNS)
         _write_csv(
             node_dir / "policy_comparison.csv",
             [{"baseline": item.split(":", 1)[0], "summary": item} for item in baseline_comparison],
@@ -174,8 +192,8 @@ def run_controlled_search(
     if selected_outputs is None:
         raise RuntimeError("No policy nodes were completed")
 
-    _write_csv(run_dir / "candidate_pool.csv", selected_outputs["candidate_rows"])
-    _write_csv(run_dir / "panel_recommendation.csv", selected_outputs["panel_rows"])
+    _write_csv(run_dir / "candidate_pool.csv", selected_outputs["candidate_rows"], fieldnames=CANDIDATE_CSV_COLUMNS)
+    _write_csv(run_dir / "panel_recommendation.csv", selected_outputs["panel_rows"], fieldnames=PANEL_CSV_COLUMNS)
     _write_csv(
         run_dir / "policy_comparison.csv",
         [

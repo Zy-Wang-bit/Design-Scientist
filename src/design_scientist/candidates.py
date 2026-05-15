@@ -50,12 +50,23 @@ def _module_sort_key(module_id: str) -> tuple[int, str]:
 
 
 def _module_ids(state: dict[str, Any]) -> list[str]:
-    modules = {
-        str(module.get("module_id"))
-        for module in state.get("module_status", [])
-        if isinstance(module, dict) and module.get("module_id")
-    }
-    return sorted(modules, key=_module_sort_key)
+    module_priorities: dict[str, float] = {}
+    for module in state.get("module_status", []):
+        if not isinstance(module, dict) or not module.get("module_id"):
+            continue
+        module_id = str(module.get("module_id"))
+        priority = module.get("priority_rank")
+        if isinstance(priority, (int, float)):
+            module_priorities[module_id] = float(priority)
+        else:
+            module_priorities.setdefault(module_id, float("inf"))
+    return sorted(
+        module_priorities,
+        key=lambda module_id: (
+            module_priorities[module_id],
+            *_module_sort_key(module_id),
+        ),
+    )
 
 
 def _target_systems(state: dict[str, Any], config: dict[str, Any]) -> list[str]:
@@ -228,6 +239,11 @@ def add_module(
     module = str(_canonicalize_identifier(module))
     target_system = str(_canonicalize_identifier(target_system))
     source_refs = [str(_canonicalize_identifier(evidence_id))] if evidence_id else []
+    risk_flags = (
+        ["sdAb_to_1E62_transfer_unvalidated"]
+        if evidence_id and "sdab" in str(evidence_id).lower()
+        else []
+    )
     operator_args = {"background": background, "module": module}
     required_endpoints = ["pH7.4 binding", "pH6.0 binding", "Ae/B/D1 genotype coverage"]
     candidate_id = f"add_{module}_to_{background}"
@@ -243,7 +259,7 @@ def add_module(
         rationale=f"Test whether module {module} improves pH-switch behavior on {background}.",
         evidence_refs=source_refs,
         score_components={"performance": 0.7, "decision_value": 0.45, "contrast_value": 0.1},
-        risk_flags=["sdAb_to_1E62_transfer_unvalidated"],
+        risk_flags=risk_flags,
         required_measurements=list(required_endpoints),
         required_endpoints=required_endpoints,
         operator_args=operator_args,
@@ -532,6 +548,7 @@ def generate_candidate_pool(
     ]
     unresolved_edges.sort(
         key=lambda edge: (
+            edge.get("priority_rank", float("inf")),
             str(edge.get("module_id", "")),
             str(edge.get("base_variant", "")),
             str(edge.get("system", "")),
