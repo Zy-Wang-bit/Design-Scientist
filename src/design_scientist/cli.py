@@ -11,6 +11,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="design-scientist")
     visible_commands = (
         "init",
+        "start-1e62",
+        "literature-1e62",
+        "advance-1e62",
+        "review-1e62-panel",
+        "finalize-1e62-result",
         "init-framework",
         "audit-references",
         "literature-search",
@@ -37,6 +42,50 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="Initialize a project skeleton")
     init_parser.add_argument("project_dir")
     init_parser.add_argument("--project-id", default="anti_hbsag")
+
+    start_onee62 = subparsers.add_parser(
+        "start-1e62",
+        help="Start a 1E62 project from a startup data package",
+    )
+    start_onee62.add_argument("startup_dir")
+    start_onee62.add_argument("project_dir")
+
+    literature_onee62 = subparsers.add_parser(
+        "literature-1e62",
+        help="Run the explicit 1E62 literature and mechanism stage",
+    )
+    literature_onee62.add_argument("project_dir")
+    literature_onee62.add_argument("--max-papers", type=int, default=30)
+    literature_onee62.add_argument("--offline-fixtures", action="store_true")
+    literature_onee62.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail instead of writing a degraded literature report when a source stage fails",
+    )
+
+    advance_onee62 = subparsers.add_parser(
+        "advance-1e62",
+        help="Advance a started 1E62 project into dry-panel draft stage",
+    )
+    advance_onee62.add_argument("project_dir")
+    advance_onee62.add_argument("--budget", type=int, default=24)
+    advance_onee62.add_argument("--use-codex", action="store_true")
+    advance_onee62.add_argument("--max-papers", type=int, default=30)
+    advance_onee62.add_argument("--offline-fixtures", action="store_true")
+
+    review_onee62_panel = subparsers.add_parser(
+        "review-1e62-panel",
+        help="Write the 1E62 dry-panel human review gate report",
+    )
+    review_onee62_panel.add_argument("project_dir")
+    review_onee62_panel.add_argument("--run-id")
+
+    finalize_onee62_result = subparsers.add_parser(
+        "finalize-1e62-result",
+        help="Write the final 1E62 computational result package",
+    )
+    finalize_onee62_result.add_argument("project_dir")
+    finalize_onee62_result.add_argument("--run-id")
 
     init_framework = subparsers.add_parser("init-framework", help="Initialize framework-first artifacts")
     init_framework.add_argument("root")
@@ -141,6 +190,42 @@ def main(argv: list[str] | None = None) -> int:
         from design_scientist.projects import initialize_project
 
         initialize_project(args.project_dir, project_id=args.project_id)
+        return 0
+    if args.command == "start-1e62":
+        from design_scientist.onee62_startup import start_1e62_project
+
+        start_1e62_project(args.startup_dir, args.project_dir)
+        return 0
+    if args.command == "literature-1e62":
+        from design_scientist.onee62_startup import run_1e62_literature_stage
+
+        run_1e62_literature_stage(
+            args.project_dir,
+            max_papers=args.max_papers,
+            offline_fixtures=args.offline_fixtures,
+            allow_degraded=not args.strict,
+        )
+        return 0
+    if args.command == "advance-1e62":
+        from design_scientist.onee62_startup import advance_1e62_project
+
+        advance_1e62_project(
+            args.project_dir,
+            budget=args.budget,
+            use_codex=args.use_codex,
+            max_papers=args.max_papers,
+            offline_fixtures=args.offline_fixtures,
+        )
+        return 0
+    if args.command == "review-1e62-panel":
+        from design_scientist.onee62_startup import review_1e62_panel
+
+        review_1e62_panel(args.project_dir, run_id=args.run_id)
+        return 0
+    if args.command == "finalize-1e62-result":
+        from design_scientist.onee62_startup import finalize_1e62_result
+
+        finalize_1e62_result(args.project_dir, run_id=args.run_id)
         return 0
     if args.command == "init-framework":
         from design_scientist.framework import init_framework

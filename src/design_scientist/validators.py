@@ -32,6 +32,16 @@ PANEL_REQUIRED_COLUMNS = (
     "feasibility_status",
     "cost",
 )
+ONEE62_STARTUP_FAMILY = "1e62_startup"
+ONEE62_REQUIRED_STANDARDIZED_ARTIFACTS = (
+    "standardized/binding_long.csv",
+    "standardized/binding_primary.csv",
+    "standardized/ae_kd_ratio.csv",
+    "standardized/expression_qc.csv",
+    "standardized/variant_sequence_provenance.csv",
+    "standardized/schema_inventory.csv",
+    "standardized/validation_summary.json",
+)
 
 
 def _finding(
@@ -226,6 +236,184 @@ def _run_dir(project_dir: Path, run_id: str | None) -> Path | None:
     return run_dirs[-1] if run_dirs else None
 
 
+def _project_family(project_data: dict[str, Any], data_contract: dict[str, Any]) -> str:
+    family = data_contract.get("project_family") or project_data.get("project_family")
+    return str(family or "")
+
+
+def _path_uses_raw(path_text: str) -> bool:
+    return "raw" in Path(path_text).parts
+
+
+def _validate_onee62_startup_contract(
+    data_contract: dict[str, Any],
+    findings: list[ValidationFinding],
+) -> None:
+    if not data_contract.get("startup_source_root"):
+        findings.append(
+            _finding(
+                "error",
+                "missing_startup_source_root",
+                "1E62 startup data_contract.yaml must record startup_source_root.",
+                "data_contract.yaml",
+            )
+        )
+    allowed_tables = data_contract.get("allowed_tables", [])
+    for table in allowed_tables:
+        path_text = str(table.get("path", ""))
+        if _path_uses_raw(path_text):
+            findings.append(
+                _finding(
+                    "error",
+                    "raw_path_in_standardized_contract",
+                    f"Allowed table {table.get('name')} points at raw data instead of standardized output.",
+                    "data_contract.yaml",
+                )
+            )
+
+
+def _validate_onee62_startup_state(
+    state: dict[str, Any],
+    findings: list[ValidationFinding],
+) -> None:
+    roles = state.get("system_roles", {})
+    if "design" not in str(roles.get("1E62", "")):
+        findings.append(
+            _finding(
+                "error",
+                "onee62_design_role_missing",
+                "1E62 startup state must record 1E62 as a design target system.",
+                "state/design_state.json",
+            )
+        )
+    unsupported = " ".join(str(item) for item in state.get("unsupported_claims", []))
+    if "Untested" not in unsupported or "not wet-lab evidence" not in unsupported:
+        findings.append(
+            _finding(
+                "error",
+                "untested_evidence_guard_missing",
+                "1E62 startup state must state that untested variants are not wet-lab evidence.",
+                "state/design_state.json",
+            )
+        )
+    if "KD_ratio" not in unsupported or "com combination" not in unsupported:
+        findings.append(
+            _finding(
+                "error",
+                "kd_ratio_scope_guard_missing",
+                "1E62 startup state must keep Ae KD_ratio evidence separate from com combination evidence.",
+                "state/design_state.json",
+            )
+        )
+    design_space = state.get("design_space", {})
+    if not isinstance(design_space, dict) or design_space.get("sequence_exploration") != "unbounded_full_length":
+        findings.append(
+            _finding(
+                "error",
+                "design_space_guard_missing",
+                "1E62 startup state must record the unbounded full-length design-space guard.",
+                "state/design_state.json",
+            )
+        )
+
+
+def _validate_onee62_startup_artifacts(
+    root: Path,
+    project_data: dict[str, Any],
+    findings: list[ValidationFinding],
+) -> None:
+    for rel in ONEE62_REQUIRED_STANDARDIZED_ARTIFACTS:
+        if not (root / rel).exists():
+            findings.append(
+                _finding(
+                    "error",
+                    "missing_onee62_standardized_artifact",
+                    f"Missing 1E62 startup standardized artifact: {rel}",
+                    rel,
+                )
+            )
+
+    schema_inventory = root / "standardized" / "schema_inventory.csv"
+    if schema_inventory.exists():
+        table = _load_csv_table(schema_inventory, findings)
+        if table is not None:
+            rows, _columns = table
+            for row in rows:
+                if str(row.get("empty_header_count", "0")) not in {"", "0"}:
+                    findings.append(
+                        _finding(
+                            "error",
+                            "startup_empty_header",
+                            f"{row.get('source_file')} had empty headers during schema audit.",
+                            str(schema_inventory),
+                        )
+                    )
+                if str(row.get("duplicate_header_count", "0")) not in {"", "0"}:
+                    findings.append(
+                        _finding(
+                            "error",
+                            "startup_duplicate_header",
+                            f"{row.get('source_file')} had duplicate headers during schema audit.",
+                            str(schema_inventory),
+                        )
+                    )
+
+    validation_summary = root / "standardized" / "validation_summary.json"
+    if validation_summary.exists():
+        summary = _load_optional_json(validation_summary, findings)
+        if isinstance(summary, dict):
+            if summary.get("checksum_status") != "passed":
+                findings.append(
+                    _finding(
+                        "error",
+                        "startup_checksum_not_passed",
+                        "1E62 startup checksum validation did not pass.",
+                        str(validation_summary),
+                    )
+                )
+            id_alignment = summary.get("id_alignment", {})
+            if not isinstance(id_alignment, dict) or not id_alignment.get("com_variant_tables_aligned"):
+                findings.append(
+                    _finding(
+                        "error",
+                        "startup_variant_ids_not_aligned",
+                        "1E62 startup com variant IDs must align across dilution, summary, expression, and sequence tables.",
+                        str(validation_summary),
+                    )
+                )
+            dilution = summary.get("dilution_dimensions", {})
+            if not isinstance(dilution, dict) or not dilution.get("matches_expected"):
+                findings.append(
+                    _finding(
+                        "error",
+                        "startup_dilution_dimensions_invalid",
+                        "1E62 dilution table must match variant/genotype/pH/concentration/replicate dimensions.",
+                        str(validation_summary),
+                    )
+                )
+            kd_ratio = summary.get("kd_ratio", {})
+            if isinstance(kd_ratio, dict) and kd_ratio.get("overlaps_com_variants"):
+                findings.append(
+                    _finding(
+                        "error",
+                        "startup_kd_ratio_scope_overlap",
+                        "Ae KD_ratio IDs unexpectedly overlap com combination IDs.",
+                        str(validation_summary),
+                    )
+                )
+
+    if project_data.get("stage") == "schema_audit_state_only":
+        for panel in (root / "runs").glob("*/panel_recommendation.csv"):
+            findings.append(
+                _finding(
+                    "error",
+                    "startup_stage_panel_created",
+                    "1E62 startup stage must not create panel recommendations.",
+                    str(panel),
+                )
+            )
+
+
 def validate_project(
     project_dir: str | Path,
     run_id: str | None = None,
@@ -240,6 +428,22 @@ def validate_project(
         path = root / rel
         if not path.exists():
             findings.append(_finding("error", "missing_project_file", f"Missing {rel}", rel))
+
+    project_data: dict[str, Any] = {}
+    project_path = root / "project.yaml"
+    if project_path.exists():
+        try:
+            project_data = read_yaml(project_path)
+            project_id = str(project_data.get("project_id") or project_id)
+        except Exception as exc:
+            findings.append(
+                _finding(
+                    "error",
+                    "invalid_project_yaml",
+                    f"Cannot read project.yaml: {exc}",
+                    "project.yaml",
+                )
+            )
 
     data_contract: dict[str, Any] = {}
     contract_path = root / "data_contract.yaml"
@@ -256,6 +460,8 @@ def validate_project(
                     "data_contract.yaml",
                 )
             )
+
+    project_family = _project_family(project_data, data_contract)
 
     if data_contract:
         if data_contract.get("raw_access_policy") != "schema_audit_only":
@@ -278,6 +484,8 @@ def validate_project(
                         "data_contract.yaml",
                     )
                 )
+        if project_family == ONEE62_STARTUP_FAMILY:
+            _validate_onee62_startup_contract(data_contract, findings)
 
     for rel in REQUIRED_STATE_FILES:
         if not (root / rel).exists():
@@ -300,34 +508,37 @@ def validate_project(
     if isinstance(state, dict):
         _check_identifier_issues(state, artifact="state/design_state.json", findings=findings)
         roles = state.get("system_roles", {})
-        if roles.get("sdAb") != "module_learning":
-            findings.append(
-                _finding(
-                    "error",
-                    "sdab_role_missing",
-                    "sdAb must be recorded as module_learning data.",
-                    "state/design_state.json",
+        if project_family == ONEE62_STARTUP_FAMILY:
+            _validate_onee62_startup_state(state, findings)
+        else:
+            if roles.get("sdAb") != "module_learning":
+                findings.append(
+                    _finding(
+                        "error",
+                        "sdab_role_missing",
+                        "sdAb must be recorded as module_learning data.",
+                        "state/design_state.json",
+                    )
                 )
-            )
-        if roles.get("1E62") != "target_system_design_genotype_coverage":
-            findings.append(
-                _finding(
-                    "error",
-                    "onee62_role_missing",
-                    "1E62 must be recorded as target_system_design_genotype_coverage data.",
-                    "state/design_state.json",
+            if roles.get("1E62") != "target_system_design_genotype_coverage":
+                findings.append(
+                    _finding(
+                        "error",
+                        "onee62_role_missing",
+                        "1E62 must be recorded as target_system_design_genotype_coverage data.",
+                        "state/design_state.json",
+                    )
                 )
-            )
-        unsupported = " ".join(state.get("unsupported_claims", []))
-        if "1E62" not in unsupported or "module" not in unsupported or "causal" not in unsupported:
-            findings.append(
-                _finding(
-                    "error",
-                    "unsupported_claim_missing",
-                    "State must explicitly forbid 1E62 module-causality claims from current combo data.",
-                    "state/design_state.json",
+            unsupported = " ".join(state.get("unsupported_claims", []))
+            if "1E62" not in unsupported or "module" not in unsupported or "causal" not in unsupported:
+                findings.append(
+                    _finding(
+                        "error",
+                        "unsupported_claim_missing",
+                        "State must explicitly forbid 1E62 module-causality claims from current combo data.",
+                        "state/design_state.json",
+                    )
                 )
-            )
 
     if isinstance(evidence, list):
         for idx, card in enumerate(evidence):
@@ -356,6 +567,9 @@ def validate_project(
                         "state/evidence_cards.json",
                     )
                 )
+
+    if project_family == ONEE62_STARTUP_FAMILY:
+        _validate_onee62_startup_artifacts(root, project_data, findings)
 
     _check_json_artifact_if_exists(
         root / "state" / "validation_report.json",
