@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -265,12 +266,15 @@ def test_baseline_mechanisms_write_all_v3_csv_artifacts(tmp_path: Path) -> None:
     benchmark_path = project / "runs" / "unit" / "mechanism_benchmark_results.csv"
     summary_path = project / "runs" / "unit" / "mechanism_benchmark_summary.csv"
     ablation_path = project / "runs" / "unit" / "mechanism_ablation_results.csv"
+    saturation_path = project / "runs" / "unit" / "benchmark_saturation.json"
     assert Path(result["benchmark_results_path"]) == benchmark_path
     assert Path(result["summary_results_path"]) == summary_path
     assert Path(result["ablation_results_path"]) == ablation_path
+    assert Path(result["benchmark_saturation_path"]) == saturation_path
     assert benchmark_path.exists()
     assert summary_path.exists()
     assert ablation_path.exists()
+    assert saturation_path.exists()
 
     benchmark_rows = _read_rows(benchmark_path)
     summary_rows = _read_rows(summary_path)
@@ -288,6 +292,10 @@ def test_baseline_mechanisms_write_all_v3_csv_artifacts(tmp_path: Path) -> None:
     assert EXPECTED_SUMMARY_COLUMNS <= set(summary_rows[0])
     assert {row["world_id"] for row in benchmark_rows} == {"additive", "epistatic"}
     assert {row["ablation"] for row in ablation_rows} >= {"none", "key_component_removed"}
+    saturation = json.loads(saturation_path.read_text(encoding="utf-8"))
+    assert "saturated" in saturation
+    assert saturation["required_baselines"] == ["random_feasible", "fixed_mix"]
+    assert saturation["row_counts"]["benchmark_results"] == len(benchmark_rows)
 
 
 def test_claim_stress_mapping_chooses_expected_worlds(tmp_path: Path) -> None:
@@ -314,6 +322,64 @@ def test_claim_stress_mapping_chooses_expected_worlds(tmp_path: Path) -> None:
         "epistatic",
         "noisy_endpoint",
     ]
+
+
+def test_project_context_reaches_lifecycle_fit_state(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / "standardized").mkdir(parents=True)
+    (project / "standardized" / "project_context.json").write_text(
+        json.dumps(
+            {
+                "objective": "Improve validated binding selectivity.",
+                "endpoints": ["neutral_binding", "acid_release"],
+                "observed_row_counts": {"standardized_primary": 7},
+                "constraints": {"max_batch": 12},
+                "allowed_sources": ["standardized/primary.csv"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    captured_contexts: list[dict[str, Any]] = []
+
+    def fit_state(context: dict[str, Any]) -> dict[str, Any]:
+        captured_contexts.append(dict(context["project_context"]))
+        return context
+
+    lifecycle = {
+        "name": "context_probe",
+        "claims": ["general mechanism claim"],
+        "fit_state": fit_state,
+        "generate_candidates": lambda state: state["candidate_records"],
+        "score_candidates": lambda state, candidates: list(candidates),
+        "select_panel": (
+            lambda state, candidates, budget, rng: policies.fixed_mix(
+                state["observed_records"],
+                candidates,
+                budget,
+                state["round_index"],
+                rng,
+            )
+        ),
+        "plan_ablations": lambda state: [{"name": "none"}],
+    }
+
+    result = run_mechanism_benchmark(
+        project,
+        run_id="project-context",
+        mechanisms=[lifecycle],
+        rounds=1,
+        budget=3,
+    )
+
+    assert captured_contexts
+    project_context = captured_contexts[0]
+    assert project_context["objective"] == "Improve validated binding selectivity."
+    assert project_context["endpoints"] == ["neutral_binding", "acid_release"]
+    assert project_context["observed_row_counts"] == {"standardized_primary": 7}
+    assert project_context["constraints"] == {"max_batch": 12}
+    assert project_context["allowed_sources"] == ["standardized/primary.csv"]
+    assert result["config"]["worlds"] == ["additive", "epistatic"]
 
 
 def test_clone_mechanism_is_not_selected_eligible(tmp_path: Path) -> None:

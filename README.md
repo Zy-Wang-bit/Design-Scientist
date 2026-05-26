@@ -96,8 +96,10 @@ python scripts/configure_s2_api_key.py --input ~/Downloads/S2.txt --zshrc ~/.zsh
 Framework R&D is the method-development loop. V3 is organized as a
 MechanismSpec Kernel plus Literature Engine V3: the literature engine builds a
 full-text corpus, reading trace, mechanism cards, mechanism library, and gap
-matrix; the kernel turns selected mechanisms into executable lifecycle nodes
-with explicit components, claims, stress tests, ablations, and benchmark gates.
+matrix, then compiles those cards into AlgorithmOperatorSpec artifacts. The
+kernel turns selected operators into executable lifecycle nodes with explicit
+components, claims, stress tests, ablations, operator-to-code traces, and
+benchmark/claim gates.
 `run-scientist` is the V3 full-chain path. Staged commands are
 debug/development entry points for inspecting one V3 phase at a time.
 
@@ -116,9 +118,15 @@ DESIGN_SCIENTIST_LITERATURE_FIXTURES=tests/fixtures/literature \
 
 V3 `run-scientist` writes `runs/<run_id>/scientist_journal.json`,
 `runs/<run_id>/stage_progress.json`, `runs/<run_id>/route_tree.json`,
+`runs/<run_id>/reference_data_sources.json`,
 `runs/<run_id>/mechanism_benchmark_results.csv`,
 `runs/<run_id>/mechanism_benchmark_summary.csv`,
-`runs/<run_id>/mechanism_ablation_results.csv`, and
+`runs/<run_id>/mechanism_ablation_results.csv`,
+`runs/<run_id>/benchmark_saturation.json`, `runs/<run_id>/claim_cap.json`,
+reviewer verdict artifacts `runs/<run_id>/novelty_review.json`,
+`runs/<run_id>/baseline_audit.json`, `runs/<run_id>/experiment_review.json`,
+`runs/<run_id>/biology_review.json`,
+`runs/<run_id>/paper_contribution_review.json`, and
 `runs/<run_id>/method_report.md`. Validate that run with:
 
 ```bash
@@ -147,21 +155,35 @@ leave:
   V3 literature artifacts `framework/literature_corpus.jsonl`,
   `framework/literature_reading_trace.json`, `framework/mechanism_cards.json`,
   `framework/mechanism_library.json`, and
-  `framework/mechanism_gap_matrix.csv`.
+  `framework/mechanism_gap_matrix.csv`, plus operator artifacts
+  `framework/operator_specs.json`, `framework/operator_gap_matrix.csv`,
+  `framework/operator_evidence_map.json`, and
+  `framework/operator_negative_controls.json`.
 - Run-level V3 framework artifacts: `runs/<run_id>/scientist_journal.json`,
   `runs/<run_id>/stage_progress.json`, `runs/<run_id>/route_tree.json`,
+  `runs/<run_id>/reference_data_sources.json`,
   `runs/<run_id>/mechanism_benchmark_results.csv`,
   `runs/<run_id>/mechanism_benchmark_summary.csv`,
-  `runs/<run_id>/mechanism_ablation_results.csv`, and
+  `runs/<run_id>/mechanism_ablation_results.csv`,
+  `runs/<run_id>/benchmark_saturation.json`, `runs/<run_id>/claim_cap.json`,
+  reviewer verdict artifacts `novelty_review.json`, `baseline_audit.json`,
+  `experiment_review.json`, `biology_review.json`, and
+  `paper_contribution_review.json`, and
   `runs/<run_id>/method_report.md`.
 - Selected V3 mechanism-node artifacts: `mechanism_spec.json`,
   `mechanism.py`, `proposal.json`, `ablation_plan.json`,
-  `stress_test_plan.json`, `mechanism_metrics.json`, and
-  `validation_report.json`.
+  `stress_test_plan.json`, `mechanism_metrics.json`,
+  `validation_report.json`, and `operator_to_code_trace.json`.
 
 The selected mechanism trace in `scientist_journal.json` links the proposal,
 MechanismSpec, benchmark metrics, literature-backed route, stress tests,
-ablation plan, and validation report used for review.
+ablation plan, operator-to-code trace, benchmark saturation, claim cap,
+reviewer verdicts, and validation report used for review.
+
+`reference_data_sources.json` is the run-level source-of-truth manifest for
+claims. It ties literature, operator, selected-node, benchmark, claim-gate, and
+review artifacts to the claims they support, so reports and paper bundles do not
+silently drift away from the evidence chain.
 
 Staged framework commands are debug/development entry points:
 
@@ -169,9 +191,19 @@ Staged framework commands are debug/development entry points:
 design-scientist literature-search /tmp/ds_product
 design-scientist read-literature /tmp/ds_product
 design-scientist extract-mechanisms /tmp/ds_product
+design-scientist compile-operators /tmp/ds_product
 design-scientist run-scientist /tmp/ds_product --max-papers 60 --nodes 4 --rounds 3
 design-scientist review-framework /tmp/ds_product
 ```
+
+The operator compilation phase is explicit: `extract-mechanisms` writes
+`framework/mechanism_cards.json` and automatically compiles
+`framework/operator_specs.json`, `framework/operator_gap_matrix.csv`,
+`framework/operator_evidence_map.json`, and
+`framework/operator_negative_controls.json`. Use `compile-operators <root>` only
+when `framework/mechanism_cards.json` already exists and you want to regenerate
+those operator artifacts without rerunning literature reading or mechanism
+extraction.
 
 Programmatic entry points:
 
@@ -185,6 +217,74 @@ report = review_framework_run("/tmp/ds_product", run_id="<run_id>")
 
 `review_framework_run` detects V3 runs from `scientist_journal.json`
 `version: "v3"`. For V3 it checks the Literature Engine V3 artifacts,
-MechanismSpec node artifacts, required replay baselines, selected eligibility,
-architecture-clone blocking, positive key ablation delta, false-claim-rate
-guardrails, and `method_report.md`.
+AlgorithmOperatorSpec artifacts, MechanismSpec node artifacts, required replay
+baselines, selected eligibility, architecture-clone blocking, positive key
+ablation delta, false-claim-rate guardrails, claim cap, benchmark saturation,
+reviewer verdicts, `reference_data_sources.json`, and `method_report.md`.
+
+## Formal Release Checklist
+
+Before tagging a formal framework release, run the acceptance sequence from a
+clean checkout:
+
+```bash
+python -m pip install -e ".[dev]"
+pytest -q
+
+tmp="$(mktemp -d)"
+design-scientist init-framework "$tmp/ds_product" --domain protein_variant_design
+DESIGN_SCIENTIST_LITERATURE_FIXTURES=tests/fixtures/literature \
+  design-scientist run-scientist "$tmp/ds_product" \
+  --offline-fixtures --max-papers 20 --nodes 3 --rounds 2
+python -m design_scientist.framework_validation "$tmp/ds_product"
+design-scientist generate-short-paper "$tmp/ds_product"
+```
+
+Acceptance requires full tests passing, offline fixture full-chain execution,
+`review-framework` returning zero errors, `method_report.md` showing operator
+artifacts, claim cap, benchmark saturation, and reviewer verdicts, adversarial
+bad-path tests passing, and the paper bundle preserving the computational-only
+evidence boundary without wet-lab or prospective-validation overclaims.
+
+## Manuscript Bundle
+
+Generate a conservative short-paper bundle from an existing framework V3 run:
+
+```bash
+design-scientist generate-short-paper /tmp/ds_product --run-id <run_id>
+```
+
+The command writes `runs/<run_id>/paper/short_paper.md`,
+`references.bib`, `results_summary.json`, `claim_evidence_map.json`,
+`reproducibility.md`, `data_availability.md`, `code_availability.md`, and
+`paper_readiness_report.json`. The paper layer labels evidence as
+computational/synthetic replay evidence and does not claim wet-lab validation.
+The readiness report checks required sections, citation keys, and local
+artifact links before marking the bundle valid.
+
+For algorithm-method papers, use the MCCBD benchmark path. This path treats
+`evidence_calibrated_ucb` as a weighted-score baseline and evaluates
+Mechanism-Calibrated Constrained Bayesian Design as the primary algorithm:
+
+```bash
+design-scientist run-algorithm-benchmark /tmp/ds_product \
+  --run-id mccbd_algorithm --rounds 3 --budget 6
+design-scientist generate-algorithm-paper /tmp/ds_product \
+  --run-id mccbd_algorithm --algorithm mccbd
+```
+
+If standardized project data are available, add a retrospective masking case
+study. This is a case study only; it is not prospective wet-lab proof.
+
+```bash
+design-scientist run-project-benchmark /tmp/ds_product \
+  --run-id mccbd_project_case --budget 2 --folds kfold_5 \
+  --mechanisms mccbd evidence_calibrated_ucb random_feasible fixed_mix greedy_observed
+design-scientist generate-algorithm-paper /tmp/ds_product \
+  --run-id mccbd_algorithm --algorithm mccbd
+```
+
+The algorithm-paper bundle writes `manuscript.md`, `references.bib`,
+`algorithm_results_summary.json`, `algorithm_claim_evidence_map.json`,
+`paper_readiness_report.json`, SVG figures, and CSV tables under
+`runs/<run_id>/paper/`.

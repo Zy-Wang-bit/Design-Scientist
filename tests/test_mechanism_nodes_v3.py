@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from design_scientist.mechanism_nodes import (
     V3_MECHANISM_NODE_GENERATED_ARTIFACTS,
     V3_MECHANISM_NODE_REQUIRED_ARTIFACTS,
@@ -63,14 +65,25 @@ def test_lifecycle_node_runs_and_writes_all_v3_artifacts(tmp_path: Path) -> None
                     "mechanism_id": "mechanism_v3_test",
                     "name": "V3 test mechanism",
                     "version": "v3",
+                    "operator_refs": ["operator_active_learning_acquisition"],
+                    "operator_specs": [
+                        {"operator_id": "operator_active_learning_acquisition"}
+                    ],
                     "components": [{"component_id": "state", "component_type": "state_model"}],
                 },
                 "proposal.json": {
                     "mechanism_id": "mechanism_v3_test",
                     "hypothesis": "Lifecycle nodes expose explicit mechanism stages.",
+                    "operator_refs": ["operator_active_learning_acquisition"],
                 },
                 "ablation_plan.json": {
-                    "ablations": [{"ablation_id": "remove_transfer_model"}],
+                    "ablations": [
+                        {"name": "none"},
+                        {
+                            "name": "key_component_removed",
+                            "removed_operator_ids": ["operator_active_learning_acquisition"],
+                        },
+                    ],
                 },
                 "stress_test_plan.json": {
                     "worlds": [{"world_id": "sparse_transfer"}],
@@ -82,6 +95,17 @@ def test_lifecycle_node_runs_and_writes_all_v3_artifacts(tmp_path: Path) -> None
                 "validation_report.json": {
                     "valid": True,
                     "findings": [],
+                },
+                "operator_to_code_trace.json": {
+                    "operator_to_code_trace": {
+                        "operator_active_learning_acquisition": [
+                            "fit_state.state_id",
+                            "generate_candidates.candidate_generation",
+                            "score_candidates.constant_score",
+                            "select_panel.constant_score_rank",
+                            "plan_ablations.removed_operator_ids",
+                        ]
+                    }
                 },
             }
             for name, payload in artifacts.items():
@@ -107,6 +131,328 @@ def test_lifecycle_node_runs_and_writes_all_v3_artifacts(tmp_path: Path) -> None
     }
     assert callable(result.callables["fit_state"])
     assert validation.valid
+
+
+def test_node_without_operator_refs_is_invalid(tmp_path: Path) -> None:
+    workspace = tmp_path / "nodes" / "missing_operator_refs"
+    _write_mechanism(
+        workspace,
+        """
+        def fit_state(observed=None, context=None):
+            return {"observed_count": len(observed or [])}
+
+        def generate_candidates(state, design_space=None):
+            return [{"candidate_id": "cand_1"}]
+
+        def score_candidates(state, candidates):
+            return {candidate["candidate_id"]: 1.0 for candidate in candidates}
+
+        def select_panel(scored_candidates, budget=1):
+            return ["cand_1"][:budget]
+
+        def plan_ablations(state=None):
+            return [{"name": "none"}, {"name": "key_component_removed"}]
+
+        def run(workspace):
+            import json
+            from pathlib import Path
+
+            root = Path(workspace)
+            artifacts = {
+                "mechanism_spec.json": {"mechanism_id": "no_operator_refs", "name": "missing refs"},
+                "proposal.json": {"mechanism_id": "no_operator_refs", "hypothesis": "missing refs"},
+                "ablation_plan.json": {"ablations": [{"name": "none"}, {"name": "key_component_removed"}]},
+                "stress_test_plan.json": {"worlds": [{"world_id": "w1"}]},
+                "mechanism_metrics.json": {"metrics": {"score": 1.0}},
+                "validation_report.json": {"valid": True},
+                "operator_to_code_trace.json": {
+                    "operator_to_code_trace": {
+                        "operator_active_learning_acquisition": [
+                            "fit_state.import_time",
+                            "generate_candidates.import_time",
+                            "score_candidates.import_time",
+                            "select_panel.import_time",
+                        ]
+                    }
+                },
+            }
+            for name, payload in artifacts.items():
+                (root / name).write_text(json.dumps(payload), encoding="utf-8")
+        """,
+    )
+
+    result = execute_mechanism_node(
+        workspace,
+        guard_roots=[tmp_path],
+        operator_specs=[{"operator_id": "operator_active_learning_acquisition"}],
+    )
+
+    assert not result.valid
+    assert "contract" in result.failure_kinds
+    assert any("operator_refs" in error or "operator_specs" in error for error in result.errors)
+
+
+def test_baseline_wrapper_lifecycle_is_invalid_even_with_operator_refs_and_specs(tmp_path: Path) -> None:
+    workspace = tmp_path / "nodes" / "baseline_wrapper"
+    _write_mechanism(
+        workspace,
+        """
+        from design_scientist import policies
+
+        def fit_state(context):
+            return dict(context)
+
+        def generate_candidates(state):
+            return list(state["candidate_records"])
+
+        def score_candidates(state, candidates):
+            return list(candidates)
+
+        def select_panel(state, candidates, budget, rng):
+            return policies.mechanism_aware(
+                state["observed_records"],
+                candidates,
+                budget,
+                state["round_index"],
+                rng,
+            )
+
+        def plan_ablations(state):
+            return [{"name": "none"}, {"name": "key_component_removed"}]
+
+        def run(workspace):
+            import json
+            from pathlib import Path
+
+            root = Path(workspace)
+            artifacts = {
+                "mechanism_spec.json": {
+                    "mechanism_id": "baseline_wrapper",
+                    "name": "baseline wrapper",
+                    "operator_refs": ["operator_active_learning_acquisition"],
+                    "operator_specs": [
+                        {"operator_id": "operator_active_learning_acquisition"}
+                    ],
+                },
+                "proposal.json": {
+                    "mechanism_id": "baseline_wrapper",
+                    "hypothesis": "This should be rejected as a wrapper.",
+                    "operator_refs": ["operator_active_learning_acquisition"],
+                    "operator_specs": [
+                        {"operator_id": "operator_active_learning_acquisition"}
+                    ],
+                },
+                "ablation_plan.json": {
+                    "ablations": [
+                        {"name": "none"},
+                        {
+                            "name": "key_component_removed",
+                            "removed_operator_ids": ["operator_active_learning_acquisition"],
+                        },
+                    ]
+                },
+                "stress_test_plan.json": {"worlds": [{"world_id": "w1"}]},
+                "mechanism_metrics.json": {"metrics": {"score": 1.0}},
+                "validation_report.json": {"valid": True},
+                "operator_to_code_trace.json": {
+                    "operator_to_code_trace": {
+                        "operator_active_learning_acquisition": [
+                            "fit_state.import_time",
+                            "generate_candidates.import_time",
+                            "score_candidates.import_time",
+                            "select_panel.import_time",
+                        ]
+                    }
+                },
+            }
+            for name, payload in artifacts.items():
+                (root / name).write_text(json.dumps(payload), encoding="utf-8")
+        """,
+    )
+
+    result = execute_mechanism_node(
+        workspace,
+        guard_roots=[tmp_path],
+        operator_specs=[{"operator_id": "operator_active_learning_acquisition"}],
+    )
+
+    assert not result.valid
+    assert "contract" in result.failure_kinds
+    assert any("baseline-wrapper" in error for error in result.errors)
+
+
+def test_key_ablation_must_remove_operator_not_only_policy_ablation(tmp_path: Path) -> None:
+    workspace = tmp_path / "nodes" / "policy_only_ablation"
+    _write_mechanism(
+        workspace,
+        """
+        def fit_state(context):
+            state = dict(context)
+            state["operator_state"] = {"operator_active_learning_acquisition": 1.0}
+            return state
+
+        def generate_candidates(state):
+            return [{"candidate_id": "cand_1"}]
+
+        def score_candidates(state, candidates):
+            return [{"candidate_id": candidate["candidate_id"], "score": 1.0} for candidate in candidates]
+
+        def select_panel(state, candidates, budget, rng):
+            del state, rng
+            return [candidate["candidate_id"] for candidate in candidates[:budget]]
+
+        def plan_ablations(state):
+            return [{"name": "none"}, {"name": "key_component_removed", "policy_ablation": "interaction_prior"}]
+
+        def run(workspace):
+            import json
+            from pathlib import Path
+
+            root = Path(workspace)
+            artifacts = {
+                "mechanism_spec.json": {
+                    "mechanism_id": "policy_only_ablation",
+                    "name": "policy only ablation",
+                    "operator_refs": ["operator_active_learning_acquisition"],
+                },
+                "proposal.json": {
+                    "mechanism_id": "policy_only_ablation",
+                    "hypothesis": "A policy-only ablation should be rejected.",
+                    "operator_refs": ["operator_active_learning_acquisition"],
+                },
+                "ablation_plan.json": {
+                    "ablations": [
+                        {"name": "none"},
+                        {"name": "key_component_removed", "policy_ablation": "interaction_prior"},
+                    ]
+                },
+                "stress_test_plan.json": {"worlds": [{"world_id": "w1"}]},
+                "mechanism_metrics.json": {"metrics": {"score": 1.0}},
+                "validation_report.json": {"valid": True},
+                "operator_to_code_trace.json": {
+                    "operator_to_code_trace": {
+                        "operator_active_learning_acquisition": [
+                            "fit_state.import_time",
+                            "generate_candidates.import_time",
+                            "score_candidates.import_time",
+                            "select_panel.import_time",
+                        ]
+                    }
+                },
+            }
+            for name, payload in artifacts.items():
+                (root / name).write_text(json.dumps(payload), encoding="utf-8")
+        """,
+    )
+
+    result = execute_mechanism_node(
+        workspace,
+        guard_roots=[tmp_path],
+        operator_specs=[{"operator_id": "operator_active_learning_acquisition"}],
+    )
+
+    assert not result.valid
+    assert "contract" in result.failure_kinds
+    assert any("key ablation" in error and "operator" in error for error in result.errors)
+
+
+def test_operator_trace_must_cover_each_declared_operator_ref(tmp_path: Path) -> None:
+    operator_refs = [
+        "operator_active_learning_acquisition",
+        "operator_transfer_model",
+    ]
+    workspace = tmp_path / "nodes" / "partial_operator_trace"
+    _write_operator_contract_node(
+        workspace,
+        operator_refs=operator_refs,
+        trace={
+            "operator_active_learning_acquisition": [
+                "fit_state.operator_state",
+                "generate_candidates.operator_refs",
+                "score_candidates.operator_score",
+                "select_panel.operator_score_rank",
+                "plan_ablations.removed_operator_ids",
+            ]
+        },
+    )
+
+    result = execute_mechanism_node(
+        workspace,
+        guard_roots=[tmp_path],
+        operator_specs=[{"operator_id": operator_id} for operator_id in operator_refs],
+    )
+
+    assert not result.valid
+    assert "contract" in result.failure_kinds
+    assert any(
+        "operator_to_code_trace" in error
+        and "operator_transfer_model" in error
+        and "implementation steps" in error
+        for error in result.errors
+    )
+
+
+def test_operator_trace_rejects_natural_language_without_code_mapping(tmp_path: Path) -> None:
+    workspace = tmp_path / "nodes" / "natural_language_trace"
+    _write_operator_contract_node(
+        workspace,
+        trace={
+            "operator_active_learning_acquisition": [
+                "The acquisition operator is implemented by the lifecycle functions above."
+            ]
+        },
+    )
+
+    result = execute_mechanism_node(
+        workspace,
+        guard_roots=[tmp_path],
+        operator_specs=[{"operator_id": "operator_active_learning_acquisition"}],
+    )
+
+    assert not result.valid
+    assert "contract" in result.failure_kinds
+    assert any(
+        "operator_to_code_trace" in error
+        and "function.code_region" in error
+        for error in result.errors
+    )
+
+
+@pytest.mark.parametrize(
+    "fake_ablation",
+    [
+        {"name": "key_component_removed", "seed": 7},
+        {"name": "key_component_removed", "tie_breaker": "candidate_id"},
+        {"name": "key_component_removed", "removed_parameter": "temperature"},
+        {"name": "key_component_removed", "policy_ablation": "interaction_prior"},
+        {
+            "name": "key_component_removed",
+            "removed_operator_ids": ["seed_tie_breaker"],
+        },
+    ],
+)
+def test_key_ablation_rejects_seed_tie_breaker_or_unrelated_parameter(
+    tmp_path: Path,
+    fake_ablation: dict[str, object],
+) -> None:
+    workspace = tmp_path / "nodes" / "fake_key_ablation"
+    _write_operator_contract_node(
+        workspace,
+        ablations=[
+            {"name": "none"},
+            fake_ablation,
+        ],
+    )
+
+    result = execute_mechanism_node(
+        workspace,
+        guard_roots=[tmp_path],
+        operator_specs=[{"operator_id": "operator_active_learning_acquisition"}],
+    )
+
+    assert not result.valid
+    assert "contract" in result.failure_kinds
+    assert any("key ablation" in error and "operator" in error for error in result.errors)
 
 
 def test_malformed_json_invalid(tmp_path: Path) -> None:
@@ -459,6 +805,16 @@ def test_import_time_artifacts_do_not_satisfy_run_generation_contract(tmp_path: 
                 "stress_test_plan.json": {"worlds": [{"world_id": "w1"}]},
                 "mechanism_metrics.json": {"metrics": {"score": 1.0}},
                 "validation_report.json": {"valid": True},
+                "operator_to_code_trace.json": {
+                    "operator_to_code_trace": {
+                        "operator_active_learning_acquisition": [
+                            "fit_state.import_time",
+                            "generate_candidates.import_time",
+                            "score_candidates.import_time",
+                            "select_panel.import_time",
+                        ]
+                    }
+                },
             }
             for name, payload in artifacts.items():
                 (root / name).write_text(json.dumps(payload), encoding="utf-8")
@@ -526,6 +882,111 @@ def _write_mechanism(workspace: Path, body: str) -> None:
     (workspace / "mechanism.py").write_text(dedent(body).strip() + "\n", encoding="utf-8")
 
 
+def _write_operator_contract_node(
+    workspace: Path,
+    *,
+    operator_refs: list[str] | None = None,
+    operator_specs: list[dict[str, str]] | None = None,
+    trace: dict[str, object] | None = None,
+    ablations: list[dict[str, object]] | None = None,
+) -> None:
+    refs = operator_refs or ["operator_active_learning_acquisition"]
+    specs = operator_specs or [{"operator_id": operator_id} for operator_id in refs]
+    trace_payload = trace
+    if trace_payload is None:
+        trace_payload = {
+            operator_id: [
+                "fit_state.operator_state",
+                "generate_candidates.operator_refs",
+                "score_candidates.operator_score",
+                "select_panel.operator_score_rank",
+                "plan_ablations.removed_operator_ids",
+            ]
+            for operator_id in refs
+        }
+    ablation_payload = ablations or [
+        {"name": "none"},
+        {"name": "key_component_removed", "removed_operator_ids": [refs[0]]},
+    ]
+    artifacts = {
+        "mechanism_spec.json": {
+            "mechanism_id": workspace.name,
+            "name": workspace.name.replace("_", " "),
+            "version": "v3",
+            "operator_refs": refs,
+            "operator_specs": specs,
+            "components": [{"component_id": "state", "component_type": "state_model"}],
+        },
+        "proposal.json": {
+            "mechanism_id": workspace.name,
+            "hypothesis": "Operator contract hardening test node.",
+            "operator_refs": refs,
+            "operator_specs": specs,
+        },
+        "ablation_plan.json": {
+            "ablations": ablation_payload,
+        },
+        "stress_test_plan.json": {
+            "worlds": [{"world_id": "sparse_transfer"}],
+            "required_baselines": ["random_feasible"],
+        },
+        "mechanism_metrics.json": {
+            "metrics": {"utility": 1.0},
+        },
+        "validation_report.json": {
+            "valid": True,
+            "findings": [],
+        },
+        "operator_to_code_trace.json": {
+            "operator_to_code_trace": trace_payload,
+        },
+    }
+    _write_mechanism(
+        workspace,
+        f"""
+        def fit_state(observed=None, context=None):
+            state = {{"observed_count": len(observed or []), "context": dict(context or {{}})}}
+            state["operator_state"] = {{operator_id: 1.0 for operator_id in {refs!r}}}
+            return state
+
+        def generate_candidates(state, design_space=None):
+            del state
+            candidates = design_space or [{{"candidate_id": "cand_1"}}]
+            return [dict(candidate, operator_refs={refs!r}) for candidate in candidates]
+
+        def score_candidates(state, candidates):
+            return [
+                dict(candidate, operator_score=1.0)
+                for candidate in candidates
+            ]
+
+        def select_panel(scored_candidates, budget=1):
+            ranked = sorted(
+                scored_candidates,
+                key=lambda candidate: (
+                    float(candidate.get("operator_score", 0.0)),
+                    str(candidate.get("candidate_id", "")),
+                ),
+                reverse=True,
+            )
+            return [candidate["candidate_id"] for candidate in ranked[:budget]]
+
+        def plan_ablations(state=None):
+            del state
+            return {ablation_payload!r}
+
+        def run(workspace):
+            import json
+            from pathlib import Path
+
+            root = Path(workspace)
+            artifacts = {artifacts!r}
+            for name, payload in artifacts.items():
+                (root / name).write_text(json.dumps(payload), encoding="utf-8")
+        """,
+    )
+
+
 def _write_generated_artifacts(workspace: Path, *, mechanism_id: str) -> None:
     payloads = {
         "mechanism_spec.json": {
@@ -547,6 +1008,16 @@ def _write_generated_artifacts(workspace: Path, *, mechanism_id: str) -> None:
         "validation_report.json": {
             "valid": True,
             "findings": [],
+        },
+        "operator_to_code_trace.json": {
+            "operator_to_code_trace": {
+                "operator_active_learning_acquisition": [
+                    "fit_state.state",
+                    "generate_candidates.records",
+                    "score_candidates.score",
+                    "select_panel.rank",
+                ]
+            }
         },
     }
     for artifact in V3_MECHANISM_NODE_GENERATED_ARTIFACTS:

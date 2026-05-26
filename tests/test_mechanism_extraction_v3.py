@@ -7,6 +7,11 @@ from typing import Any
 
 from design_scientist.io import read_json
 from design_scientist.mechanism_extraction import extract_mechanisms
+from design_scientist.operator_specs import (
+    OPERATOR_GAP_FIELDNAMES,
+    compile_operator_spec_artifacts,
+    write_operator_spec_artifacts,
+)
 from design_scientist.schemas import ModelRequest, ModelResponse
 
 
@@ -72,6 +77,28 @@ def _complete_card(**updates: Any) -> dict[str, Any]:
     return card
 
 
+def _operator_spec_card(**updates: Any) -> dict[str, Any]:
+    card = {
+        "mechanism_id": "active_learning_acquisition",
+        "source_paper_ids": ["paper_active"],
+        "mechanism_name": "Active Learning Acquisition",
+        "problem_setting": "Batch-limited variant design.",
+        "state_model": "Posterior state over observed variants.",
+        "candidate_generation": "Generate feasible mutation candidates.",
+        "acquisition_objective": "Expected improvement with uncertainty and feasibility.",
+        "uncertainty_model": "Posterior variance from a surrogate model.",
+        "transfer_model": "",
+        "constraints": ["batch_budget", "feasibility_filters"],
+        "assumptions": ["Assays are comparable within endpoint strata."],
+        "failure_modes": ["Uncertainty may be miscalibrated."],
+        "reusable_components": ["surrogate_model", "acquisition_policy"],
+        "stress_tests": ["retrospective_round_masking"],
+        "evidence_strength": "candidate_from_text",
+    }
+    card.update(updates)
+    return card
+
+
 def test_fake_backend_structured_cards_are_written_and_grouped(tmp_path: Path) -> None:
     project = tmp_path / "project"
     _write_corpus(
@@ -112,6 +139,197 @@ def test_fake_backend_structured_cards_are_written_and_grouped(tmp_path: Path) -
     ]
     assert library["component_groups"]["surrogate_acquisition"]["mechanism_cards"] == [card]
     assert library["component_groups"]["batch_design"]["source_paper_ids"] == ["paper_1"]
+
+    operator_specs = read_json(project / "framework" / "operator_specs.json")
+    assert operator_specs[0]["mechanism_id"] == "backend_active_learning"
+    assert set(operator_specs[0]) >= {
+        "objective",
+        "update_rule",
+        "required_baselines",
+        "negative_controls",
+        "ablation_hypotheses",
+        "implementation_tests",
+        "claim_limits",
+    }
+    assert operator_specs[0]["objective"]["acquisition_formula"].startswith(
+        "score(candidate | design_state) ="
+    )
+    assert operator_specs[0]["update_rule"]["design_state_update"].startswith(
+        "design_state_{t+1} = update"
+    )
+    assert operator_specs[0]["evidence_strength"] == "candidate_from_text"
+
+    operator_evidence_map = read_json(project / "framework" / "operator_evidence_map.json")
+    assert operator_evidence_map["operators"]["operator_backend_active_learning"][
+        "source_paper_ids"
+    ] == ["paper_1"]
+
+    operator_negative_controls = read_json(project / "framework" / "operator_negative_controls.json")
+    assert "operator_backend_active_learning" in operator_negative_controls["negative_controls"]
+
+    with (project / "framework" / "operator_gap_matrix.csv").open(
+        encoding="utf-8",
+        newline="",
+    ) as handle:
+        operator_gap_rows = list(csv.DictReader(handle))
+    assert operator_gap_rows[0]["missing_acquisition_objective"] == "false"
+
+
+def test_compile_operator_spec_artifacts_preserves_evidence_boundaries() -> None:
+    artifacts = compile_operator_spec_artifacts([_operator_spec_card()])
+
+    specs = artifacts["operator_specs"]
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec["operator_id"] == "operator_active_learning_acquisition"
+    assert spec["mechanism_id"] == "active_learning_acquisition"
+    assert spec["evidence_strength"] == "candidate_from_text"
+    assert spec["objective"]["acquisition_formula"].startswith(
+        "score(candidate | design_state) ="
+    )
+    assert spec["update_rule"]["design_state_update"].startswith(
+        "design_state_{t+1} = update"
+    )
+    assert spec["state_model"]["description"] == "Posterior state over observed variants."
+    assert spec["state_model"]["missing"] is False
+    assert spec["acquisition_objective"]["description"] == (
+        "Expected improvement with uncertainty and feasibility."
+    )
+    assert spec["acquisition_objective"]["formula"].startswith(
+        "score(candidate | design_state) ="
+    )
+    assert spec["uncertainty"]["description"] == "Posterior variance from a surrogate model."
+    assert spec["uncertainty"]["missing"] is False
+    assert spec["transfer"]["description"] == ""
+    assert spec["transfer"]["missing"] is True
+    assert set(spec) >= {
+        "state_model",
+        "objective",
+        "update_rule",
+        "required_baselines",
+        "negative_controls",
+        "acquisition_objective",
+        "uncertainty",
+        "transfer",
+        "ablation_hypotheses",
+        "implementation_tests",
+        "claim_limits",
+    }
+    assert {"random_feasible", "fixed_mix_policy", "pure_uncertainty_sampling"} <= set(
+        spec["required_baselines"]
+    )
+    assert "validated_wet_lab_improvement" not in spec["claim_limits"]
+    assert any("literature candidate" in limit for limit in spec["claim_limits"])
+    assert all(
+        evidence["evidence_strength"] in {"candidate_from_text", "needs_manual_review"}
+        for evidence in artifacts["operator_evidence_map"]["operators"].values()
+    )
+
+
+def test_operator_gap_matrix_records_missing_card_fields_without_fabricating_support() -> None:
+    artifacts = compile_operator_spec_artifacts(
+        [
+            _operator_spec_card(
+                mechanism_id="sparse_operator",
+                source_paper_ids=[],
+                state_model="",
+                candidate_generation="",
+                acquisition_objective="",
+                uncertainty_model="",
+                transfer_model="",
+                stress_tests=[],
+                evidence_strength="candidate_from_text",
+            )
+        ]
+    )
+
+    spec = artifacts["operator_specs"][0]
+    gap_row = artifacts["operator_gap_matrix"][0]
+
+    assert spec["evidence_strength"] == "needs_manual_review"
+    assert spec["objective"]["acquisition_formula"] == ""
+    assert spec["update_rule"]["design_state_update"] == ""
+    assert gap_row["operator_id"] == "operator_sparse_operator"
+    assert gap_row["missing_source_paper_ids"] == "true"
+    assert gap_row["missing_state_model"] == "true"
+    assert gap_row["missing_candidate_generation"] == "true"
+    assert gap_row["missing_acquisition_objective"] == "true"
+    assert gap_row["missing_uncertainty_model"] == "true"
+    assert gap_row["missing_transfer_model"] == "true"
+    assert gap_row["missing_stress_tests"] == "true"
+    assert gap_row["evidence_strength"] == "needs_manual_review"
+    assert gap_row["unsupported_fields"] == (
+        "source_paper_ids; state_model; candidate_generation; "
+        "acquisition_objective; uncertainty_model; transfer_model; stress_tests"
+    )
+    assert "manual review" in gap_row["claim_limits"]
+    evidence = artifacts["operator_evidence_map"]["operators"]["operator_sparse_operator"]
+    assert evidence["unsupported_fields"] == [
+        "source_paper_ids",
+        "state_model",
+        "candidate_generation",
+        "acquisition_objective",
+        "uncertainty_model",
+        "transfer_model",
+        "stress_tests",
+    ]
+    assert evidence["field_support"]["state_model"] == "unsupported"
+    assert evidence["field_support"]["problem_setting"] == "supported"
+
+
+def test_negative_controls_cover_label_holdout_uncertainty_and_transfer() -> None:
+    artifacts = compile_operator_spec_artifacts(
+        [
+            _operator_spec_card(
+                transfer_model="Multi-task source-to-target prior.",
+                reusable_components=["surrogate_model", "transfer_prior"],
+            )
+        ]
+    )
+
+    spec = artifacts["operator_specs"][0]
+    control_ids = {control["control_id"] for control in spec["negative_controls"]}
+
+    assert f'{spec["operator_id"]}_label_permutation' in control_ids
+    assert f'{spec["operator_id"]}_paper_holdout' in control_ids
+    assert f'{spec["operator_id"]}_uncertainty_shuffle' in control_ids
+    assert f'{spec["operator_id"]}_incompatible_source' in control_ids
+    assert artifacts["operator_negative_controls"]["negative_controls"][spec["operator_id"]] == (
+        spec["negative_controls"]
+    )
+
+
+def test_write_operator_spec_artifacts_writes_json_and_csv_contracts(tmp_path: Path) -> None:
+    framework_dir = tmp_path / "framework"
+
+    paths = write_operator_spec_artifacts(framework_dir, [_operator_spec_card()])
+
+    assert set(paths) == {
+        "operator_specs",
+        "operator_gap_matrix",
+        "operator_evidence_map",
+        "operator_negative_controls",
+    }
+    specs = read_json(framework_dir / "operator_specs.json")
+    assert specs[0]["operator_id"] == "operator_active_learning_acquisition"
+
+    evidence_map = read_json(framework_dir / "operator_evidence_map.json")
+    assert evidence_map["source"] == "mechanism_cards"
+    assert sorted(evidence_map["operators"]) == ["operator_active_learning_acquisition"]
+
+    negative_controls = read_json(framework_dir / "operator_negative_controls.json")
+    assert sorted(negative_controls["negative_controls"]) == [
+        "operator_active_learning_acquisition"
+    ]
+
+    with (framework_dir / "operator_gap_matrix.csv").open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == list(OPERATOR_GAP_FIELDNAMES)
+        rows = list(reader)
+    assert rows[0]["operator_id"] == "operator_active_learning_acquisition"
+    assert rows[0]["missing_acquisition_objective"] == "false"
+
+    json.dumps(specs)
 
 
 def test_malformed_backend_output_falls_back_and_records_warning(tmp_path: Path) -> None:
@@ -191,6 +409,73 @@ def test_empty_corpus_returns_failure_without_fabricating_library(tmp_path: Path
     assert result["mechanism_cards"] == []
     assert not (project / "framework" / "mechanism_library.json").exists()
     assert not (project / "framework" / "mechanism_cards.json").exists()
+    assert not (project / "framework" / "operator_specs.json").exists()
+    assert not (project / "framework" / "operator_evidence_map.json").exists()
+
+
+def test_shallow_keyword_hit_is_manual_review_not_literature_backed_algorithm(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _write_corpus(
+        project,
+        [
+            {
+                "paper_id": "shallow_active_learning_hit",
+                "title": "Active learning acquisition for protein engineering",
+                "abstract": (
+                    "This short summary says active learning and acquisition can help "
+                    "protein engineering."
+                ),
+            }
+        ],
+    )
+
+    result = extract_mechanisms(project)
+
+    assert result["status"] == "ok"
+    cards = read_json(project / "framework" / "mechanism_cards.json")
+    active_card = {card["mechanism_id"]: card for card in cards}["active_learning_acquisition"]
+    assert active_card["evidence_strength"] == "needs_manual_review"
+    assert active_card["state_model"] == ""
+    assert active_card["candidate_generation"] == ""
+    assert active_card["acquisition_objective"] == ""
+
+    operator_specs = read_json(project / "framework" / "operator_specs.json")
+    spec = {item["operator_id"]: item for item in operator_specs}[
+        "operator_active_learning_acquisition"
+    ]
+    assert spec["evidence_strength"] == "needs_manual_review"
+    assert spec["update_rule"]["design_state_update"] == ""
+    assert spec["candidate_generation"]["missing"] is True
+    assert spec["acquisition_objective"]["formula"] == ""
+    assert spec["evidence_map"]["unsupported_fields"] == [
+        "state_model",
+        "candidate_generation",
+        "acquisition_objective",
+        "uncertainty_model",
+        "transfer_model",
+        "stress_tests",
+    ]
+
+    evidence_map = read_json(project / "framework" / "operator_evidence_map.json")
+    evidence = evidence_map["operators"]["operator_active_learning_acquisition"]
+    assert evidence["evidence_strength"] == "needs_manual_review"
+    assert evidence["unsupported_fields"] == spec["evidence_map"]["unsupported_fields"]
+
+    with (project / "framework" / "operator_gap_matrix.csv").open(
+        encoding="utf-8",
+        newline="",
+    ) as handle:
+        gap_rows = list(csv.DictReader(handle))
+    gap_row = {
+        row["operator_id"]: row for row in gap_rows
+    }["operator_active_learning_acquisition"]
+    assert gap_row["unsupported_fields"] == (
+        "state_model; candidate_generation; acquisition_objective; "
+        "uncertainty_model; transfer_model; stress_tests"
+    )
+    assert "Missing card fields require manual review" in gap_row["claim_limits"]
 
 
 def test_heuristic_active_learning_provenance_excludes_generic_protein_engineering_records(
@@ -358,3 +643,14 @@ def test_gap_matrix_flags_missing_mechanism_fields(tmp_path: Path) -> None:
             "failure_modes": "Insufficient detail in source text.",
         }
     ]
+
+    with (project / "framework" / "operator_gap_matrix.csv").open(encoding="utf-8", newline="") as handle:
+        operator_gap_rows = list(csv.DictReader(handle))
+
+    assert operator_gap_rows[0]["operator_id"] == "operator_sparse_card"
+    assert operator_gap_rows[0]["missing_state_model"] == "true"
+    assert operator_gap_rows[0]["missing_candidate_generation"] == "true"
+    assert operator_gap_rows[0]["missing_uncertainty_model"] == "true"
+    assert operator_gap_rows[0]["missing_transfer_model"] == "true"
+    assert operator_gap_rows[0]["missing_stress_tests"] == "true"
+    assert "literature candidate" in operator_gap_rows[0]["claim_limits"]

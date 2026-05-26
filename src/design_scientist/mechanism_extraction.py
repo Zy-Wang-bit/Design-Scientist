@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from design_scientist.io import ensure_dir, write_json
+from design_scientist.operator_specs import write_operator_spec_artifacts
 from design_scientist.schemas import ModelRequest
 
 
@@ -58,6 +59,62 @@ GAP_FIELDNAMES = (
     "reusable_components",
     "failure_modes",
 )
+ACTIONABLE_CARD_FIELDS = (
+    "source_paper_ids",
+    "problem_setting",
+    "state_model",
+    "candidate_generation",
+    "acquisition_objective",
+)
+DEFAULT_FIELD_GATES = {
+    "problem_setting": (
+        "select",
+        "allocate",
+        "batch-limited",
+        "limited experimental",
+        "design loop",
+        "variant design",
+        "protein engineering",
+        "improve",
+    ),
+    "state_model": (
+        "state",
+        "surrogate",
+        "posterior",
+        "model",
+        "observed",
+        "round",
+        "evidence tier",
+        "endpoint-stratified",
+        "source-task",
+    ),
+    "candidate_generation": (
+        "generate",
+        "candidate",
+        "candidates",
+        "variant batch",
+        "mutation",
+        "batch",
+        "panel",
+        "controls",
+        "contrasts",
+        "edges",
+        "squares",
+    ),
+    "acquisition_objective": (
+        "acquisition function",
+        "acquisition objective",
+        "expected improvement",
+        "utility",
+        "information gain",
+        "rank",
+        "score",
+        "objective",
+        "decision value",
+        "allocate budget",
+        "prioritize",
+    ),
+}
 
 HEURISTIC_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
@@ -339,6 +396,7 @@ def extract_mechanisms(
     library = _build_mechanism_library(cards)
     write_json(artifact_paths["mechanism_library"], library)
     _write_gap_matrix(artifact_paths["mechanism_gap_matrix"], cards)
+    artifact_paths.update(write_operator_spec_artifacts(framework_dir, cards))
 
     status = "ok_with_warnings" if warnings else "ok"
     return {
@@ -566,6 +624,8 @@ def _normalize_mechanism_card(raw_card: dict[str, Any]) -> dict[str, Any] | None
 
     if card["evidence_strength"] not in EVIDENCE_STRENGTHS:
         card["evidence_strength"] = "needs_manual_review"
+    if any(_is_missing(card.get(field)) for field in ACTIONABLE_CARD_FIELDS):
+        card["evidence_strength"] = "needs_manual_review"
     if not card["mechanism_name"]:
         card["mechanism_name"] = mechanism_id.replace("_", " ").title()
     return card
@@ -620,10 +680,18 @@ def _card_from_template(
         "mechanism_id": template["mechanism_id"],
         "source_paper_ids": _unique(record["paper_id"] for record in source_records),
         "mechanism_name": template["mechanism_name"],
-        "problem_setting": template["problem_setting"],
-        "state_model": template["state_model"],
-        "candidate_generation": template["candidate_generation"],
-        "acquisition_objective": template["acquisition_objective"],
+        "problem_setting": _template_field_value(template, "problem_setting", corpus_text),
+        "state_model": _template_field_value(template, "state_model", corpus_text),
+        "candidate_generation": _template_field_value(
+            template,
+            "candidate_generation",
+            corpus_text,
+        ),
+        "acquisition_objective": _template_field_value(
+            template,
+            "acquisition_objective",
+            corpus_text,
+        ),
         "uncertainty_model": uncertainty_model,
         "transfer_model": transfer_model,
         "constraints": list(template["constraints"]),
@@ -633,6 +701,14 @@ def _card_from_template(
         "stress_tests": stress_tests,
         "evidence_strength": "candidate_from_text",
     }
+
+
+def _template_field_value(template: dict[str, Any], field: str, corpus_text: str) -> str:
+    gates = template.get("field_gates", {})
+    field_gates = gates.get(field, DEFAULT_FIELD_GATES.get(field, ()))
+    if field_gates and _keyword_score(corpus_text, field_gates) == 0:
+        return ""
+    return _clean_text(template.get(field))
 
 
 def _manual_review_card(records: list[dict[str, Any]]) -> dict[str, Any]:

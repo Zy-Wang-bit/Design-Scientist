@@ -11,6 +11,7 @@ from design_scientist.artifacts import NODE_ARTIFACTS
 from design_scientist.io import ensure_dir, read_json, write_json
 from design_scientist.journal import save_journal
 from design_scientist.schemas import DesignJournal, JournalNode
+from design_scientist.validators import CANDIDATE_POOL_REQUIRED_COLUMNS, PANEL_REQUIRED_COLUMNS
 
 CODEX_CONTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -58,6 +59,35 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str] | N
         writer.writeheader()
         for row in rows:
             writer.writerow({name: row.get(name, "") for name in fieldnames})
+
+
+def _contract_fieldnames(
+    rows: list[dict[str, Any]],
+    preferred: list[str],
+    required: tuple[str, ...],
+) -> list[str]:
+    fieldnames = list(dict.fromkeys([*preferred, *required]))
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    return fieldnames
+
+
+def _write_candidate_pool_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    _write_csv(
+        path,
+        rows,
+        fieldnames=_contract_fieldnames(rows, CANDIDATE_CSV_COLUMNS, CANDIDATE_POOL_REQUIRED_COLUMNS),
+    )
+
+
+def _write_panel_recommendation_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    _write_csv(
+        path,
+        rows,
+        fieldnames=_contract_fieldnames(rows, PANEL_CSV_COLUMNS, PANEL_REQUIRED_COLUMNS),
+    )
 
 
 def _candidate_to_row(candidate: Any) -> dict[str, Any]:
@@ -119,8 +149,8 @@ def run_controlled_search(
             "used_codex": False,
         }
 
-        _write_csv(node_dir / "candidate_pool.csv", candidate_rows, fieldnames=CANDIDATE_CSV_COLUMNS)
-        _write_csv(node_dir / "panel_recommendation.csv", panel_rows, fieldnames=PANEL_CSV_COLUMNS)
+        _write_candidate_pool_csv(node_dir / "candidate_pool.csv", candidate_rows)
+        _write_panel_recommendation_csv(node_dir / "panel_recommendation.csv", panel_rows)
         _write_csv(
             node_dir / "policy_comparison.csv",
             [{"baseline": item.split(":", 1)[0], "summary": item} for item in baseline_comparison],
@@ -192,8 +222,8 @@ def run_controlled_search(
     if selected_outputs is None:
         raise RuntimeError("No policy nodes were completed")
 
-    _write_csv(run_dir / "candidate_pool.csv", selected_outputs["candidate_rows"], fieldnames=CANDIDATE_CSV_COLUMNS)
-    _write_csv(run_dir / "panel_recommendation.csv", selected_outputs["panel_rows"], fieldnames=PANEL_CSV_COLUMNS)
+    _write_candidate_pool_csv(run_dir / "candidate_pool.csv", selected_outputs["candidate_rows"])
+    _write_panel_recommendation_csv(run_dir / "panel_recommendation.csv", selected_outputs["panel_rows"])
     _write_csv(
         run_dir / "policy_comparison.csv",
         [

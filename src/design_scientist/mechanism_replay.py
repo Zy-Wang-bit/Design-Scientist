@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import random
 import re
@@ -15,6 +16,7 @@ from statistics import mean
 from typing import Any
 
 from design_scientist import policies as policy_api
+from design_scientist.io import read_yaml
 from design_scientist import synthetic_replay
 from design_scientist.method_nodes import (
     _is_relative_to,
@@ -54,6 +56,7 @@ class MechanismLifecycle:
     architecture_clone: bool = False
     claim_guardrail: bool = True
     confounding_correction: bool = True
+    stress_test_worlds: tuple[str, ...] = ()
 
 
 class ReplayPathGuardError(RuntimeError):
@@ -103,6 +106,7 @@ def make_policy_mechanism(
     key_policy_ablation: str | None = None,
     claim_guardrail: bool | None = None,
     confounding_correction: bool | None = None,
+    stress_test_worlds: Iterable[str] | None = None,
 ) -> MechanismLifecycle:
     """Wrap a policy API callable in the V3 lifecycle shape."""
 
@@ -156,6 +160,7 @@ def make_policy_mechanism(
         architecture_clone=bool(architecture_clone),
         claim_guardrail=bool(claim_guardrail),
         confounding_correction=bool(confounding_correction),
+        stress_test_worlds=_normalize_stress_test_worlds(stress_test_worlds),
     )
 
 
@@ -185,10 +190,11 @@ def run_mechanism_benchmark(
     root = Path(project_dir).expanduser().resolve()
     requested_mechanisms = _normalize_requested_mechanisms(mechanisms)
     benchmark_mechanisms = _with_required_baselines(requested_mechanisms)
-    world_ids = world_ids_for_claims(_mechanism_claims(requested_mechanisms))
+    world_ids = _world_ids_for_mechanisms(requested_mechanisms)
     world_specs = _select_worlds(world_ids)
     run_dir = root / "runs" / safe_run_id
     replay_snapshot_roots = _replay_snapshot_roots(root)
+    project_context = load_project_context(root)
 
     benchmark_rows: list[dict[str, Any]] = []
     ablation_rows: list[dict[str, Any]] = []
@@ -228,6 +234,7 @@ def run_mechanism_benchmark(
                 ablation={"name": "none"},
                 project_root=root,
                 snapshot_roots=replay_snapshot_roots,
+                project_context=project_context,
             )
             for mechanism in benchmark_mechanisms
         }
@@ -274,6 +281,8 @@ def run_mechanism_benchmark(
                 "rounds": rounds,
                 "budget": budget,
             }
+            if project_context is not None:
+                plan_context["project_context"] = _copy_jsonish(project_context)
             try:
                 raw_ablation_specs = _guarded_replay_call(
                     lambda: _call_plan_ablations(mechanism, plan_context),
@@ -320,6 +329,7 @@ def run_mechanism_benchmark(
                         ablation=ablation_spec,
                         project_root=root,
                         snapshot_roots=replay_snapshot_roots,
+                        project_context=project_context,
                     )
                 ablation_row = _ablation_row(
                     ablation_result,
@@ -344,9 +354,19 @@ def run_mechanism_benchmark(
     benchmark_path = run_dir / "mechanism_benchmark_results.csv"
     summary_path = run_dir / "mechanism_benchmark_summary.csv"
     ablation_path = run_dir / "mechanism_ablation_results.csv"
+    saturation_path = run_dir / "benchmark_saturation.json"
     _write_csv(benchmark_path, benchmark_rows)
     _write_csv(summary_path, summary_rows)
     _write_csv(ablation_path, ablation_rows)
+    _write_json_file(
+        saturation_path,
+        _benchmark_saturation_payload(
+            summary_rows=summary_rows,
+            benchmark_rows=benchmark_rows,
+            ablation_rows=ablation_rows,
+            config=config,
+        ),
+    )
 
     return {
         "run_id": safe_run_id,
@@ -356,6 +376,7 @@ def run_mechanism_benchmark(
         "mechanism_benchmark_results_path": str(benchmark_path),
         "mechanism_benchmark_summary_path": str(summary_path),
         "mechanism_ablation_results_path": str(ablation_path),
+        "benchmark_saturation_path": str(saturation_path),
         "benchmark_results": benchmark_rows,
         "ablation_results": ablation_rows,
         "summary": {"mechanism_rankings": summary_rows},
@@ -377,6 +398,197 @@ def world_ids_for_claims(claims: Iterable[str]) -> list[str]:
     if "noise" in text or "noisy" in text or "assay" in text:
         selected.append("noisy_endpoint")
     return _dedupe(selected) if selected else ["additive", "epistatic"]
+
+
+def load_project_context(project_dir: str | Path) -> dict[str, Any] | None:
+    """Load the generic project context exposed to synthetic lifecycle replay."""
+
+    root = Path(project_dir).expanduser().resolve()
+    context_sources: list[tuple[Path, dict[str, Any]]] = []
+    for path in (
+        root / "state" / "design_state.json",
+        root / "standardized" / "project_context.json",
+    ):
+        if not path.exists():
+            continue
+        context_sources.append((path, _read_json_mapping(path)))
+    if not context_sources:
+        return None
+
+    source_payloads = [payload for _, payload in context_sources]
+    context: dict[str, Any] = {
+        "source_artifacts": [str(path) for path, _ in context_sources],
+        "replay_mode": "deterministic_synthetic_stress",
+    }
+
+    objective = _last_non_empty(_context_values(source_payloads, "objective", "goal"))
+    if objective is not None:
+        context["objective"] = _json_plain(objective)
+
+    endpoints = _collect_context_items(
+        source_payloads,
+        "endpoints",
+        "required_endpoints",
+        "primary_endpoints",
+        "secondary_endpoints",
+        "guardrail_endpoints",
+    )
+    if endpoints:
+        context["endpoints"] = endpoints
+
+    row_counts = _merge_context_mappings(
+        source_payloads,
+        "observed_row_counts",
+        "row_counts",
+    )
+    if row_counts:
+        context["observed_row_counts"] = row_counts
+        context["row_counts"] = dict(row_counts)
+
+    constraints = _merge_context_mappings(source_payloads, "constraints")
+    if constraints:
+        context["constraints"] = constraints
+
+    allowed_sources = _collect_allowed_sources(source_payloads)
+    if allowed_sources is None:
+        allowed_sources = _allowed_sources_from_contract(root)
+    if allowed_sources is not None:
+        context["allowed_sources"] = allowed_sources
+
+    return context
+
+
+def _read_json_mapping(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return data
+
+
+def _context_values(payloads: Sequence[Mapping[str, Any]], *keys: str) -> list[Any]:
+    values: list[Any] = []
+    for payload in payloads:
+        for key in keys:
+            value = payload.get(key)
+            if _is_non_empty(value):
+                values.append(value)
+    return values
+
+
+def _last_non_empty(values: Sequence[Any]) -> Any | None:
+    for value in reversed(values):
+        if _is_non_empty(value):
+            return value
+    return None
+
+
+def _collect_context_items(
+    payloads: Sequence[Mapping[str, Any]],
+    *keys: str,
+) -> list[Any]:
+    items: list[Any] = []
+    for value in _context_values(payloads, *keys):
+        items.extend(_context_items(value))
+    return _dedupe_json(items)
+
+
+def _context_items(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, Mapping):
+        for key in ("endpoint", "endpoint_id", "name", "id"):
+            if _is_non_empty(value.get(key)):
+                return [_json_plain(value[key])]
+        return [_json_plain(value)]
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return [_json_plain(value)]
+    items: list[Any] = []
+    for item in iterator:
+        items.extend(_context_items(item))
+    return items
+
+
+def _merge_context_mappings(
+    payloads: Sequence[Mapping[str, Any]],
+    *keys: str,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in _context_values(payloads, *keys):
+        if not isinstance(value, Mapping):
+            continue
+        merged.update({str(key): _json_plain(item) for key, item in value.items()})
+    return merged
+
+
+def _collect_allowed_sources(payloads: Sequence[Mapping[str, Any]]) -> Any | None:
+    value = _last_non_empty(_context_values(payloads, "allowed_sources"))
+    return _json_plain(value) if value is not None else None
+
+
+def _allowed_sources_from_contract(root: Path) -> Any | None:
+    path = root / "data_contract.yaml"
+    if not path.exists():
+        return None
+    try:
+        contract = read_yaml(path)
+    except Exception:
+        return None
+    allowed_sources = contract.get("allowed_sources")
+    if _is_non_empty(allowed_sources):
+        return _json_plain(allowed_sources)
+    allowed_tables = contract.get("allowed_tables")
+    if not isinstance(allowed_tables, list):
+        return None
+    sources: list[dict[str, Any]] = []
+    for table in allowed_tables:
+        if not isinstance(table, Mapping):
+            continue
+        source = {
+            "name": table.get("name"),
+            "path": table.get("path"),
+            "role": table.get("role"),
+        }
+        measurement_types = table.get("measurement_types")
+        if measurement_types:
+            source["measurement_types"] = measurement_types
+        sources.append(_json_plain(source))
+    return sources or None
+
+
+def _is_non_empty(value: Any) -> bool:
+    return value not in (None, "", [], {}, ())
+
+
+def _json_plain(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value))
+    except TypeError:
+        if isinstance(value, Mapping):
+            return {str(key): _json_plain(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_json_plain(item) for item in value]
+        return str(value)
+
+
+def _copy_jsonish(value: Any) -> Any:
+    return _json_plain(value)
+
+
+def _dedupe_json(values: Iterable[Any]) -> list[Any]:
+    deduped: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        marker = json.dumps(_json_plain(value), sort_keys=True)
+        if marker in seen:
+            continue
+        deduped.append(_json_plain(value))
+        seen.add(marker)
+    return deduped
 
 
 def _normalize_requested_mechanisms(
@@ -453,6 +665,7 @@ def _dict_lifecycle(raw: Mapping[str, Any]) -> MechanismLifecycle:
         architecture_clone=_as_bool(raw.get("architecture_clone", False)),
         claim_guardrail=_as_bool(raw.get("claim_guardrail", True)),
         confounding_correction=_as_bool(raw.get("confounding_correction", True)),
+        stress_test_worlds=_normalize_stress_test_worlds(raw),
     )
 
 
@@ -475,6 +688,11 @@ def _object_lifecycle(raw: object) -> MechanismLifecycle:
         architecture_clone=_as_bool(getattr(raw, "architecture_clone", False)),
         claim_guardrail=_as_bool(getattr(raw, "claim_guardrail", True)),
         confounding_correction=_as_bool(getattr(raw, "confounding_correction", True)),
+        stress_test_worlds=_normalize_stress_test_worlds(
+            getattr(raw, "stress_test_worlds", None)
+            or getattr(raw, "world_ids", None)
+            or getattr(raw, "stress_tests", None)
+        ),
     )
 
 
@@ -507,6 +725,19 @@ def _mechanism_claims(mechanisms: Sequence[MechanismLifecycle]) -> list[str]:
     return claims
 
 
+def _world_ids_for_mechanisms(mechanisms: Sequence[MechanismLifecycle]) -> list[str]:
+    explicit_worlds: list[str] = []
+    claims: list[str] = []
+    for mechanism in mechanisms:
+        explicit_worlds.extend(mechanism.stress_test_worlds)
+        claims.extend(mechanism.claims)
+    world_ids: list[str] = []
+    world_ids.extend(explicit_worlds)
+    if claims:
+        world_ids.extend(world_ids_for_claims(claims))
+    return _dedupe(world_ids) if world_ids else ["additive", "epistatic"]
+
+
 def _select_worlds(world_ids: Sequence[str]) -> list[synthetic_replay.WorldSpec]:
     world_by_id = {world.world_id: world for world in synthetic_replay._world_suite()}  # noqa: SLF001
     worlds: list[synthetic_replay.WorldSpec] = []
@@ -530,6 +761,7 @@ def _run_lifecycle_safely(
     ablation: Mapping[str, Any],
     project_root: Path,
     snapshot_roots: Sequence[Path],
+    project_context: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     try:
         result = _guarded_replay_call(
@@ -542,6 +774,7 @@ def _run_lifecycle_safely(
                 rounds=rounds,
                 budget=budget,
                 ablation=ablation,
+                project_context=project_context,
             ),
             project_root=project_root,
             snapshot_roots=snapshot_roots,
@@ -597,6 +830,7 @@ def _run_lifecycle_replay(
     rounds: int,
     budget: int,
     ablation: Mapping[str, Any],
+    project_context: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     observed_ids = set(initial_ids)
     observations = [observations_by_id[variant_id] for variant_id in initial_ids]
@@ -624,23 +858,23 @@ def _run_lifecycle_replay(
             )
             for variant in available
         ]
-        state = _call_fit_state(
-            mechanism,
-            {
-                "mechanism": mechanism.name,
-                "world": world,
-                "world_id": world.world_id,
-                "round_index": round_index,
-                "budget": budget,
-                "observations": tuple(observations),
-                "observed_ids": frozenset(observed_ids),
-                "available_variants": tuple(available),
-                "observed_records": observed_records,
-                "candidate_records": candidate_records,
-                "ablation": ablation_name,
-                "policy_ablation": policy_ablation,
-            },
-        )
+        replay_context = {
+            "mechanism": mechanism.name,
+            "world": world,
+            "world_id": world.world_id,
+            "round_index": round_index,
+            "budget": budget,
+            "observations": tuple(observations),
+            "observed_ids": frozenset(observed_ids),
+            "available_variants": tuple(available),
+            "observed_records": observed_records,
+            "candidate_records": candidate_records,
+            "ablation": ablation_name,
+            "policy_ablation": policy_ablation,
+        }
+        if project_context is not None:
+            replay_context["project_context"] = _copy_jsonish(project_context)
+        state = _call_fit_state(mechanism, replay_context)
         candidates = _call_generate_candidates(mechanism, state)
         scored_candidates = _call_score_candidates(mechanism, state, candidates)
         rng = random.Random(
@@ -918,6 +1152,88 @@ def _mean_false_claim(rows: list[dict[str, Any]]) -> float:
     if not rows:
         return 0.0
     return _round_metric(mean(float(row["false_claim_rate"]) for row in rows))
+
+
+def _benchmark_saturation_payload(
+    *,
+    summary_rows: list[dict[str, Any]],
+    benchmark_rows: list[dict[str, Any]],
+    ablation_rows: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    generated_rows = [
+        row
+        for row in summary_rows
+        if row.get("mechanism") not in set(BASELINE_MECHANISM_NAMES)
+    ]
+    eligible_rows = [
+        row
+        for row in generated_rows
+        if str(row.get("selected_eligible", "")).lower() == "true"
+    ]
+    baseline_rows = [
+        row for row in summary_rows if row.get("mechanism") in set(BASELINE_MECHANISM_NAMES)
+    ]
+    blocked_claims: list[str] = []
+    if not eligible_rows:
+        blocked_claims.append(
+            "No generated mechanism passed majority baseline, ablation, clone, and false-claim gates."
+        )
+    if len({row.get("mechanism") for row in baseline_rows}) < len(BASELINE_MECHANISM_NAMES):
+        blocked_claims.append("Required random_feasible and fixed_mix baselines were not both present.")
+
+    selected = eligible_rows[0] if eligible_rows else (generated_rows[0] if generated_rows else {})
+    selected_utility = _safe_float(selected.get("mean_best_feasible_utility"))
+    boundary_rows = [
+        row
+        for row in summary_rows
+        if row.get("mechanism") in {"observed_pool", "no_generation_boundary", "retrospective_observed_pool"}
+    ]
+    boundary_checks: list[dict[str, Any]] = []
+    for row in boundary_rows:
+        boundary_utility = _safe_float(row.get("mean_best_feasible_utility"))
+        delta = selected_utility - boundary_utility
+        near_boundary = delta <= 0.01
+        boundary_checks.append(
+            {
+                "boundary": row.get("mechanism"),
+                "selected_delta": _round_metric(delta),
+                "near_boundary": near_boundary,
+            }
+        )
+        if near_boundary:
+            blocked_claims.append(
+                f"Selected mechanism is not clearly above {row.get('mechanism')} boundary."
+            )
+
+    saturated = bool(eligible_rows) and not any("boundary" in claim for claim in blocked_claims)
+    return {
+        "verdict": "accept" if saturated else "reject",
+        "saturated": saturated,
+        "summary": "all_benchmark_worlds_saturated" if saturated else "benchmark_not_saturated",
+        "allowed_claims": (
+            ["computational mechanism improved deterministic replay benchmarks"]
+            if saturated
+            else []
+        ),
+        "blocked_claims": blocked_claims,
+        "selected_mechanism": selected.get("mechanism"),
+        "worlds": config.get("worlds", []),
+        "required_baselines": list(BASELINE_MECHANISM_NAMES),
+        "boundary_checks": boundary_checks,
+        "row_counts": {
+            "benchmark_results": len(benchmark_rows),
+            "benchmark_summary": len(summary_rows),
+            "ablation_results": len(ablation_rows),
+        },
+    }
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _normalize_ablation_specs(raw_specs: Any) -> list[dict[str, Any]]:
@@ -1213,6 +1529,45 @@ def _normalize_claims(claims: Any) -> tuple[str, ...]:
     return tuple(str(claim) for claim in claims)
 
 
+def _normalize_stress_test_worlds(raw: Any) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, Mapping):
+        candidate = (
+            raw.get("stress_test_worlds")
+            or raw.get("world_ids")
+            or raw.get("worlds")
+            or raw.get("stress_tests")
+        )
+        raw = candidate
+    return tuple(_dedupe(_stress_test_world_items(raw)))
+
+
+def _stress_test_world_items(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text] if text else []
+    if isinstance(raw, Mapping):
+        for key in ("world_id", "world", "id"):
+            value = raw.get(key)
+            if _is_non_empty(value):
+                return _stress_test_world_items(value)
+        items: list[str] = []
+        for key in ("stress_test_worlds", "world_ids", "worlds", "stress_tests"):
+            items.extend(_stress_test_world_items(raw.get(key)))
+        return items
+    try:
+        iterator = iter(raw)
+    except TypeError:
+        return [str(raw)]
+    items: list[str] = []
+    for item in iterator:
+        items.extend(_stress_test_world_items(item))
+    return items
+
+
 def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y"}
@@ -1244,6 +1599,11 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    _ensure_dir(path.parent)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
 
 random_feasible_mechanism = make_policy_mechanism(
@@ -1278,6 +1638,7 @@ __all__ = [
     "DEFAULT_RUN_ID",
     "MechanismLifecycle",
     "fixed_mix_mechanism",
+    "load_project_context",
     "make_policy_mechanism",
     "mechanism_aware_mechanism",
     "random_feasible_mechanism",

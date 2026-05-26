@@ -180,6 +180,7 @@ def _write_v3_method_report(
     stress_test_plan = _selected_json_artifact(root, selected_node, "stress_test_plan", "stress_test_plan.json")
     mechanism_metrics = _selected_json_artifact(root, selected_node, "mechanism_metrics", "mechanism_metrics.json")
     validation_report = _selected_json_artifact(root, selected_node, "validation_report", "validation_report.json")
+    claim_gate = _v3_claim_gate_artifacts(run_dir)
     selected_mechanism = _v3_selected_mechanism_name(selected_summary, mechanism_spec, mechanism_metrics)
     selected_summary_row = _v3_find_row(benchmark_summary_rows, selected_mechanism)
     failed_nodes = _failed_nodes(journal)
@@ -226,6 +227,7 @@ def _write_v3_method_report(
             validation_report,
         )
     )
+    lines.extend(_v3_claim_gate_section(root, run_dir, claim_gate))
     lines.extend(_v3_failed_nodes_section(failed_nodes))
     lines.extend(_v3_unsupported_claims_section(journal, mechanism_metrics, validation_report))
     lines.extend(_artifact_paths_section(_v3_artifact_paths(root, run_dir, selected_node)))
@@ -533,6 +535,86 @@ def _v3_selected_mechanism_section(
         lines.append(f"- valid: {_one_line(validation_report.get('valid', 'n/a'))}")
         for caveat in _v3_list_items(validation_report.get("caveats"))[:6]:
             lines.append(f"- caveat: {_one_line(caveat)}")
+    lines.append("")
+    return lines
+
+
+def _v3_claim_gate_section(
+    root: Path,
+    run_dir: Path,
+    claim_gate: dict[str, Any],
+) -> list[str]:
+    lines = ["## Claim Gate", ""]
+    claim_cap = claim_gate.get("claim_cap")
+    saturation = claim_gate.get("benchmark_saturation")
+    reviewers = claim_gate.get("reviewers")
+    paper_readiness = claim_gate.get("paper_readiness")
+
+    lines.append("Claim gate artifacts:")
+    for filename in (
+        "claim_cap.json",
+        "benchmark_saturation.json",
+        "novelty_review.json",
+        "baseline_audit.json",
+        "experiment_review.json",
+        "biology_review.json",
+        "paper_contribution_review.json",
+    ):
+        lines.append(f"- `{_rel(run_dir / filename, root)}`")
+
+    if isinstance(claim_cap, dict) and claim_cap:
+        lines.extend(
+            [
+                "",
+                "Claim cap:",
+                f"- verdict: {_one_line(claim_cap.get('verdict', 'n/a'))}",
+                f"- claim_cap: {_one_line(claim_cap.get('claim_cap', 'n/a'))}",
+            ]
+        )
+        allowed = _v3_list_items(claim_cap.get("allowed_claims"))
+        blocked = _v3_list_items(claim_cap.get("blocked_claims"))
+        if allowed:
+            lines.append(f"- allowed_claims: {'; '.join(_one_line(item) for item in allowed[:6])}")
+        if blocked:
+            lines.append(f"- blocked_claims: {'; '.join(_one_line(item) for item in blocked[:6])}")
+    else:
+        lines.extend(["", "Claim cap: missing or not readable."])
+
+    if isinstance(saturation, dict) and saturation:
+        lines.extend(
+            [
+                "",
+                "Benchmark saturation:",
+                f"- verdict: {_one_line(saturation.get('verdict', 'n/a'))}",
+                f"- saturated: {_one_line(saturation.get('saturated', 'n/a'))}",
+                f"- summary: {_one_line(saturation.get('summary', 'n/a'))}",
+            ]
+        )
+        for reason in _v3_list_items(saturation.get("blocked_claims"))[:6]:
+            lines.append(f"- blocked: {_one_line(reason)}")
+    else:
+        lines.extend(["", "Benchmark saturation: missing or not readable."])
+
+    lines.extend(["", "Reviewer verdicts:"])
+    if isinstance(reviewers, dict) and reviewers:
+        for filename, payload in reviewers.items():
+            verdict = payload.get("verdict") if isinstance(payload, dict) else "missing"
+            summary = payload.get("summary") if isinstance(payload, dict) else ""
+            reasons = payload.get("reasons") if isinstance(payload, dict) else None
+            reason_text = "; ".join(str(reason) for reason in reasons) if isinstance(reasons, list) else ""
+            detail = reason_text or _one_line(summary)
+            lines.append(f"- `{filename}`: {verdict}{' - ' + detail if detail else ''}")
+    else:
+        lines.append("- No reviewer verdict artifacts were loaded.")
+
+    if isinstance(paper_readiness, dict) and paper_readiness:
+        lines.extend(
+            [
+                "",
+                f"Paper readiness: valid={_one_line(paper_readiness.get('valid', 'n/a'))}; "
+                f"status={_one_line(paper_readiness.get('status', 'n/a'))}",
+            ]
+        )
     lines.append("")
     return lines
 
@@ -1503,6 +1585,27 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(record, dict):
             records.append(record)
     return records
+
+
+def _v3_claim_gate_artifacts(run_dir: Path) -> dict[str, Any]:
+    reviewer_files = (
+        "novelty_review.json",
+        "baseline_audit.json",
+        "experiment_review.json",
+        "biology_review.json",
+        "paper_contribution_review.json",
+    )
+    reviewers = {
+        filename: _load_json(run_dir / filename)
+        for filename in reviewer_files
+        if (run_dir / filename).exists()
+    }
+    return {
+        "claim_cap": _load_json(run_dir / "claim_cap.json"),
+        "benchmark_saturation": _load_json(run_dir / "benchmark_saturation.json"),
+        "paper_readiness": _load_json(run_dir / "paper" / "paper_readiness_report.json"),
+        "reviewers": reviewers,
+    }
 
 
 def _load_json(path: Path) -> Any:

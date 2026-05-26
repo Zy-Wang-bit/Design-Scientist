@@ -35,6 +35,47 @@ def test_controlled_search_records_policy_comparison_in_each_journal_node(tmp_pa
     assert all("policy_comparison" in node.artifacts for node in journal.nodes)
 
 
+def test_dry_panel_writes_contract_headers_when_no_candidates(tmp_path: Path) -> None:
+    project = tmp_path / "anti_hbsag"
+    _write_minimal_project(project)
+    write_json(
+        project / "state" / "design_state.json",
+        {
+            "project_id": "anti_hbsag",
+            "data_version": "test",
+            "system_roles": {
+                "sdAb": "module_learning",
+                "1E62": "target_system_design_genotype_coverage",
+            },
+            "module_status": [],
+            "unresolved_edges": [],
+            "unsupported_claims": [
+                "Current 1E62 combo data cannot support module causal claims; exact primary matched edges are missing."
+            ],
+        },
+    )
+
+    run_id = run_dry_panel(project, budget=3)
+    run_dir = project / "runs" / run_id
+    report = validate_project(project, run_id=run_id)
+
+    candidate_header = (run_dir / "candidate_pool.csv").read_text(encoding="utf-8").splitlines()[0].split(",")
+    panel_header = (run_dir / "panel_recommendation.csv").read_text(encoding="utf-8").splitlines()[0].split(",")
+
+    assert {"candidate_id", "feasibility_status", "cost"} <= set(candidate_header)
+    assert {
+        "candidate_id",
+        "operator",
+        "category",
+        "target_system",
+        "background",
+        "modules",
+        "feasibility_status",
+        "cost",
+    } <= set(panel_header)
+    assert report.valid
+
+
 def test_validate_project_write_report_false_is_read_only(tmp_path: Path) -> None:
     project = tmp_path / "anti_hbsag"
     _write_minimal_project(project)

@@ -4,8 +4,11 @@ import csv
 import json
 from pathlib import Path
 
+import pytest
+
 from design_scientist.framework_validation import review_framework_run
 from design_scientist.method_report import write_method_report
+from design_scientist.reference_manifest import write_reference_data_sources
 from design_scientist.scientist_search_v3 import SCIENTIST_V3_STAGES
 
 
@@ -17,6 +20,225 @@ def test_complete_v3_framework_run_validates(tmp_path: Path) -> None:
 
     assert report["valid"]
     assert report["summary"]["errors"] == 0
+
+
+def test_v3_validation_warns_when_claim_gate_artifacts_are_missing(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert report["valid"]
+    assert {
+        "missing_claim_cap",
+        "missing_benchmark_saturation",
+        "missing_novelty_review",
+    } <= _warning_codes(report)
+
+
+def test_v3_validation_errors_on_missing_claim_gate_for_ready_paper(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_json(
+        project / "runs" / "v3_unit" / "paper" / "paper_readiness_report.json",
+        {"valid": True, "status": "passed", "summary": {"errors": 0}},
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert {
+        "missing_claim_cap",
+        "missing_benchmark_saturation",
+        "missing_novelty_review",
+    } <= _error_codes(report)
+
+
+def test_v3_validation_accepts_claim_gate_artifacts_and_reports_them(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    _write_json(
+        project / "runs" / "v3_unit" / "paper" / "paper_readiness_report.json",
+        {"valid": True, "status": "passed", "summary": {"errors": 0}},
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+    method_report = (project / "runs" / "v3_unit" / "method_report.md").read_text(encoding="utf-8")
+
+    assert report["valid"]
+    assert not _error_codes(report)
+    assert "missing_claim_cap" not in _warning_codes(report)
+    assert "## Claim Gate" in method_report
+    assert "claim_cap.json" in method_report
+    assert "computational_benchmark_only" in method_report
+    assert "benchmark_saturation.json" in method_report
+    assert "all_benchmark_worlds_saturated" in method_report
+    assert "Reviewer verdicts" in method_report
+
+
+def test_v3_validation_accepts_reference_data_sources_manifest(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert report["valid"]
+    assert "missing_reference_data_sources" not in _error_codes(report)
+    assert "reference_data_sources" in report["artifacts"]
+
+
+def test_v3_validation_rejects_reference_data_sources_missing_source(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    manifest_path = project / "runs" / "v3_unit" / "reference_data_sources.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["claim_dependencies"][0]["required_sources"].append(
+        "runs/v3_unit/nodes/node_literature_kernel/missing_trace.json"
+    )
+    _write_json(manifest_path, manifest)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "reference_data_sources_missing_source" in _error_codes(report)
+
+
+def test_v3_validation_rejects_reference_data_sources_selected_node_mismatch(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    manifest_path = project / "runs" / "v3_unit" / "reference_data_sources.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["selected_node_id"] = "other_node"
+    _write_json(manifest_path, manifest)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "reference_data_sources_selected_node_mismatch" in _error_codes(report)
+
+
+def test_v3_method_report_contains_mechanism_spec_kernel_sections(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+
+    report_path = write_method_report(project, run_id="v3_unit")
+
+    text = report_path.read_text(encoding="utf-8")
+    assert "MechanismSpec" in text
+    assert "MechanismSpec Kernel" in text
+    assert "components" in text
+    assert "Stress Tests" in text
+    assert "Ablation" in text
+    assert "Mechanism Library" in text
+    assert "literature_kernel" in text
+
+
+def test_v3_validation_rejects_reviewer_reject_verdict(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    _write_json(
+        project / "runs" / "v3_unit" / "biology_review.json",
+        {
+            "verdict": "reject",
+            "reasons": ["Biology claims exceed the evidence boundary."],
+        },
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+    method_report = (project / "runs" / "v3_unit" / "method_report.md").read_text(encoding="utf-8")
+
+    assert not report["valid"]
+    assert "reviewer_verdict_rejected" in _error_codes(report)
+    assert "biology_review.json" in method_report
+    assert "Biology claims exceed the evidence boundary." in method_report
+
+
+def test_v3_validation_rejects_structured_unfair_baseline_audit(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    _write_json(
+        project / "runs" / "v3_unit" / "baseline_audit.json",
+        {
+            "verdict": "accept",
+            "fairness": {
+                "same_budget": False,
+                "same_rounds": True,
+                "same_candidate_pool": False,
+                "no_oracle_features": False,
+                "same_baseline_inputs": False,
+            },
+            "issues": [
+                "method used budget=64 while baselines used budget=16",
+                "method saw oracle labels unavailable to fixed_mix",
+                "baseline inputs used a smaller candidate pool",
+            ],
+        },
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "baseline_audit_unfair_comparison" in _error_codes(report)
+
+
+def test_v3_validation_rejects_biology_overclaim_review(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    _write_json(
+        project / "runs" / "v3_unit" / "biology_review.json",
+        {
+            "verdict": "accept",
+            "evidence_boundary_violations": [
+                {
+                    "source_evidence": "synthetic replay",
+                    "overclaim": "reported as prospective wet-lab validation",
+                },
+                {
+                    "source_evidence": "computational result",
+                    "overclaim": "biological mechanism confirmed",
+                },
+            ],
+        },
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "biology_overclaim_detected" in _error_codes(report)
+
+
+def test_v3_validation_rejects_invalid_paper_readiness_report(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    _write_json(
+        project / "runs" / "v3_unit" / "paper" / "paper_readiness_report.json",
+        {
+            "valid": False,
+            "status": "failed",
+            "findings": [
+                {
+                    "severity": "error",
+                    "code": "biology_overclaim_detected",
+                    "message": "Retrospective masking is written as prospective biological mechanism confirmed.",
+                }
+            ],
+        },
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert {
+        "paper_readiness_report_invalid",
+        "biology_overclaim_detected",
+    } <= _error_codes(report)
 
 
 def test_v3_validation_requires_literature_corpus_and_mechanism_library(tmp_path: Path) -> None:
@@ -201,6 +423,139 @@ def test_v3_validation_rejects_selected_mechanism_missing_from_benchmark_results
         "selected_mechanism_missing_benchmark_results",
         "selected_mechanism_missing_benchmark_summary",
     } <= _error_codes(report)
+
+
+def test_v3_validation_rejects_strong_claim_cap_when_benchmark_unsaturated(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    run_dir = project / "runs" / "v3_unit"
+    _write_json(
+        run_dir / "claim_cap.json",
+        {
+            "verdict": "accept",
+            "claim_cap": "algorithm_superiority",
+            "allowed_claims": [
+                "algorithm superiority",
+                "prospective biological validation",
+            ],
+            "blocked_claims": [],
+        },
+    )
+    _write_json(
+        run_dir / "benchmark_saturation.json",
+        {
+            "verdict": "reject",
+            "saturated": False,
+            "summary": "benchmark worlds are not saturated",
+            "blocked_claims": [
+                "algorithm superiority",
+                "generative superiority",
+                "prospective biological validation",
+            ],
+        },
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert {
+        "benchmark_saturation_not_met",
+        "claim_cap_conflicts_with_benchmark_saturation",
+    } <= _error_codes(report)
+
+
+def test_v3_validation_rejects_claim_cap_allowed_claim_blocked_by_saturation(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    run_dir = project / "runs" / "v3_unit"
+    _write_json(
+        run_dir / "claim_cap.json",
+        {
+            "verdict": "accept",
+            "claim_cap": "computational_benchmark_only",
+            "allowed_claims": ["prospective biological validation"],
+            "blocked_claims": [],
+        },
+    )
+    _write_json(
+        run_dir / "benchmark_saturation.json",
+        {
+            "verdict": "accept",
+            "saturated": True,
+            "summary": "replay benchmark saturated; prospective wet-lab evidence absent",
+            "blocked_claims": ["prospective biological validation"],
+        },
+    )
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "claim_cap_conflicts_with_benchmark_saturation" in _error_codes(report)
+
+
+def test_v3_validation_rejects_selected_node_artifact_in_run_dir_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    run_dir = project / "runs" / "v3_unit"
+    run_level_proposal = run_dir / "proposal.json"
+    _write_json(
+        run_level_proposal,
+        {
+            "mechanism_id": "literature_kernel",
+            "hypothesis": "A run-level artifact must not satisfy the selected node workspace contract.",
+            "claims": ["reduces unsupported transfer claims"],
+        },
+    )
+    _set_selected_artifact(project, "proposal", run_level_proposal)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "selected_node_artifact_outside_allowed_roots" in _error_codes(report)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("external", "selected_node_artifact_outside_allowed_roots"),
+        ("directory", "selected_node_artifact_not_file"),
+        ("empty", "empty_selected_node_proposal"),
+    ],
+)
+def test_v3_validation_rejects_selected_node_bad_artifact_paths(
+    tmp_path: Path,
+    case: str,
+    expected_code: str,
+) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    workspace = _selected_workspace(project)
+    if case == "external":
+        artifact_path = tmp_path / "outside_workspace" / "proposal.json"
+        _write_json(
+            artifact_path,
+            {
+                "mechanism_id": "literature_kernel",
+                "hypothesis": "External proposal path must be rejected.",
+                "claims": ["reduces unsupported transfer claims"],
+            },
+        )
+    elif case == "directory":
+        artifact_path = workspace / "proposal_directory"
+        artifact_path.mkdir()
+    else:
+        artifact_path = workspace / "empty_proposal.json"
+        artifact_path.write_text("", encoding="utf-8")
+    _set_selected_artifact(project, "proposal", artifact_path)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert expected_code in _error_codes(report)
 
 
 def test_v3_validation_rejects_selected_architecture_clone(tmp_path: Path) -> None:
@@ -392,6 +747,75 @@ def _build_v3_framework_run(tmp_path: Path) -> Path:
         framework_dir / "mechanism_gap_matrix.csv",
         [{"mechanism_id": "literature_kernel", "gap": "needs sparse early-round stress test"}],
     )
+    _write_json(
+        framework_dir / "operator_specs.json",
+        [
+            {
+                "operator_id": "operator_literature_kernel",
+                "mechanism_id": "literature_kernel",
+                "source_paper_ids": ["paper_active_design"],
+                "evidence_strength": "candidate_from_text",
+                "objective": {
+                    "description": "Stress-testable mechanism acquisition.",
+                    "acquisition_formula": "score = utility + uncertainty - claim_penalty",
+                },
+                "update_rule": {"state_model": "literature_kernel_state"},
+                "candidate_generation": {"description": "Generate stress-testable candidates."},
+                "required_baselines": ["random_feasible", "fixed_mix"],
+                "ablation_hypotheses": [
+                    {
+                        "ablation_id": "remove_literature_kernel",
+                        "removed_component": "literature_kernel",
+                    }
+                ],
+                "negative_controls": [
+                    {
+                        "control_id": "label_permutation",
+                        "expected_result": "advantage collapses",
+                    }
+                ],
+                "implementation_tests": [
+                    {
+                        "test_id": "operator_contract",
+                        "assertion": "operator is traced into code",
+                    }
+                ],
+                "claim_limits": ["computational benchmark only"],
+            }
+        ],
+    )
+    _write_csv(
+        framework_dir / "operator_gap_matrix.csv",
+        [
+            {
+                "operator_id": "operator_literature_kernel",
+                "mechanism_id": "literature_kernel",
+                "missing_source_paper_ids": "false",
+                "claim_limits": "computational benchmark only",
+            }
+        ],
+    )
+    _write_json(
+        framework_dir / "operator_evidence_map.json",
+        {
+            "operators": {
+                "operator_literature_kernel": {
+                    "mechanism_id": "literature_kernel",
+                    "source_paper_ids": ["paper_active_design"],
+                }
+            }
+        },
+    )
+    _write_json(
+        framework_dir / "operator_negative_controls.json",
+        {
+            "negative_controls": {
+                "operator_literature_kernel": [
+                    {"control_id": "label_permutation", "expected_result": "advantage collapses"}
+                ]
+            }
+        },
+    )
 
     _write_json(
         workspace / "mechanism_spec.json",
@@ -410,6 +834,8 @@ def _build_v3_framework_run(tmp_path: Path) -> Path:
             "literature_basis": ["paper_active_design"],
             "stress_test_requirements": ["sparse_early_round"],
             "ablation_targets": ["state_update"],
+            "operator_refs": ["operator_literature_kernel"],
+            "operator_specs": [{"operator_id": "operator_literature_kernel"}],
         },
     )
     (workspace / "mechanism.py").write_text(
@@ -438,11 +864,21 @@ def _build_v3_framework_run(tmp_path: Path) -> Path:
             "mechanism_id": "literature_kernel",
             "hypothesis": "MechanismSpec components can map claims to stress tests.",
             "claims": ["reduces unsupported transfer claims"],
+            "operator_refs": ["operator_literature_kernel"],
         },
     )
     _write_json(
         workspace / "ablation_plan.json",
-        {"ablations": [{"ablation_id": "remove_state_update", "removed_components": ["state_update"]}]},
+        {
+            "ablations": [
+                {
+                    "name": "key_component_removed",
+                    "ablation_id": "remove_state_update",
+                    "removed_components": ["state_update"],
+                    "removed_operator_ids": ["operator_literature_kernel"],
+                }
+            ]
+        },
     )
     _write_json(
         workspace / "stress_test_plan.json",
@@ -474,6 +910,20 @@ def _build_v3_framework_run(tmp_path: Path) -> Path:
         {
             "valid": True,
             "caveats": ["Synthetic replay is not prospective wet-lab evidence."],
+        },
+    )
+    _write_json(
+        workspace / "operator_to_code_trace.json",
+        {
+            "operator_to_code_trace": {
+                "operator_literature_kernel": [
+                    "fit_state.state_update",
+                    "generate_candidates.design_space",
+                    "score_candidates.mechanism_score",
+                    "select_panel.mechanism_score_rank",
+                    "plan_ablations.removed_operator_ids",
+                ]
+            }
         },
     )
 
@@ -643,6 +1093,7 @@ def _build_v3_framework_run(tmp_path: Path) -> Path:
                         "stress_test_plan": str(workspace / "stress_test_plan.json"),
                         "mechanism_metrics": str(workspace / "mechanism_metrics.json"),
                         "validation_report": str(workspace / "validation_report.json"),
+                        "operator_to_code_trace": str(workspace / "operator_to_code_trace.json"),
                     },
                 },
                 {
@@ -665,6 +1116,15 @@ def _selected_workspace(project: Path) -> Path:
     return Path(selected["workspace"])
 
 
+def _set_selected_artifact(project: Path, key: str, path: Path) -> None:
+    journal_path = project / "runs" / "v3_unit" / "scientist_journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    selected_id = journal["selected_node_id"]
+    selected = next(node for node in journal["nodes"] if node["node_id"] == selected_id)
+    selected["artifacts"][key] = str(path)
+    _write_json(journal_path, journal)
+
+
 def _rewrite_summary_row(project: Path, updates: dict[str, str]) -> None:
     summary_path = project / "runs" / "v3_unit" / "mechanism_benchmark_summary.csv"
     rows = _read_csv_rows(summary_path)
@@ -672,6 +1132,56 @@ def _rewrite_summary_row(project: Path, updates: dict[str, str]) -> None:
         if row["mechanism"] == "literature_kernel":
             row.update(updates)
     _write_csv(summary_path, rows)
+
+
+def _write_accepted_claim_gate_artifacts(project: Path) -> None:
+    run_dir = project / "runs" / "v3_unit"
+    _write_json(
+        run_dir / "claim_cap.json",
+        {
+            "verdict": "accept",
+            "claim_cap": "computational_benchmark_only",
+            "allowed_claims": ["algorithmic replay evidence"],
+            "blocked_claims": [],
+        },
+    )
+    _write_json(
+        run_dir / "benchmark_saturation.json",
+        {
+            "verdict": "accept",
+            "saturated": True,
+            "summary": "all_benchmark_worlds_saturated",
+        },
+    )
+    for filename in (
+        "novelty_review.json",
+        "baseline_audit.json",
+        "experiment_review.json",
+        "biology_review.json",
+        "paper_contribution_review.json",
+    ):
+        _write_json(
+            run_dir / filename,
+            {
+                "verdict": "accept",
+                "summary": f"{filename} accepted the bounded claim.",
+            },
+        )
+    _write_reference_manifest(project)
+
+
+def _write_reference_manifest(project: Path) -> Path:
+    run_dir = project / "runs" / "v3_unit"
+    journal = json.loads((run_dir / "scientist_journal.json").read_text(encoding="utf-8"))
+    selected_node = next(
+        node for node in journal["nodes"] if node["node_id"] == journal["selected_node_id"]
+    )
+    return write_reference_data_sources(
+        project,
+        run_dir,
+        run_id="v3_unit",
+        selected_node=selected_node,
+    )
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -705,4 +1215,14 @@ def _error_codes(report: dict[str, object]) -> set[str]:
         finding["code"]
         for finding in findings
         if isinstance(finding, dict) and finding.get("severity") == "error"
+    }
+
+
+def _warning_codes(report: dict[str, object]) -> set[str]:
+    findings = report["findings"]
+    assert isinstance(findings, list)
+    return {
+        finding["code"]
+        for finding in findings
+        if isinstance(finding, dict) and finding.get("severity") == "warning"
     }

@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from design_scientist.io import read_json
+import design_scientist.literature_fulltext as literature_fulltext
 from design_scientist.literature_fulltext import build_literature_corpus
 from design_scientist.literature_pipeline import run_literature_search
 
@@ -205,6 +207,173 @@ def test_default_offline_literature_chain_reads_open_fulltext_fixture(
     assert trace["summary"]["open_fulltext"] >= 1
 
 
+def test_live_pmc_oa_xml_resolves_from_doi_via_idconv_and_caches(tmp_path: Path) -> None:
+    project = _project_with_cards(
+        tmp_path,
+        [
+            {
+                "paper_id": "doi:10.1234/open-pmc",
+                "source": "pubmed",
+                "title": "Open PMC article",
+                "abstract": "Metadata survives around live fulltext.",
+                "doi": "10.1234/open-pmc",
+            }
+        ],
+    )
+
+    def handler(call: dict) -> FakeFulltextResponse:
+        if "idconv" in call["url"]:
+            assert call["params"]["ids"] == "10.1234/open-pmc"
+            return FakeFulltextResponse(
+                call["url"],
+                json_data={"records": [{"doi": "10.1234/open-pmc", "pmcid": "PMC7654321"}]},
+            )
+        if "oai.cgi" in call["url"]:
+            assert call["params"]["identifier"] == "oai:pubmedcentral.nih.gov:7654321"
+            return FakeFulltextResponse(
+                call["url"],
+                text="""<?xml version="1.0" encoding="UTF-8"?>
+<article>
+  <front><article-meta><title-group><article-title>Open PMC article</article-title></title-group></article-meta></front>
+  <body><sec><p>PMC OA body text describes a reusable active design benchmark with enough detail.</p></sec></body>
+</article>
+""",
+            )
+        raise AssertionError(f"unexpected URL: {call['url']}")
+
+    client = FakeFulltextClient(handler)
+
+    build_literature_corpus(project, client=client)
+
+    record = _read_jsonl(project / "framework" / "literature_corpus.jsonl")[0]
+    assert record["fulltext_status"] == "open_fulltext"
+    assert record["text_source"] == "pmc_oa_xml"
+    assert "PMC OA body text describes a reusable active design benchmark" in record["text"]
+    assert record["provenance"]["raw_cache_path"] == "framework/cache/literature_fulltext/pmc_PMC7654321_oa.xml"
+    assert (project / record["provenance"]["raw_cache_path"]).exists()
+    assert [call["url"] for call in client.calls] == [
+        "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/",
+        "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi",
+    ]
+
+
+def test_live_arxiv_pdf_resolves_from_arxiv_id_and_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project_with_cards(
+        tmp_path,
+        [
+            {
+                "paper_id": "arxiv:2401.00001v1",
+                "source": "arxiv",
+                "source_id": "2401.00001v1",
+                "title": "Arxiv active design paper",
+                "abstract": "Metadata abstract for arXiv.",
+                "external_ids": {"arxiv": "2401.00001v1"},
+            }
+        ],
+    )
+
+    client = FakeFulltextClient(
+        lambda call: FakeFulltextResponse(call["url"], content=b"%PDF-1.4 arxiv fixture bytes")
+    )
+    monkeypatch.setattr(
+        literature_fulltext,
+        "_extract_pdf_text",
+        lambda path: "arXiv PDF text discusses batched protein design acquisition.",
+    )
+
+    build_literature_corpus(project, client=client)
+
+    record = _read_jsonl(project / "framework" / "literature_corpus.jsonl")[0]
+    assert record["fulltext_status"] == "open_fulltext"
+    assert record["text_source"] == "arxiv_pdf"
+    assert "arXiv PDF text discusses batched protein design acquisition" in record["text"]
+    assert client.calls[0]["url"] == "https://arxiv.org/pdf/2401.00001v1.pdf"
+    assert (project / "framework/cache/literature_fulltext/arxiv_2401_00001v1_pdf.pdf").read_bytes() == (
+        b"%PDF-1.4 arxiv fixture bytes"
+    )
+
+
+def test_live_biorxiv_doi_landing_finds_pdf_and_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project_with_cards(
+        tmp_path,
+        [
+            {
+                "paper_id": "biorxiv:10.1101/2024.01.01.123456",
+                "source": "biorxiv",
+                "source_id": "10.1101/2024.01.01.123456",
+                "title": "bioRxiv open preprint",
+                "abstract": "Metadata abstract for a preprint.",
+                "doi": "10.1101/2024.01.01.123456",
+                "url": "https://doi.org/10.1101/2024.01.01.123456",
+            }
+        ],
+    )
+
+    def handler(call: dict) -> FakeFulltextResponse:
+        if call["url"] == "https://doi.org/10.1101/2024.01.01.123456":
+            return FakeFulltextResponse(
+                call["url"],
+                text=(
+                    "<html><body><a href=\"https://www.biorxiv.org/content/"
+                    "10.1101/2024.01.01.123456v1.full.pdf\">PDF</a></body></html>"
+                ),
+            )
+        if call["url"] == "https://www.biorxiv.org/content/10.1101/2024.01.01.123456v1.full.pdf":
+            return FakeFulltextResponse(call["url"], content=b"%PDF-1.4 biorxiv fixture bytes")
+        raise AssertionError(f"unexpected URL: {call['url']}")
+
+    client = FakeFulltextClient(handler)
+    monkeypatch.setattr(
+        literature_fulltext,
+        "_extract_pdf_text",
+        lambda path: "bioRxiv PDF full text reports live open preprint methods.",
+    )
+
+    build_literature_corpus(project, client=client)
+
+    record = _read_jsonl(project / "framework" / "literature_corpus.jsonl")[0]
+    assert record["fulltext_status"] == "open_fulltext"
+    assert record["text_source"] == "biorxiv_pdf"
+    assert "bioRxiv PDF full text reports live open preprint methods" in record["text"]
+    assert [call["url"] for call in client.calls] == [
+        "https://doi.org/10.1101/2024.01.01.123456",
+        "https://www.biorxiv.org/content/10.1101/2024.01.01.123456v1.full.pdf",
+    ]
+    assert (project / "framework/cache/literature_fulltext/biorxiv_10_1101_2024_01_01_123456_pdf.pdf").exists()
+
+
+def test_live_resolution_failure_degrades_to_metadata_only_with_trace_reason(tmp_path: Path) -> None:
+    project = _project_with_cards(
+        tmp_path,
+        [
+            {
+                "paper_id": "arxiv:2401.99999v1",
+                "source": "arxiv",
+                "source_id": "2401.99999v1",
+                "title": "Unavailable arXiv paper",
+                "abstract": "Metadata remains when live fulltext is inaccessible.",
+                "external_ids": {"arxiv": "2401.99999v1"},
+            }
+        ],
+    )
+
+    client = FakeFulltextClient(lambda call: FakeFulltextResponse(call["url"], status_code=404))
+
+    build_literature_corpus(project, client=client)
+
+    record = _read_jsonl(project / "framework" / "literature_corpus.jsonl")[0]
+    assert record["fulltext_status"] == "metadata_only"
+    assert record["text_source"] == "metadata"
+    assert "Metadata remains when live fulltext is inaccessible." in record["text"]
+    trace = read_json(project / "framework" / "literature_reading_trace.json")
+    assert trace["papers"][0]["reason"] == "open_fulltext_not_found"
+    assert trace["papers"][0]["error_type"] == "HTTPStatusError"
+
+
 def _project_with_cards(tmp_path: Path, cards: list[dict]) -> Path:
     project = tmp_path / "project"
     framework = project / "framework"
@@ -215,3 +384,43 @@ def _project_with_cards(tmp_path: Path, cards: list[dict]) -> Path:
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+class FakeFulltextResponse:
+    def __init__(
+        self,
+        url: str,
+        *,
+        text: str = "",
+        content: bytes | None = None,
+        json_data: dict | None = None,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.url = url
+        self.text = text
+        self.content = content if content is not None else text.encode("utf-8")
+        self._json_data = json_data if json_data is not None else {}
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    def json(self) -> dict:
+        return self._json_data
+
+    def raise_for_status(self) -> None:
+        if self.status_code < 400:
+            return
+        request = httpx.Request("GET", self.url)
+        response = httpx.Response(self.status_code, request=request)
+        raise httpx.HTTPStatusError(f"{self.status_code} error", request=request, response=response)
+
+
+class FakeFulltextClient:
+    def __init__(self, handler) -> None:
+        self.handler = handler
+        self.calls: list[dict] = []
+
+    def get(self, url: str, *, params: dict | None = None, headers: dict | None = None) -> FakeFulltextResponse:
+        call = {"url": url, "params": params or {}, "headers": headers or {}}
+        self.calls.append(call)
+        return self.handler(call)

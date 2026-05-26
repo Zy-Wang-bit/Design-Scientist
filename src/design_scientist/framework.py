@@ -12,6 +12,7 @@ from design_scientist.artifacts import (
     missing_artifacts,
 )
 from design_scientist.io import ensure_dir, write_yaml
+from design_scientist.literature_pipeline import build_project_literature_context
 from design_scientist.research_os import initialize_research_os
 from design_scientist.schemas import FrameworkSpec, LiteratureQuery
 
@@ -21,9 +22,9 @@ def _framework_id(domain: str) -> str:
     return normalized or "design_scientist_framework"
 
 
-def seed_literature_queries(domain: str) -> list[LiteratureQuery]:
+def seed_literature_queries(domain: str, project_dir: str | Path | None = None) -> list[LiteratureQuery]:
     """Create conservative seed queries for later literature adapters."""
-    return [
+    queries = [
         LiteratureQuery(
             query_id="method_foundations",
             domain=domain,
@@ -39,6 +40,18 @@ def seed_literature_queries(domain: str) -> list[LiteratureQuery]:
             sources=["adapter_pending"],
         ),
     ]
+    if project_dir is not None and (Path(project_dir) / "project.yaml").exists():
+        context = build_project_literature_context(project_dir, fallback_domain=domain)
+        queries.append(
+            LiteratureQuery(
+                query_id="project_context",
+                domain=domain,
+                query=context.query,
+                purpose="derive framework literature search from project objective, endpoints, and allowed evidence hints",
+                sources=["adapter_pending"],
+            )
+        )
+    return queries
 
 
 def init_framework(
@@ -59,7 +72,7 @@ def init_framework(
         artifact_root=str(base),
     )
     write_yaml(base / FRAMEWORK_SPEC, spec)
-    write_yaml(base / LITERATURE_QUERIES, {"queries": seed_literature_queries(domain)})
+    write_yaml(base / LITERATURE_QUERIES, {"queries": seed_literature_queries(domain, project_dir=base)})
     return spec
 
 

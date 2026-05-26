@@ -49,6 +49,11 @@ V3_LITERATURE_READING_TRACE = "framework/literature_reading_trace.json"
 V3_MECHANISM_CARDS = "framework/mechanism_cards.json"
 V3_MECHANISM_LIBRARY = "framework/mechanism_library.json"
 V3_MECHANISM_GAP_MATRIX = "framework/mechanism_gap_matrix.csv"
+V3_OPERATOR_SPECS = "framework/operator_specs.json"
+V3_OPERATOR_GAP_MATRIX = "framework/operator_gap_matrix.csv"
+V3_OPERATOR_EVIDENCE_MAP = "framework/operator_evidence_map.json"
+V3_OPERATOR_NEGATIVE_CONTROLS = "framework/operator_negative_controls.json"
+V3_REFERENCE_DATA_SOURCES = "reference_data_sources.json"
 
 V3_MECHANISM_SPEC = "mechanism_spec.json"
 V3_MECHANISM_IMPLEMENTATION = "mechanism.py"
@@ -57,6 +62,7 @@ V3_ABLATION_PLAN = "ablation_plan.json"
 V3_STRESS_TEST_PLAN = "stress_test_plan.json"
 V3_MECHANISM_METRICS = "mechanism_metrics.json"
 V3_MECHANISM_VALIDATION_REPORT = "validation_report.json"
+V3_OPERATOR_TO_CODE_TRACE = "operator_to_code_trace.json"
 
 V3_FRAMEWORK_ARTIFACTS = (
     *FRAMEWORK_BOOTSTRAP_ARTIFACTS,
@@ -65,6 +71,10 @@ V3_FRAMEWORK_ARTIFACTS = (
     V3_MECHANISM_CARDS,
     V3_MECHANISM_LIBRARY,
     V3_MECHANISM_GAP_MATRIX,
+    V3_OPERATOR_SPECS,
+    V3_OPERATOR_GAP_MATRIX,
+    V3_OPERATOR_EVIDENCE_MAP,
+    V3_OPERATOR_NEGATIVE_CONTROLS,
 )
 
 FRAMEWORK_ARTIFACTS = V3_FRAMEWORK_ARTIFACTS
@@ -77,6 +87,7 @@ V3_MECHANISM_NODE_ARTIFACTS = (
     V3_STRESS_TEST_PLAN,
     V3_MECHANISM_METRICS,
     V3_MECHANISM_VALIDATION_REPORT,
+    V3_OPERATOR_TO_CODE_TRACE,
 )
 
 V3_STAGE_SEQUENCE = (

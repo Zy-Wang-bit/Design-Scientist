@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
+
+
+LITERATURE_SOURCES_ENV = "DESIGN_SCIENTIST_LITERATURE_SOURCES"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,8 +26,16 @@ def build_parser() -> argparse.ArgumentParser:
         "literature-search",
         "read-literature",
         "extract-mechanisms",
+        "compile-operators",
         "run-scientist",
+        "run-algorithm-benchmark",
+        "run-generative-benchmark",
+        "run-project-benchmark",
         "review-framework",
+        "generate-short-paper",
+        "generate-algorithm-paper",
+        "audit-schema",
+        "standardize-startup-data",
         "build-state",
         "literature",
         "hypotheses",
@@ -119,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract_mechanisms.add_argument("root")
 
+    compile_operators = subparsers.add_parser(
+        "compile-operators",
+        help="debug/development: compile operator artifacts from mechanism cards only",
+    )
+    compile_operators.add_argument("root")
+
     run_scientist = subparsers.add_parser(
         "run-scientist", help="recommended full-chain V3 mechanism scientist loop"
     )
@@ -128,11 +147,56 @@ def build_parser() -> argparse.ArgumentParser:
     run_scientist.add_argument("--rounds", type=int, default=3)
     run_scientist.add_argument("--use-codex", action="store_true")
     run_scientist.add_argument("--offline-fixtures", action="store_true")
+    run_scientist.add_argument("--sources", nargs="*")
     run_scientist.add_argument(
         "--allow-degraded-literature",
         action="store_true",
         help="Continue method development when literature search or extraction fails",
     )
+
+    algorithm_benchmark = subparsers.add_parser(
+        "run-algorithm-benchmark",
+        help="Run generic MCCBD algorithm benchmark over controlled mechanism worlds",
+    )
+    algorithm_benchmark.add_argument("root")
+    algorithm_benchmark.add_argument("--run-id", default="mccbd_algorithm")
+    algorithm_benchmark.add_argument("--seeds", nargs="*", type=int)
+    algorithm_benchmark.add_argument("--rounds", type=int, default=3)
+    algorithm_benchmark.add_argument("--budget", type=int, default=6)
+    algorithm_benchmark.add_argument("--mechanisms", nargs="*")
+    algorithm_benchmark.add_argument("--worlds", nargs="*")
+
+    generative_benchmark = subparsers.add_parser(
+        "run-generative-benchmark",
+        help="Run CMD-GD generative sequence-design benchmark",
+    )
+    generative_benchmark.add_argument("root")
+    generative_benchmark.add_argument("--run-id", default="cmdgd_generative")
+    generative_benchmark.add_argument("--seeds", nargs="*", type=int)
+    generative_benchmark.add_argument("--budget", type=int, default=5)
+    generative_benchmark.add_argument("--generation-budget", type=int, default=32)
+    generative_benchmark.add_argument("--mechanisms", nargs="*")
+    generative_benchmark.add_argument("--worlds", nargs="*")
+
+    project_benchmark = subparsers.add_parser(
+        "run-project-benchmark",
+        help="Run real project-data retrospective masking benchmark",
+    )
+    project_benchmark.add_argument("root")
+    project_benchmark.add_argument("--run-id", default="project_masking")
+    project_benchmark.add_argument("--budget", type=int, default=4)
+    project_benchmark.add_argument("--folds", default="kfold_5")
+    project_benchmark.add_argument("--mechanisms", nargs="*")
+
+    project_cmdgd_design = subparsers.add_parser(
+        "run-project-cmdgd-design",
+        help="Run prospective CMD-GD candidate generation from visible project data",
+    )
+    project_cmdgd_design.add_argument("root")
+    project_cmdgd_design.add_argument("--run-id", default="cmdgd_project_design")
+    project_cmdgd_design.add_argument("--budget", type=int, default=5)
+    project_cmdgd_design.add_argument("--generation-budget", type=int, default=160)
+    project_cmdgd_design.add_argument("--seed", type=int, default=1729)
 
     review_framework = subparsers.add_parser(
         "review-framework", help="Validate framework run artifacts"
@@ -140,6 +204,32 @@ def build_parser() -> argparse.ArgumentParser:
     review_framework.add_argument("root")
     review_framework.add_argument("--run-id")
     review_framework.add_argument("--json", action="store_true")
+
+    short_paper = subparsers.add_parser(
+        "generate-short-paper",
+        help="Generate a conservative short-paper bundle from framework V3 artifacts",
+    )
+    short_paper.add_argument("root")
+    short_paper.add_argument("--run-id")
+
+    algorithm_paper = subparsers.add_parser(
+        "generate-algorithm-paper",
+        help="Generate a manuscript centered on a project masking algorithm run",
+    )
+    algorithm_paper.add_argument("root")
+    algorithm_paper.add_argument("--run-id", required=True)
+    algorithm_paper.add_argument("--algorithm", default="evidence_calibrated_ucb")
+
+    audit_schema = subparsers.add_parser(
+        "audit-schema", help="Audit raw startup data declared by data_contract.allowed_sources"
+    )
+    audit_schema.add_argument("project_dir")
+
+    standardize_startup = subparsers.add_parser(
+        "standardize-startup-data",
+        help="Standardize raw startup data into generic project context artifacts",
+    )
+    standardize_startup.add_argument("project_dir")
 
     build_state = subparsers.add_parser("build-state", help="Build project design state")
     build_state.add_argument("project_dir")
@@ -290,20 +380,47 @@ def main(argv: list[str] | None = None) -> int:
         if result is not None:
             print(f"Extracted mechanisms: {result}")
         return 0
+    if args.command == "compile-operators":
+        from design_scientist.operator_specs import write_operator_spec_artifacts
+
+        root = Path(args.root).expanduser().resolve()
+        framework_dir = root / "framework"
+        cards_path = framework_dir / "mechanism_cards.json"
+        if not cards_path.is_file():
+            parser.error(
+                "compile-operators requires framework/mechanism_cards.json; "
+                "run extract-mechanisms first"
+            )
+        try:
+            mechanism_cards = json.loads(cards_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            parser.error(f"framework/mechanism_cards.json is invalid JSON: {exc.msg}")
+        if not isinstance(mechanism_cards, list) or not all(
+            isinstance(card, dict) for card in mechanism_cards
+        ):
+            parser.error("framework/mechanism_cards.json must contain a JSON list of objects")
+
+        paths = write_operator_spec_artifacts(framework_dir, mechanism_cards)
+        print(f"Wrote operator specs: {paths['operator_specs']}")
+        print(f"Wrote operator gap matrix: {paths['operator_gap_matrix']}")
+        print(f"Wrote operator evidence map: {paths['operator_evidence_map']}")
+        print(f"Wrote operator negative controls: {paths['operator_negative_controls']}")
+        return 0
     if args.command == "run-scientist":
         from design_scientist.method_report import write_method_report
 
         from design_scientist.scientist_search_v3 import run_scientist_v3
 
-        result = run_scientist_v3(
-            args.root,
-            max_papers=args.max_papers,
-            nodes=args.nodes,
-            rounds=args.rounds,
-            use_codex=args.use_codex,
-            offline_fixtures=args.offline_fixtures,
-            strict_literature=not args.allow_degraded_literature,
-        )
+        with _scoped_literature_sources(args.sources):
+            result = run_scientist_v3(
+                args.root,
+                max_papers=args.max_papers,
+                nodes=args.nodes,
+                rounds=args.rounds,
+                use_codex=args.use_codex,
+                offline_fixtures=args.offline_fixtures,
+                strict_literature=not args.allow_degraded_literature,
+            )
         _normalize_v3_cli_mechanism_metrics(result)
         report_path = write_method_report(args.root, run_id=result["run_id"])
         print(f"Wrote scientist journal: {result['journal_path']}")
@@ -312,9 +429,96 @@ def main(argv: list[str] | None = None) -> int:
             print("No valid selected mechanism node was produced.")
             return 1
         return 0
-    if args.command == "review-framework":
-        import json
+    if args.command == "run-algorithm-benchmark":
+        from design_scientist.algorithm_benchmark import run_mccbd_benchmark
 
+        try:
+            result = run_mccbd_benchmark(
+                args.root,
+                run_id=args.run_id,
+                seeds=args.seeds if args.seeds is not None else range(10),
+                rounds=args.rounds,
+                budget=args.budget,
+                mechanisms=args.mechanisms,
+                worlds=args.worlds,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(f"Wrote MCCBD benchmark: {result['benchmark_results_path']}")
+        print(f"Wrote MCCBD summary: {result['summary_results_path']}")
+        print(f"Wrote MCCBD ablations: {result['ablation_results_path']}")
+        print(
+            "MCCBD benchmark gate: "
+            f"selected={result['selected_mechanism']} "
+            f"passes={result['selected_passes_gate']}"
+        )
+        return 0 if result.get("status") == "completed" else 1
+    if args.command == "run-generative-benchmark":
+        from design_scientist.generative_benchmark import run_generative_benchmark
+
+        try:
+            result = run_generative_benchmark(
+                args.root,
+                run_id=args.run_id,
+                seeds=args.seeds if args.seeds is not None else range(10),
+                budget=args.budget,
+                generation_budget=args.generation_budget,
+                mechanisms=args.mechanisms,
+                worlds=args.worlds,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(f"Wrote generative benchmark: {result['benchmark_results_path']}")
+        print(f"Wrote generative summary: {result['summary_results_path']}")
+        print(f"Wrote generative ablations: {result['ablation_results_path']}")
+        print(f"Wrote generative design examples: {result['design_examples_path']}")
+        print(
+            "Generative benchmark gate: "
+            f"selected={result['selected_mechanism']} "
+            f"passes={result['selected_passes_gate']}"
+        )
+        return 0 if result.get("status") == "completed" else 1
+    if args.command == "run-project-benchmark":
+        from design_scientist.project_replay import run_project_masking_benchmark
+
+        try:
+            result = run_project_masking_benchmark(
+                args.root,
+                run_id=args.run_id,
+                budget=args.budget,
+                folds=args.folds,
+                mechanisms=args.mechanisms,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if result.get("status") != "completed":
+            print(f"Project masking benchmark unavailable: {result.get('error', 'unknown error')}")
+            return 1
+        print(f"Wrote project masking benchmark: {result['benchmark_results_path']}")
+        print(f"Wrote project masking summary: {result['summary_results_path']}")
+        print(f"Wrote project masking ablation: {result['ablation_results_path']}")
+        print(f"Wrote project masking config: {result['config_path']}")
+        return 0
+    if args.command == "run-project-cmdgd-design":
+        from design_scientist.project_replay import run_project_cmdgd_design
+
+        try:
+            result = run_project_cmdgd_design(
+                args.root,
+                run_id=args.run_id,
+                budget=args.budget,
+                generation_budget=args.generation_budget,
+                seed=args.seed,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if result.get("status") != "completed":
+            print(f"Project CMD-GD design unavailable: {result.get('error', 'unknown error')}")
+            return 1
+        print(f"Wrote CMD-GD project candidates: {result['generated_candidates_path']}")
+        print(f"Wrote CMD-GD project summary: {result['design_summary_path']}")
+        return 0
+    if args.command == "review-framework":
         from design_scientist.framework_validation import review_framework_run
 
         try:
@@ -333,6 +537,71 @@ def main(argv: list[str] | None = None) -> int:
                 artifact = f" [{finding['artifact']}]" if finding.get("artifact") else ""
                 print(f"{finding['severity'].upper()} {finding['code']}: {finding['message']}{artifact}")
         return 0 if report["valid"] else 1
+    if args.command == "generate-short-paper":
+        from design_scientist.manuscript import generate_short_paper
+
+        try:
+            result = generate_short_paper(args.root, run_id=args.run_id)
+        except (FileNotFoundError, ValueError) as exc:
+            parser.error(str(exc))
+        readiness = result["readiness"]
+        summary = readiness["summary"]
+        print(f"Wrote short paper: {result['artifacts']['short_paper.md']}")
+        print(f"Wrote paper readiness report: {result['artifacts']['paper_readiness_report.json']}")
+        print(
+            f"Paper readiness {readiness['status']}: "
+            f"{summary['errors']} errors, {summary['warnings']} warnings"
+        )
+        return 0 if readiness["valid"] else 1
+    if args.command == "generate-algorithm-paper":
+        from design_scientist.manuscript import generate_algorithm_manuscript
+
+        try:
+            result = generate_algorithm_manuscript(
+                args.root,
+                run_id=args.run_id,
+                algorithm=args.algorithm,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            parser.error(str(exc))
+        readiness = result["readiness"]
+        summary = readiness["summary"]
+        print(f"Wrote algorithm manuscript: {result['artifacts']['manuscript.md']}")
+        print(f"Wrote paper readiness report: {result['artifacts']['paper_readiness_report.json']}")
+        print(
+            f"Paper readiness {readiness['status']}: "
+            f"{summary['errors']} errors, {summary['warnings']} warnings"
+        )
+        return 0 if readiness["valid"] else 1
+    if args.command == "audit-schema":
+        from design_scientist.startup_standardization import audit_schema
+
+        try:
+            report = audit_schema(args.project_dir)
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(
+            "Schema audit "
+            f"{report['status']}: {report['source_count']} sources, "
+            f"{len(report['diagnostics'])} diagnostics"
+        )
+        print(f"Wrote schema audit: {Path(args.project_dir).resolve() / 'standardized' / 'schema_audit_report.json'}")
+        return 0 if report["status"] == "ok" else 1
+    if args.command == "standardize-startup-data":
+        from design_scientist.startup_standardization import standardize_startup_data
+
+        try:
+            result = standardize_startup_data(args.project_dir)
+        except ValueError as exc:
+            parser.error(str(exc))
+        summary = result["summary"]
+        print(
+            "Startup standardization "
+            f"{result['status']}: {summary['sources']} sources, "
+            f"{summary['observations']} observations, {summary['sequences']} sequences"
+        )
+        print(f"Wrote project context: {result['artifacts']['project_context']}")
+        return 0 if result["status"] == "ok" else 1
     if args.command == "build-state":
         from design_scientist.state import build_state
 
@@ -427,6 +696,26 @@ def _normalize_v3_cli_mechanism_metrics(result: dict[str, object]) -> None:
 
     if changed:
         metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+
+
+@contextmanager
+def _scoped_literature_sources(sources: list[str] | None):
+    if sources is None:
+        yield
+        return
+
+    previous = os.environ.get(LITERATURE_SOURCES_ENV)
+    if sources:
+        os.environ[LITERATURE_SOURCES_ENV] = ",".join(sources)
+    else:
+        os.environ.pop(LITERATURE_SOURCES_ENV, None)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(LITERATURE_SOURCES_ENV, None)
+        else:
+            os.environ[LITERATURE_SOURCES_ENV] = previous
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from design_scientist import artifacts as artifact_constants
 from design_scientist.io import read_json, read_yaml
 from design_scientist.mechanism_nodes import validate_mechanism_node
 from design_scientist.method_extraction import REQUIRED_POLICY_NAMES
+from design_scientist.reference_manifest import expected_reference_sources
 from design_scientist.scientist_search_v3 import SCIENTIST_V3_STAGES
 
 
@@ -71,6 +72,10 @@ V3_CRITICAL_FRAMEWORK_ARTIFACTS: dict[str, str] = {
     "mechanism_cards": artifact_constants.V3_MECHANISM_CARDS,
     "mechanism_library": artifact_constants.V3_MECHANISM_LIBRARY,
     "mechanism_gap_matrix": artifact_constants.V3_MECHANISM_GAP_MATRIX,
+    "operator_specs": artifact_constants.V3_OPERATOR_SPECS,
+    "operator_gap_matrix": artifact_constants.V3_OPERATOR_GAP_MATRIX,
+    "operator_evidence_map": artifact_constants.V3_OPERATOR_EVIDENCE_MAP,
+    "operator_negative_controls": artifact_constants.V3_OPERATOR_NEGATIVE_CONTROLS,
     "quest": RESEARCH_OS_ARTIFACTS["quest"],
     "research_map": RESEARCH_OS_ARTIFACTS["research_map"],
     "findings_memory": RESEARCH_OS_ARTIFACTS["findings_memory"],
@@ -84,8 +89,24 @@ V3_CRITICAL_RUN_ARTIFACTS: dict[str, str] = {
     "mechanism_benchmark_results": "mechanism_benchmark_results.csv",
     "mechanism_benchmark_summary": "mechanism_benchmark_summary.csv",
     "mechanism_ablation_results": "mechanism_ablation_results.csv",
+    "reference_data_sources": artifact_constants.V3_REFERENCE_DATA_SOURCES,
     "method_report": "method_report.md",
 }
+
+V3_CLAIM_GATE_ARTIFACTS: dict[str, str] = {
+    "claim_cap": "claim_cap.json",
+    "benchmark_saturation": "benchmark_saturation.json",
+}
+
+V3_REVIEWER_ARTIFACTS: dict[str, str] = {
+    "novelty_review": "novelty_review.json",
+    "baseline_audit": "baseline_audit.json",
+    "experiment_review": "experiment_review.json",
+    "biology_review": "biology_review.json",
+    "paper_contribution_review": "paper_contribution_review.json",
+}
+
+V3_PAPER_READINESS_ARTIFACT = "paper/paper_readiness_report.json"
 
 OPTIONAL_RUN_ARTIFACTS: dict[str, str] = {
     "benchmark_summary": "benchmark_summary.csv",
@@ -118,6 +139,147 @@ SIMPLE_BASELINE_METHODS = {
 REQUIRED_BENCHMARK_BASELINES = ("random_feasible", "fixed_mix")
 FALSE_CLAIM_RATE_TOLERANCE = 1e-9
 BASELINE_OVERLAP_ERROR_THRESHOLD = 0.85
+V3_STRONG_CLAIM_PATTERNS: dict[str, tuple[str, ...]] = {
+    "algorithm_superiority": (
+        "algorithm superiority",
+        "algorithmic superiority",
+        "algorithm superior",
+        "superior algorithm",
+        "outperform baselines",
+        "outperforms baselines",
+        "outperforming baselines",
+    ),
+    "generative_superiority": (
+        "generative superiority",
+        "generator superiority",
+        "generation superiority",
+        "generative model superiority",
+    ),
+    "prospective_biological_validation": (
+        "prospective biological validation",
+        "prospective biologic validation",
+        "prospective wet lab validation",
+        "prospective wet-lab validation",
+        "prospective experimental validation",
+        "prospective wet lab evidence",
+        "prospective wet-lab evidence",
+    ),
+}
+
+BASELINE_AUDIT_FALSE_FAIRNESS_KEYS: dict[str, str] = {
+    "fair": "overall",
+    "baseline_fair": "overall",
+    "fair_baseline": "overall",
+    "fair_comparison": "overall",
+    "same_budget": "budget",
+    "equal_budget": "budget",
+    "budget_equal": "budget",
+    "budget_parity": "budget",
+    "budget_matched": "budget",
+    "budget_match": "budget",
+    "matched_budget": "budget",
+    "same_rounds": "rounds",
+    "same_round_count": "rounds",
+    "equal_rounds": "rounds",
+    "rounds_equal": "rounds",
+    "rounds_parity": "rounds",
+    "round_count_match": "rounds",
+    "same_candidate_pool": "candidate_pool",
+    "same_pool": "candidate_pool",
+    "candidate_pool_equal": "candidate_pool",
+    "candidate_pool_parity": "candidate_pool",
+    "candidate_pool_match": "candidate_pool",
+    "no_oracle_features": "oracle_feature",
+    "no_oracle_feature": "oracle_feature",
+    "no_oracle_access": "oracle_feature",
+    "oracle_features_absent": "oracle_feature",
+    "oracle_feature_parity": "oracle_feature",
+    "oracle_free": "oracle_feature",
+    "same_baseline_inputs": "baseline_inputs",
+    "same_inputs": "baseline_inputs",
+    "baseline_inputs_match": "baseline_inputs",
+    "baseline_input_match": "baseline_inputs",
+    "input_parity": "baseline_inputs",
+    "input_consistency": "baseline_inputs",
+}
+
+BASELINE_AUDIT_TRUE_UNFAIR_KEYS: dict[str, str] = {
+    "method_more_budget": "budget",
+    "method_uses_more_budget": "budget",
+    "method_budget_exceeds_baseline": "budget",
+    "more_budget_for_method": "budget",
+    "budget_advantage": "budget",
+    "unfair_budget": "budget",
+    "method_more_rounds": "rounds",
+    "method_uses_more_rounds": "rounds",
+    "method_rounds_exceed_baseline": "rounds",
+    "more_rounds_for_method": "rounds",
+    "rounds_advantage": "rounds",
+    "method_larger_candidate_pool": "candidate_pool",
+    "method_uses_larger_candidate_pool": "candidate_pool",
+    "larger_candidate_pool_for_method": "candidate_pool",
+    "candidate_pool_advantage": "candidate_pool",
+    "unfair_candidate_pool": "candidate_pool",
+    "uses_oracle_features": "oracle_feature",
+    "used_oracle_features": "oracle_feature",
+    "method_uses_oracle_features": "oracle_feature",
+    "oracle_feature_leakage": "oracle_feature",
+    "oracle_leakage": "oracle_feature",
+    "oracle_access": "oracle_feature",
+    "baseline_oracle_mismatch": "oracle_feature",
+    "baseline_inputs_inconsistent": "baseline_inputs",
+    "baseline_input_mismatch": "baseline_inputs",
+    "input_mismatch": "baseline_inputs",
+    "unequal_baseline_inputs": "baseline_inputs",
+    "inconsistent_baseline_inputs": "baseline_inputs",
+}
+
+BIOLOGY_OVERCLAIM_SOURCE_PATTERNS = (
+    "synthetic replay",
+    "retrospective masking",
+    "computational result",
+    "computational results",
+    "computational benchmark",
+    "computational evidence",
+    "in silico",
+)
+
+BIOLOGY_OVERCLAIM_TARGET_PATTERNS = (
+    "wet lab",
+    "wet-lab",
+    "prospective",
+    "prospective validation",
+    "biological mechanism confirmed",
+    "biological mechanism validated",
+    "mechanism confirmed",
+    "mechanism validated",
+    "mechanism proven",
+    "biological validation",
+    "experimentally validated",
+)
+
+BIOLOGY_OVERCLAIM_TRUE_KEYS = {
+    "biology_overclaim",
+    "wet_lab_overclaim",
+    "prospective_overclaim",
+    "mechanism_confirmation_overclaim",
+    "synthetic_replay_claimed_as_wet_lab",
+    "synthetic_replay_written_as_wet_lab",
+    "retrospective_masking_claimed_as_prospective",
+    "computational_result_claimed_as_wet_lab",
+    "computational_result_claimed_as_biological_mechanism_confirmed",
+}
+
+PAPER_READINESS_FAILURE_STATUSES = {
+    "fail",
+    "failed",
+    "failure",
+    "invalid",
+    "reject",
+    "rejected",
+    "not_ready",
+    "not ready",
+}
 
 ALGORITHM_REQUIRED_SECTIONS = (
     "## Design Space",
@@ -157,6 +319,7 @@ V3_METHOD_REPORT_REQUIRED_SECTIONS = (
     "## Baseline Comparison",
     "## Ablation",
     "## Selected Mechanism",
+    "## Claim Gate",
     "## Failed Nodes",
     "## Unsupported Claims and Validation Caveats",
     "## Artifact Paths",
@@ -338,6 +501,9 @@ def _review_framework_run_v3(
     method_report_text = _load_text(method_report_path, "method_report", findings)
     if method_report_text is not None:
         _validate_v3_method_report(method_report_text, _rel(method_report_path, root), findings)
+
+    _validate_v3_claim_gate_artifacts(root, run_dir, findings, artifacts)
+    _validate_v3_reference_data_sources(root, run_dir, selected_record, findings, artifacts)
 
     return _build_report(root, selected_run_id, run_dir, findings, artifacts)
 
@@ -751,6 +917,155 @@ def _validate_v3_literature_engine_artifacts(
                 "mechanism_gap_matrix_missing_mechanism_id",
                 "mechanism_gap_matrix.csv must contain mechanism_id.",
                 _rel(gap_path, root),
+            )
+
+    _validate_v3_operator_artifacts(root, findings, artifacts)
+
+
+def _validate_v3_operator_artifacts(
+    root: Path,
+    findings: list[dict[str, Any]],
+    artifacts: dict[str, str],
+) -> None:
+    specs_path = _require_file(
+        root,
+        V3_CRITICAL_FRAMEWORK_ARTIFACTS["operator_specs"],
+        "missing_operator_specs",
+        findings,
+        artifacts,
+    )
+    specs = _load_json(specs_path, "operator_specs", findings)
+    operator_ids: set[str] = set()
+    if isinstance(specs, list):
+        if not specs:
+            _add_finding(
+                findings,
+                "error",
+                "operator_specs_empty",
+                "operator_specs.json must contain at least one AlgorithmOperatorSpec.",
+                _rel(specs_path, root),
+            )
+        for index, spec in enumerate(specs):
+            if not isinstance(spec, dict):
+                _add_finding(
+                    findings,
+                    "error",
+                    "operator_spec_invalid",
+                    f"Operator spec {index} must be a JSON object.",
+                    _rel(specs_path, root),
+                )
+                continue
+            operator_id = spec.get("operator_id")
+            if not _has_text(operator_id):
+                _add_finding(
+                    findings,
+                    "error",
+                    "operator_spec_missing_id",
+                    f"Operator spec {index} is missing operator_id.",
+                    _rel(specs_path, root),
+                )
+            else:
+                operator_ids.add(str(operator_id))
+            for field in (
+                "objective",
+                "update_rule",
+                "required_baselines",
+                "ablation_hypotheses",
+                "negative_controls",
+                "implementation_tests",
+                "claim_limits",
+            ):
+                if spec.get(field) in (None, "", [], {}):
+                    _add_finding(
+                        findings,
+                        "error",
+                        "operator_spec_missing_required_fields",
+                        f"Operator spec {operator_id or index!r} is missing {field}.",
+                        _rel(specs_path, root),
+                    )
+    elif specs is not None:
+        _add_finding(
+            findings,
+            "error",
+            "operator_specs_invalid",
+            "operator_specs.json must be a JSON list.",
+            _rel(specs_path, root),
+        )
+
+    gap_path = _require_file(
+        root,
+        V3_CRITICAL_FRAMEWORK_ARTIFACTS["operator_gap_matrix"],
+        "missing_operator_gap_matrix",
+        findings,
+        artifacts,
+    )
+    gap_rows = _load_csv(gap_path, "operator_gap_matrix", findings)
+    if gap_rows is not None:
+        if not gap_rows:
+            _add_finding(
+                findings,
+                "error",
+                "operator_gap_matrix_empty",
+                "operator_gap_matrix.csv must contain at least one operator gap row.",
+                _rel(gap_path, root),
+            )
+        elif "operator_id" not in gap_rows[0]:
+            _add_finding(
+                findings,
+                "error",
+                "operator_gap_matrix_missing_operator_id",
+                "operator_gap_matrix.csv must contain operator_id.",
+                _rel(gap_path, root),
+            )
+
+    evidence_path = _require_file(
+        root,
+        V3_CRITICAL_FRAMEWORK_ARTIFACTS["operator_evidence_map"],
+        "missing_operator_evidence_map",
+        findings,
+        artifacts,
+    )
+    evidence_map = _load_json(evidence_path, "operator_evidence_map", findings)
+    if isinstance(evidence_map, dict):
+        operators = evidence_map.get("operators")
+        if not isinstance(operators, dict) or not operators:
+            _add_finding(
+                findings,
+                "error",
+                "operator_evidence_map_empty",
+                "operator_evidence_map.json must contain a non-empty operators mapping.",
+                _rel(evidence_path, root),
+            )
+        elif operator_ids:
+            missing = sorted(operator_id for operator_id in operator_ids if operator_id not in operators)
+            if missing:
+                _add_finding(
+                    findings,
+                    "warning",
+                    "operator_evidence_map_missing_specs",
+                    "operator_evidence_map.json does not cover operator ids: "
+                    + ", ".join(missing[:8])
+                    + ".",
+                    _rel(evidence_path, root),
+                )
+
+    controls_path = _require_file(
+        root,
+        V3_CRITICAL_FRAMEWORK_ARTIFACTS["operator_negative_controls"],
+        "missing_operator_negative_controls",
+        findings,
+        artifacts,
+    )
+    controls = _load_json(controls_path, "operator_negative_controls", findings)
+    if isinstance(controls, dict):
+        negative_controls = controls.get("negative_controls")
+        if not isinstance(negative_controls, dict) or not negative_controls:
+            _add_finding(
+                findings,
+                "error",
+                "operator_negative_controls_empty",
+                "operator_negative_controls.json must contain a non-empty negative_controls mapping.",
+                _rel(controls_path, root),
             )
 
 
@@ -1865,7 +2180,7 @@ def _validate_v3_selected_node_artifacts(
 
     workspace_value = selected_record.get("workspace")
     workspace = _coerce_path(root, workspace_value) if workspace_value else None
-    allowed_roots = _selected_artifact_allowed_roots(workspace, run_dir)
+    allowed_roots = _selected_v3_artifact_allowed_roots(workspace)
     artifact_map = selected_record.get("artifacts") if isinstance(selected_record.get("artifacts"), dict) else {}
     loaded_json: dict[str, Any] = {}
     json_artifacts: dict[str, str] = {}
@@ -1900,13 +2215,20 @@ def _validate_v3_selected_node_artifacts(
                     _rel(path, root),
                 )
 
-    _validate_v3_selected_node_workspace_contract(root, workspace, selected_record, findings)
+    _validate_v3_selected_node_workspace_contract(root, run_dir, workspace, selected_record, findings)
     _validate_v3_selected_node_semantic_artifacts(loaded_json, json_artifacts, selected_record, findings)
     return loaded_json
 
 
+def _selected_v3_artifact_allowed_roots(workspace: Path | None) -> tuple[Path, ...]:
+    if workspace is None:
+        return ()
+    return (_safe_resolve(workspace),)
+
+
 def _validate_v3_selected_node_workspace_contract(
     root: Path,
+    run_dir: Path,
     workspace: Path | None,
     selected_record: dict[str, Any],
     findings: list[dict[str, Any]],
@@ -1928,6 +2250,16 @@ def _validate_v3_selected_node_workspace_contract(
             "error",
             "selected_node_workspace_missing",
             f"Selected V3 node {selected_node_id!r} workspace does not exist.",
+            artifact,
+        )
+        return
+
+    if not _is_under_any(workspace, (_safe_resolve(run_dir),)):
+        _add_finding(
+            findings,
+            "error",
+            "selected_node_workspace_outside_run_dir",
+            f"Selected V3 node {selected_node_id!r} workspace must be under the run directory.",
             artifact,
         )
         return
@@ -3330,6 +3662,653 @@ def _validate_v3_route_tree(
             "route_tree.json does not match the V3 run contract: " + "; ".join(problems) + ".",
             artifact,
         )
+
+
+def _validate_v3_claim_gate_artifacts(
+    root: Path,
+    run_dir: Path,
+    findings: list[dict[str, Any]],
+    artifacts: dict[str, str],
+) -> None:
+    paper_ready = _v3_paper_ready_for_claim_gate(root, run_dir, findings, artifacts)
+    missing_severity = "error" if paper_ready else "warning"
+    claim_gate_payloads: dict[str, dict[str, Any]] = {}
+
+    for key, rel in V3_CLAIM_GATE_ARTIFACTS.items():
+        path = run_dir / rel
+        artifacts[key] = str(path)
+        if not path.exists():
+            _add_finding(
+                findings,
+                missing_severity,
+                f"missing_{key}",
+                (
+                    f"Missing V3 claim gate artifact {rel}; paper-ready outputs require it."
+                    if paper_ready
+                    else f"Missing V3 claim gate artifact {rel}; method claims should stay provisional."
+                ),
+                _rel(path, root),
+            )
+            continue
+        data = _load_json(path, key, findings)
+        if not isinstance(data, dict):
+            _add_finding(
+                findings,
+                "error",
+                f"invalid_{key}",
+                f"{rel} must be a JSON object.",
+                _rel(path, root),
+            )
+            continue
+        claim_gate_payloads[key] = data
+        verdict = _normalized_verdict(data.get("verdict"))
+        if verdict == "reject":
+            _add_finding(
+                findings,
+                "error",
+                f"{key}_rejected",
+                f"{rel} rejected the selected method claim gate.",
+                _rel(path, root),
+            )
+        if key == "claim_cap":
+            if not _has_text(data.get("claim_cap")):
+                _add_finding(
+                    findings,
+                    "error",
+                    "claim_cap_missing_cap",
+                    "claim_cap.json must define the maximum permitted claim level.",
+                    _rel(path, root),
+                )
+        elif key == "benchmark_saturation":
+            if data.get("saturated") is not True:
+                _add_finding(
+                    findings,
+                    "error",
+                    "benchmark_saturation_not_met",
+                    "benchmark_saturation.json must record saturated: true before algorithm superiority claims are allowed.",
+                    _rel(path, root),
+                )
+
+    _validate_v3_claim_cap_saturation_consistency(
+        root,
+        run_dir,
+        claim_gate_payloads.get("claim_cap"),
+        claim_gate_payloads.get("benchmark_saturation"),
+        findings,
+    )
+
+    for key, rel in V3_REVIEWER_ARTIFACTS.items():
+        path = run_dir / rel
+        artifacts[key] = str(path)
+        if not path.exists():
+            _add_finding(
+                findings,
+                missing_severity,
+                f"missing_{key}",
+                (
+                    f"Missing V3 reviewer verdict {rel}; paper-ready outputs require independent review."
+                    if paper_ready
+                    else f"Missing V3 reviewer verdict {rel}; review gate has not been completed."
+                ),
+                _rel(path, root),
+            )
+            continue
+        data = _load_json(path, key, findings)
+        if not isinstance(data, dict):
+            _add_finding(
+                findings,
+                "error",
+                f"invalid_{key}",
+                f"{rel} must be a JSON object.",
+                _rel(path, root),
+            )
+            continue
+        verdict = _normalized_verdict(data.get("verdict"))
+        if verdict == "reject":
+            reasons = data.get("reasons")
+            reason_text = "; ".join(str(reason) for reason in reasons) if isinstance(reasons, list) else str(data.get("summary") or "")
+            _add_finding(
+                findings,
+                "error",
+                "reviewer_verdict_rejected",
+                f"{rel} rejected the method or paper claim. {reason_text}".strip(),
+                _rel(path, root),
+            )
+        elif verdict not in {"accept", "accepted", "pass", "passed"}:
+            _add_finding(
+                findings,
+                "warning",
+                "reviewer_verdict_not_accept",
+                f"{rel} does not contain an accepted reviewer verdict.",
+                _rel(path, root),
+            )
+        if key == "baseline_audit":
+            _validate_v3_baseline_audit(data, _rel(path, root), findings)
+        elif key == "biology_review":
+            _validate_v3_biology_overclaim_artifact(data, _rel(path, root), findings)
+
+
+def _validate_v3_reference_data_sources(
+    root: Path,
+    run_dir: Path,
+    selected_record: dict[str, Any] | None,
+    findings: list[dict[str, Any]],
+    artifacts: dict[str, str],
+) -> None:
+    path = run_dir / V3_CRITICAL_RUN_ARTIFACTS["reference_data_sources"]
+    artifacts["reference_data_sources"] = str(path)
+    if not path.exists():
+        severity = _reference_manifest_missing_severity(run_dir)
+        _add_finding(
+            findings,
+            severity,
+            "missing_reference_data_sources",
+            (
+                "Missing reference_data_sources.json; paper-ready outputs require a run-level "
+                "source manifest."
+                if severity == "error"
+                else "Missing reference_data_sources.json; source manifest has not been completed."
+            ),
+            _rel(path, root),
+        )
+        return
+    if path.is_file() and path.stat().st_size == 0:
+        _add_finding(
+            findings,
+            "error",
+            "empty_reference_data_sources",
+            "reference_data_sources.json must not be empty.",
+            _rel(path, root),
+        )
+        return
+    manifest = _load_json(path, "reference_data_sources", findings)
+    artifact = _rel(path, root)
+    if not isinstance(manifest, dict):
+        _add_finding(
+            findings,
+            "error",
+            "invalid_reference_data_sources",
+            "reference_data_sources.json must be a JSON object.",
+            artifact,
+        )
+        return
+    if manifest.get("schema_version") != 1:
+        _add_finding(
+            findings,
+            "error",
+            "reference_data_sources_schema_version",
+            "reference_data_sources.json must declare schema_version: 1.",
+            artifact,
+        )
+    if manifest.get("run_id") != run_dir.name:
+        _add_finding(
+            findings,
+            "error",
+            "reference_data_sources_run_id_mismatch",
+            "reference_data_sources.json run_id must match the run directory.",
+            artifact,
+        )
+    selected_node_id = selected_record.get("node_id") if isinstance(selected_record, dict) else None
+    if manifest.get("selected_node_id") != selected_node_id:
+        _add_finding(
+            findings,
+            "error",
+            "reference_data_sources_selected_node_mismatch",
+            "reference_data_sources.json selected_node_id must match scientist_journal.json.",
+            artifact,
+        )
+
+    framework_sources = manifest.get("framework_sources")
+    required_groups = {"literature", "operators", "node", "benchmark", "review"}
+    if not isinstance(framework_sources, dict):
+        _add_finding(
+            findings,
+            "error",
+            "reference_data_sources_missing_groups",
+            "reference_data_sources.json must contain framework_sources groups.",
+            artifact,
+        )
+    else:
+        missing_groups = sorted(required_groups - set(framework_sources))
+        if missing_groups:
+            _add_finding(
+                findings,
+                "error",
+                "reference_data_sources_missing_groups",
+                "reference_data_sources.json missing framework_sources groups: "
+                + ", ".join(missing_groups),
+                artifact,
+            )
+        for group, sources in framework_sources.items():
+            if group not in required_groups:
+                continue
+            if not isinstance(sources, list):
+                _add_finding(
+                    findings,
+                    "error",
+                    "reference_data_sources_group_invalid",
+                    f"framework_sources.{group} must be a list.",
+                    artifact,
+                )
+            elif group != "node" and not sources:
+                _add_finding(
+                    findings,
+                    "error",
+                    "reference_data_sources_group_empty",
+                    f"framework_sources.{group} must list at least one artifact.",
+                    artifact,
+                )
+        if selected_node_id and isinstance(framework_sources.get("node"), list) and not framework_sources["node"]:
+            _add_finding(
+                findings,
+                "error",
+                "reference_data_sources_node_empty",
+                "framework_sources.node must list selected node artifacts when a node is selected.",
+                artifact,
+            )
+
+    dependencies = manifest.get("claim_dependencies")
+    if not isinstance(dependencies, list) or not dependencies:
+        _add_finding(
+            findings,
+            "error",
+            "reference_data_sources_missing_claim_dependencies",
+            "reference_data_sources.json must contain non-empty claim_dependencies.",
+            artifact,
+        )
+    else:
+        claim_ids = {
+            str(dependency.get("claim_id"))
+            for dependency in dependencies
+            if isinstance(dependency, dict) and dependency.get("claim_id")
+        }
+        missing_claims = sorted(
+            {
+                "algorithmic_novelty",
+                "baseline_superiority",
+                "biological_evidence_boundary",
+            }
+            - claim_ids
+        )
+        if missing_claims:
+            _add_finding(
+                findings,
+                "error",
+                "reference_data_sources_missing_claim_dependencies",
+                "reference_data_sources.json missing claim dependencies: "
+                + ", ".join(missing_claims),
+                artifact,
+            )
+
+    for source in expected_reference_sources(manifest):
+        source_path, source_error = _reference_source_path(root, source)
+        if source_error:
+            _add_finding(
+                findings,
+                "error",
+                "reference_data_sources_path_invalid",
+                source_error,
+                artifact,
+            )
+            continue
+        if not source_path.exists():
+            _add_finding(
+                findings,
+                "error",
+                "reference_data_sources_missing_source",
+                f"reference_data_sources.json points to a missing artifact: {source}.",
+                artifact,
+            )
+        elif not source_path.is_file():
+            _add_finding(
+                findings,
+                "error",
+                "reference_data_sources_source_not_file",
+                f"reference_data_sources.json source is not a file: {source}.",
+                artifact,
+            )
+        elif source_path.stat().st_size == 0:
+            _add_finding(
+                findings,
+                "error",
+                "reference_data_sources_source_empty",
+                f"reference_data_sources.json source is empty: {source}.",
+                artifact,
+            )
+
+
+def _reference_source_path(root: Path, source: str) -> tuple[Path, str | None]:
+    if not _has_text(source):
+        return root, "reference_data_sources.json contains an empty source path."
+    raw_path = Path(source)
+    path = raw_path.expanduser().resolve() if raw_path.is_absolute() else (root / raw_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return path, f"reference_data_sources.json source escapes project root: {source}."
+    return path, None
+
+
+def _reference_manifest_missing_severity(run_dir: Path) -> str:
+    readiness = _load_json_mapping_silent(run_dir / V3_PAPER_READINESS_ARTIFACT)
+    if not isinstance(readiness, dict):
+        return "warning"
+    if readiness.get("valid") is True:
+        return "error"
+    status = str(readiness.get("status") or "").strip().lower()
+    return "error" if status in {"passed", "pass", "accepted", "ready"} else "warning"
+
+
+def _validate_v3_baseline_audit(
+    data: dict[str, Any],
+    artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    issues = sorted(_baseline_audit_unfair_categories(data))
+    if not issues:
+        return
+    _add_finding(
+        findings,
+        "error",
+        "baseline_audit_unfair_comparison",
+        "baseline_audit.json indicates an unfair baseline comparison: "
+        + ", ".join(issues)
+        + ".",
+        artifact,
+    )
+
+
+def _baseline_audit_unfair_categories(data: Any) -> set[str]:
+    issues: set[str] = set()
+    for key, value in _walk_json_fields(data):
+        normalized_key = _normalize_field_key(key)
+        false_category = BASELINE_AUDIT_FALSE_FAIRNESS_KEYS.get(normalized_key)
+        if false_category and _falsy(value):
+            issues.add(false_category)
+        true_category = BASELINE_AUDIT_TRUE_UNFAIR_KEYS.get(normalized_key)
+        if true_category and _truthy(value):
+            issues.add(true_category)
+    return issues
+
+
+def _validate_v3_biology_overclaim_artifact(
+    data: dict[str, Any],
+    artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    reasons = _biology_overclaim_reasons(data)
+    if not reasons:
+        return
+    _add_finding(
+        findings,
+        "error",
+        "biology_overclaim_detected",
+        "Reviewer artifact indicates computational or replay evidence is overclaimed as "
+        "wet-lab, prospective, or confirmed biological mechanism evidence: "
+        + "; ".join(reasons[:4])
+        + ".",
+        artifact,
+    )
+
+
+def _biology_overclaim_reasons(data: Any) -> list[str]:
+    reasons: list[str] = []
+    for key, value in _walk_json_fields(data):
+        if _normalize_field_key(key) in BIOLOGY_OVERCLAIM_TRUE_KEYS and _truthy(value):
+            reasons.append(key)
+
+    for candidate in _claim_issue_candidates(data):
+        texts = _v3_claim_texts(candidate)
+        if not texts:
+            continue
+        normalized = _normalize_claim_text(" ".join(texts))
+        if _has_biology_overclaim_source(normalized) and _has_biology_overclaim_target(normalized):
+            reasons.append(_compact_reason_text(texts))
+
+    return list(dict.fromkeys(reason for reason in reasons if reason))
+
+
+def _claim_issue_candidates(data: Any) -> list[Any]:
+    candidates: list[Any] = []
+    if isinstance(data, dict):
+        normalized_keys = {_normalize_field_key(key) for key in data}
+        if (
+            any("overclaim" in key or "violation" in key for key in normalized_keys)
+            or normalized_keys
+            & {
+                "findings",
+                "issues",
+                "errors",
+                "reasons",
+                "invalid_claims",
+                "unsupported_claims",
+                "blocked_claims",
+            }
+            or {"source_evidence", "source", "overclaim"} & normalized_keys
+        ):
+            candidates.append(data)
+        for key, value in data.items():
+            normalized_key = _normalize_field_key(key)
+            if (
+                "overclaim" in normalized_key
+                or "violation" in normalized_key
+                or normalized_key
+                in {
+                    "findings",
+                    "issues",
+                    "errors",
+                    "reasons",
+                    "invalid_claims",
+                    "unsupported_claims",
+                    "blocked_claims",
+                }
+            ):
+                candidates.append(value)
+            candidates.extend(_claim_issue_candidates(value))
+    elif isinstance(data, list):
+        for item in data:
+            candidates.extend(_claim_issue_candidates(item))
+    return candidates
+
+
+def _has_biology_overclaim_source(text: str) -> bool:
+    return any(_normalize_claim_text(pattern) in text for pattern in BIOLOGY_OVERCLAIM_SOURCE_PATTERNS)
+
+
+def _has_biology_overclaim_target(text: str) -> bool:
+    return any(_normalize_claim_text(pattern) in text for pattern in BIOLOGY_OVERCLAIM_TARGET_PATTERNS)
+
+
+def _compact_reason_text(texts: list[str]) -> str:
+    text = " ".join(str(item).strip() for item in texts if str(item).strip())
+    return text[:180] + ("..." if len(text) > 180 else "")
+
+
+def _walk_json_fields(data: Any) -> list[tuple[str, Any]]:
+    fields: list[tuple[str, Any]] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            fields.append((str(key), value))
+            fields.extend(_walk_json_fields(value))
+    elif isinstance(data, list):
+        for item in data:
+            fields.extend(_walk_json_fields(item))
+    return fields
+
+
+def _normalize_field_key(key: str) -> str:
+    return _normalize_claim_text(key).replace(" ", "_")
+
+
+def _falsy(value: Any) -> bool:
+    if value is False:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {
+            "false",
+            "0",
+            "no",
+            "n",
+            "fail",
+            "failed",
+            "mismatch",
+            "mismatched",
+            "inconsistent",
+            "unequal",
+            "unfair",
+            "reject",
+            "rejected",
+        }
+    if isinstance(value, (int, float)):
+        return value == 0
+    return False
+
+
+def _validate_v3_claim_cap_saturation_consistency(
+    root: Path,
+    run_dir: Path,
+    claim_cap: dict[str, Any] | None,
+    saturation: dict[str, Any] | None,
+    findings: list[dict[str, Any]],
+) -> None:
+    if not isinstance(claim_cap, dict) or not isinstance(saturation, dict):
+        return
+
+    allowed_texts = [
+        *_v3_claim_texts(claim_cap.get("claim_cap")),
+        *_v3_claim_texts(claim_cap.get("allowed_claims")),
+        *_v3_claim_texts(claim_cap.get("claims")),
+    ]
+    blocked_texts = [
+        *_v3_claim_texts(saturation.get("blocked_claims")),
+        *_v3_claim_texts(saturation.get("disallowed_claims")),
+        *_v3_claim_texts(saturation.get("unsupported_claims")),
+    ]
+    if not allowed_texts:
+        return
+
+    allowed_categories = _v3_claim_categories(allowed_texts)
+    blocked_categories = _v3_claim_categories(blocked_texts)
+    conflicting_categories = allowed_categories & blocked_categories
+    if saturation.get("saturated") is not True:
+        conflicting_categories |= allowed_categories
+
+    explicit_overlaps = _v3_claim_text_overlaps(allowed_texts, blocked_texts)
+    if not conflicting_categories and not explicit_overlaps:
+        return
+
+    details: list[str] = []
+    if conflicting_categories:
+        details.append("strong claims: " + ", ".join(sorted(conflicting_categories)))
+    if explicit_overlaps:
+        details.append("blocked allowed claims: " + "; ".join(explicit_overlaps[:6]))
+    _add_finding(
+        findings,
+        "error",
+        "claim_cap_conflicts_with_benchmark_saturation",
+        "claim_cap.json allows claims that benchmark_saturation.json blocks or cannot support"
+        + (": " + "; ".join(details) if details else "."),
+        _rel(run_dir / "claim_cap.json", root),
+    )
+
+
+def _v3_claim_texts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        texts: list[str] = []
+        for item in value:
+            texts.extend(_v3_claim_texts(item))
+        return texts
+    if isinstance(value, dict):
+        texts = []
+        for item in value.values():
+            texts.extend(_v3_claim_texts(item))
+        return texts
+    return []
+
+
+def _v3_claim_categories(texts: list[str]) -> set[str]:
+    categories: set[str] = set()
+    normalized_patterns = {
+        category: tuple(_normalize_claim_text(pattern) for pattern in patterns)
+        for category, patterns in V3_STRONG_CLAIM_PATTERNS.items()
+    }
+    for text in texts:
+        normalized_text = _normalize_claim_text(text)
+        for category, patterns in normalized_patterns.items():
+            if any(pattern and pattern in normalized_text for pattern in patterns):
+                categories.add(category)
+    return categories
+
+
+def _v3_claim_text_overlaps(allowed_texts: list[str], blocked_texts: list[str]) -> list[str]:
+    allowed = [_normalize_claim_text(text) for text in allowed_texts]
+    blocked = [_normalize_claim_text(text) for text in blocked_texts]
+    overlaps: list[str] = []
+    for allowed_text in allowed:
+        if len(allowed_text.split()) < 2:
+            continue
+        for blocked_text in blocked:
+            if len(blocked_text.split()) < 2 and allowed_text != blocked_text:
+                continue
+            if allowed_text == blocked_text or allowed_text in blocked_text or blocked_text in allowed_text:
+                overlaps.append(allowed_text)
+                break
+    return list(dict.fromkeys(overlaps))
+
+
+def _normalize_claim_text(value: str) -> str:
+    cleaned = "".join(character if character.isalnum() else " " for character in value.lower())
+    return " ".join(cleaned.split())
+
+
+def _v3_paper_ready_for_claim_gate(
+    root: Path,
+    run_dir: Path,
+    findings: list[dict[str, Any]],
+    artifacts: dict[str, str],
+) -> bool:
+    path = run_dir / V3_PAPER_READINESS_ARTIFACT
+    artifacts["paper_readiness_report"] = str(path)
+    if not path.exists():
+        return False
+    data = _load_json(path, "paper_readiness_report", findings)
+    if not isinstance(data, dict):
+        _add_finding(
+            findings,
+            "error",
+            "invalid_paper_readiness_report",
+            "paper_readiness_report.json must be a JSON object.",
+            _rel(path, root),
+        )
+        return False
+    _validate_v3_paper_readiness_report(data, _rel(path, root), findings)
+    if data.get("valid") is True:
+        return True
+    status = str(data.get("status") or "").strip().lower()
+    return status in {"passed", "pass", "accepted", "ready"}
+
+
+def _validate_v3_paper_readiness_report(
+    data: dict[str, Any],
+    artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    status = str(data.get("status") or "").strip().lower()
+    if data.get("valid") is False or status in PAPER_READINESS_FAILURE_STATUSES:
+        _add_finding(
+            findings,
+            "error",
+            "paper_readiness_report_invalid",
+            "paper_readiness_report.json is present but marks the paper as invalid or failed.",
+            artifact,
+        )
+    _validate_v3_biology_overclaim_artifact(data, artifact, findings)
+
+
+def _normalized_verdict(value: Any) -> str:
+    return str(value or "").strip().lower()
 
 
 def _optional_run_file(

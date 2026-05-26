@@ -54,6 +54,7 @@ def test_cli_help_marks_run_scientist_as_recommended_and_staged_commands_as_debu
     assert "literature-search" in output
     assert "read-literature" in output
     assert "extract-mechanisms" in output
+    assert "compile-operators" in output
     assert "extract-methods" not in output
     assert "develop-method" not in output
     assert "benchmark-methods" not in output
@@ -95,9 +96,62 @@ def test_readme_and_framework_markdown_do_not_document_failing_staged_review_wor
     assert "Staged framework commands are debug/development entry points" in readme
     assert "read-literature" in readme
     assert "extract-mechanisms" in readme
+    assert "compile-operators" in readme
+    assert "reviewer verdict artifacts such as" not in readme
+    for verdict_artifact in (
+        "novelty_review.json",
+        "baseline_audit.json",
+        "experiment_review.json",
+        "biology_review.json",
+        "paper_contribution_review.json",
+    ):
+        assert verdict_artifact in readme
     for forbidden in ("--legacy-v2", "develop-method", "benchmark-methods", "novelty_report"):
         assert forbidden not in readme
         assert forbidden not in framework_markdown
+
+
+def test_compile_operators_writes_operator_artifacts_from_mechanism_cards(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    framework_dir = tmp_path / "framework"
+    framework_dir.mkdir()
+    (framework_dir / "mechanism_cards.json").write_text(
+        json.dumps(
+            [
+                {
+                    "mechanism_id": "active_learning_acquisition",
+                    "source_paper_ids": ["paper_1"],
+                    "mechanism_name": "Active Learning Acquisition",
+                    "problem_setting": "Batch-limited protein variant design.",
+                    "state_model": "Posterior state from observed variants.",
+                    "candidate_generation": "Generate feasible variant candidates.",
+                    "acquisition_objective": "Rank by expected improvement.",
+                    "uncertainty_model": "Posterior uncertainty.",
+                    "transfer_model": "",
+                    "constraints": ["batch_budget"],
+                    "assumptions": ["Comparable endpoint strata."],
+                    "failure_modes": ["Miscalibrated uncertainty."],
+                    "reusable_components": ["surrogate_model", "acquisition_policy"],
+                    "stress_tests": ["retrospective_round_masking"],
+                    "evidence_strength": "candidate_from_text",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["compile-operators", str(tmp_path)]) == 0
+
+    output = capsys.readouterr().out
+    assert "Wrote operator specs:" in output
+    for filename in (
+        "operator_specs.json",
+        "operator_gap_matrix.csv",
+        "operator_evidence_map.json",
+        "operator_negative_controls.json",
+    ):
+        assert (framework_dir / filename).exists()
 
 
 def test_review_framework_missing_artifacts_reports_without_crashing(
@@ -218,3 +272,64 @@ def test_cli_offline_run_scientist_generates_report_and_validates(
     assert "## MechanismSpec Kernel" in method_report
     assert "mechanism_spec.json" in method_report
     assert "novelty_report.json" not in method_report
+
+
+def test_cli_run_algorithm_benchmark_generates_mccbd_artifacts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "framework_cli"
+
+    exit_code = main(
+        [
+            "run-algorithm-benchmark",
+            str(project),
+            "--run-id",
+            "mccbd_cli",
+            "--seeds",
+            "0",
+            "1",
+            "--rounds",
+            "2",
+            "--budget",
+            "3",
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Wrote MCCBD benchmark:" in output
+    assert "selected=mccbd" in output
+    assert (project / "runs" / "mccbd_cli" / "mccbd_benchmark_results.csv").exists()
+    assert (project / "runs" / "mccbd_cli" / "mccbd_benchmark_summary.csv").exists()
+    assert (project / "runs" / "mccbd_cli" / "mccbd_ablation_results.csv").exists()
+
+
+def test_cli_run_generative_benchmark_generates_cmdgd_artifacts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "framework_cli"
+
+    exit_code = main(
+        [
+            "run-generative-benchmark",
+            str(project),
+            "--run-id",
+            "cmdgd_cli",
+            "--seeds",
+            "0",
+            "--budget",
+            "5",
+            "--generation-budget",
+            "24",
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Wrote generative benchmark:" in output
+    assert "selected=cmdgd" in output
+    run_dir = project / "runs" / "cmdgd_cli"
+    assert (run_dir / "generative_benchmark_results.csv").exists()
+    assert (run_dir / "generative_benchmark_summary.csv").exists()
+    assert (run_dir / "generative_ablation_results.csv").exists()
+    assert (run_dir / "generative_design_examples.csv").exists()

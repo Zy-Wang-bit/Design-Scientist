@@ -11,6 +11,7 @@ import sys
 import tempfile
 import traceback
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -65,6 +66,26 @@ _SUBPROCESS_CODE = (
 _PATH_GUARD_ERROR_PREFIX = "path_guard: out_of_bounds_write:"
 _STALE_ARTIFACTS_ERROR_PREFIX = (
     "stale_artifacts: generated artifacts not updated by run(workspace):"
+)
+_BASELINE_POLICY_NAMES = {
+    "fixed_mix",
+    "greedy_utility",
+    "mechanism_aware",
+    "pure_lattice_repair",
+    "pure_uncertainty",
+    "random_feasible",
+    "top_observed",
+}
+_OPERATOR_ARTIFACTS = ("mechanism_spec.json", "proposal.json")
+_OPERATOR_REFERENCE_FIELDS = ("operator_refs", "operator_specs")
+_KEY_ABLATION_NAME = "key_component_removed"
+_REMOVED_OPERATOR_FIELDS = (
+    "removed_operator_ids",
+    "removed_operator_id",
+    "removed_operators",
+    "removed_operator_refs",
+    "operator_refs_removed",
+    "operator_ids_removed",
 )
 _AUDIT_BLOCKED_PROCESS_EVENTS = {
     "os.exec",
@@ -183,10 +204,12 @@ def validate_mechanism_node(
     node_workspace: str | Path,
     *,
     require_generated_artifacts: bool = True,
+    operator_specs: Iterable[Any] | Mapping[str, Any] | None = None,
 ) -> MechanismNodeValidationResult:
     """Validate V3 mechanism-node artifacts, JSON shape, lifecycle API, and symlinks."""
 
     workspace = _resolve_workspace(node_workspace)
+    operator_spec_records = _coerce_operator_specs(operator_specs)
     required = (
         V3_MECHANISM_NODE_REQUIRED_ARTIFACTS
         if require_generated_artifacts
@@ -227,6 +250,8 @@ def validate_mechanism_node(
     validation_report = artifacts.get("validation_report.json")
     if validation_report is not None and validation_report.get("valid") is not True:
         errors.append("validation_report.json must contain valid: true")
+    if require_generated_artifacts:
+        errors.extend(_operator_contract_errors(artifacts, operator_spec_records))
 
     escaping_symlinks = find_escaping_symlinks(workspace)
     valid = not missing_artifacts and not malformed_json and not escaping_symlinks and not errors
@@ -246,6 +271,7 @@ def execute_mechanism_node(
     *,
     guard_roots: Iterable[str | Path] | None = None,
     timeout_seconds: float | None = DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+    operator_specs: Iterable[Any] | Mapping[str, Any] | None = None,
 ) -> MechanismNodeExecutionResult:
     """Execute a V3 mechanism node in a subprocess and validate generated artifacts.
 
@@ -256,6 +282,7 @@ def execute_mechanism_node(
     """
 
     workspace = _resolve_workspace(node_workspace)
+    operator_spec_records = _coerce_operator_specs(operator_specs)
     snapshot_roots = _mechanism_snapshot_roots(workspace, guard_roots)
     before = _snapshot_mechanism_guard(snapshot_roots)
     executed = False
@@ -316,7 +343,7 @@ def execute_mechanism_node(
             *_subprocess_path_guard_violations(subprocess_result),
         ]
     )
-    validation = validate_mechanism_node(workspace)
+    validation = validate_mechanism_node(workspace, operator_specs=operator_spec_records)
     parent_stale_artifacts = (
         _stale_generated_artifacts(before, after, workspace)
         if not validation.missing_artifacts and not validation.malformed_json
@@ -525,11 +552,12 @@ def _lifecycle_static_errors(mechanism_path: Path) -> list[str]:
     except OSError as exc:
         return [f"Cannot read mechanism.py: {exc}"]
 
-    defined_functions = {
-        node.name
+    function_defs = {
+        node.name: node
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    defined_functions = set(function_defs)
     missing = [
         name
         for name in MECHANISM_NODE_LIFECYCLE_CALLABLES
@@ -549,7 +577,377 @@ def _lifecycle_static_errors(mechanism_path: Path) -> list[str]:
         )
     if "run" not in defined_functions:
         errors.append("mechanism.py must define callable run(workspace)")
+    errors.extend(_baseline_wrapper_static_errors(function_defs))
     return errors
+
+
+def _baseline_wrapper_static_errors(
+    function_defs: Mapping[str, ast.FunctionDef | ast.AsyncFunctionDef],
+) -> list[str]:
+    fit_state = function_defs.get("fit_state")
+    generate_candidates = function_defs.get("generate_candidates")
+    select_panel = function_defs.get("select_panel")
+    if fit_state is None or generate_candidates is None or select_panel is None:
+        return []
+    if not _fit_state_no_information_passthrough(fit_state):
+        return []
+    if not _generate_candidates_candidate_records_passthrough(generate_candidates):
+        return []
+    if not _select_panel_calls_baseline_policy(select_panel):
+        return []
+    return [
+        "baseline-wrapper invalid: fit_state is a no-information passthrough, "
+        "generate_candidates only returns candidate_records, and select_panel delegates "
+        "to a baseline policy"
+    ]
+
+
+def _fit_state_no_information_passthrough(
+    function_def: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    body = _meaningful_statements(function_def.body)
+    if len(body) == 1 and isinstance(body[0], ast.Return):
+        return _is_context_copy_expr(body[0].value)
+    if (
+        len(body) == 2
+        and isinstance(body[0], ast.Assign)
+        and len(body[0].targets) == 1
+        and isinstance(body[0].targets[0], ast.Name)
+        and _is_context_copy_expr(body[0].value)
+        and isinstance(body[1], ast.Return)
+        and isinstance(body[1].value, ast.Name)
+        and body[1].value.id == body[0].targets[0].id
+    ):
+        return True
+    return False
+
+
+def _generate_candidates_candidate_records_passthrough(
+    function_def: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    body = _meaningful_statements(function_def.body)
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return False
+    return _is_candidate_records_expr(body[0].value)
+
+
+def _select_panel_calls_baseline_policy(
+    function_def: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    for node in ast.walk(function_def):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and (
+            func.id in _BASELINE_POLICY_NAMES or func.id in {"baseline_policy", "_baseline_policy"}
+        ):
+            return True
+        if isinstance(func, ast.Attribute):
+            if isinstance(func.value, ast.Name) and func.value.id in {"policies", "policy_api"}:
+                if func.attr in _BASELINE_POLICY_NAMES or func.attr == "get_policy":
+                    return True
+    return False
+
+
+def _meaningful_statements(statements: list[ast.stmt]) -> list[ast.stmt]:
+    return [
+        statement
+        for statement in statements
+        if not (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        )
+    ]
+
+
+def _is_context_copy_expr(expr: ast.AST | None) -> bool:
+    if isinstance(expr, ast.Name):
+        return expr.id == "context"
+    if (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Name)
+        and expr.func.id == "dict"
+        and len(expr.args) == 1
+        and isinstance(expr.args[0], ast.Name)
+        and expr.args[0].id == "context"
+        and not expr.keywords
+    ):
+        return True
+    return False
+
+
+def _is_candidate_records_expr(expr: ast.AST | None) -> bool:
+    if (
+        isinstance(expr, ast.Call)
+        and isinstance(expr.func, ast.Name)
+        and expr.func.id in {"list", "tuple"}
+        and len(expr.args) == 1
+        and not expr.keywords
+    ):
+        return _is_candidate_records_expr(expr.args[0])
+    if isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Name):
+        return expr.value.id == "state" and _literal_string(expr.slice) == "candidate_records"
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute):
+        if (
+            isinstance(expr.func.value, ast.Name)
+            and expr.func.value.id == "state"
+            and expr.func.attr == "get"
+            and expr.args
+            and _literal_string(expr.args[0]) == "candidate_records"
+        ):
+            return True
+    return False
+
+
+def _literal_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _operator_contract_errors(
+    artifacts: dict[str, dict[str, Any]],
+    operator_specs: tuple[Any, ...],
+) -> list[str]:
+    known_operator_ids = set(_operator_ids_from_value(operator_specs))
+    embedded_operator_ids: set[str] = set()
+    artifact_refs: dict[str, list[str]] = {}
+    errors: list[str] = []
+
+    for artifact_name in _OPERATOR_ARTIFACTS:
+        artifact = artifacts.get(artifact_name)
+        if not isinstance(artifact, dict):
+            continue
+        refs = _operator_refs_from_artifact(artifact)
+        artifact_refs[artifact_name] = refs
+        embedded_operator_ids.update(_operator_ids_from_value(artifact.get("operator_specs")))
+        if not refs:
+            errors.append(
+                f"{artifact_name} must include operator_refs or operator_specs with at least one operator_id"
+            )
+            continue
+        if known_operator_ids and not (set(refs) & known_operator_ids):
+            errors.append(
+                f"{artifact_name} must reference at least one operator_id from operator_specs: "
+                + ", ".join(sorted(known_operator_ids))
+            )
+
+    node_refs = set().union(*(set(refs) for refs in artifact_refs.values())) if artifact_refs else set()
+    operator_context_ids = known_operator_ids or embedded_operator_ids
+    if node_refs and not operator_context_ids:
+        errors.append(
+            "mechanism node operator_refs require operator_specs context with at least one operator_id"
+        )
+    elif node_refs and not (node_refs & operator_context_ids):
+        errors.append(
+            "mechanism node must reference at least one operator_id from operator_specs"
+        )
+    errors.extend(
+        _key_ablation_operator_errors(
+            artifacts.get("ablation_plan.json"),
+            referenced_operator_ids=node_refs & operator_context_ids if operator_context_ids else node_refs,
+        )
+    )
+    errors.extend(
+        _operator_to_code_trace_errors(
+            artifacts.get("operator_to_code_trace.json"),
+            referenced_operator_ids=node_refs & operator_context_ids if operator_context_ids else node_refs,
+        )
+    )
+    return errors
+
+
+def _coerce_operator_specs(operator_specs: Iterable[Any] | Mapping[str, Any] | None) -> tuple[Any, ...]:
+    if operator_specs is None:
+        return ()
+    if isinstance(operator_specs, Mapping):
+        if operator_specs.get("operator_id"):
+            return (dict(operator_specs),)
+        nested = operator_specs.get("operator_specs")
+        if nested is not None:
+            return _coerce_operator_specs(nested)
+        return tuple(operator_specs.values())
+    if isinstance(operator_specs, (str, bytes)):
+        return (operator_specs,)
+    return tuple(operator_specs)
+
+
+def _operator_refs_from_artifact(artifact: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for field in _OPERATOR_REFERENCE_FIELDS:
+        refs.extend(_operator_ids_from_value(artifact.get(field)))
+    return _merge_unique_strings(refs)
+
+
+def _operator_ids_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, Mapping):
+        direct = (
+            value.get("operator_id")
+            or value.get("operator_ref")
+            or value.get("operator")
+        )
+        if direct:
+            return _operator_ids_from_value(direct)
+        refs: list[str] = []
+        for field in (
+            "operator_ids",
+            "operator_refs",
+            "operator_specs",
+            "operators",
+            "refs",
+        ):
+            refs.extend(_operator_ids_from_value(value.get(field)))
+        if refs:
+            return _merge_unique_strings(refs)
+        keyed_refs = [
+            str(key).strip()
+            for key, nested in value.items()
+            if str(key).strip().startswith("operator_") and isinstance(nested, Mapping)
+        ]
+        return [ref for ref in keyed_refs if ref]
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        refs = []
+        for item in value:
+            refs.extend(_operator_ids_from_value(item))
+        return _merge_unique_strings(refs)
+    return []
+
+
+def _key_ablation_operator_errors(
+    ablation_plan: dict[str, Any] | None,
+    *,
+    referenced_operator_ids: set[str],
+) -> list[str]:
+    if not isinstance(ablation_plan, dict):
+        return []
+    raw_ablations = ablation_plan.get("ablations")
+    if not isinstance(raw_ablations, list):
+        return []
+    key_ablations = [
+        ablation
+        for ablation in raw_ablations
+        if isinstance(ablation, Mapping) and _is_key_ablation(ablation)
+    ]
+    if not key_ablations:
+        return [
+            "key ablation must remove at least one referenced operator via removed_operator_ids"
+        ]
+
+    errors: list[str] = []
+    for ablation in key_ablations:
+        removed_operator_ids = set(_removed_operator_ids(ablation))
+        if not removed_operator_ids:
+            errors.append(
+                "key ablation must remove at least one operator via removed_operator_ids; "
+                "policy_ablation alone is not valid"
+            )
+            continue
+        if referenced_operator_ids and not (removed_operator_ids & referenced_operator_ids):
+            errors.append(
+                "key ablation must remove one of the node operator_refs: "
+                + ", ".join(sorted(referenced_operator_ids))
+            )
+    return errors
+
+
+def _operator_to_code_trace_errors(
+    trace_artifact: dict[str, Any] | None,
+    *,
+    referenced_operator_ids: set[str],
+) -> list[str]:
+    if not isinstance(trace_artifact, dict):
+        return []
+    raw_trace = trace_artifact.get("operator_to_code_trace")
+    if not isinstance(raw_trace, Mapping) or not raw_trace:
+        return ["operator_to_code_trace.json must include non-empty operator_to_code_trace"]
+    if not referenced_operator_ids:
+        return []
+    traced_ids = {
+        str(operator_id).strip()
+        for operator_id in raw_trace
+        if str(operator_id).strip()
+    }
+    missing_trace_ids = referenced_operator_ids - traced_ids
+    if missing_trace_ids == referenced_operator_ids:
+        return [
+            "operator_to_code_trace.json must trace referenced operator_ids with implementation steps: "
+            + ", ".join(sorted(referenced_operator_ids))
+        ]
+    errors: list[str] = []
+    if missing_trace_ids:
+        errors.append(
+            "operator_to_code_trace.json missing implementation steps for referenced operator_id: "
+            + ", ".join(sorted(missing_trace_ids))
+        )
+    for operator_id in sorted(traced_ids & referenced_operator_ids):
+        steps = raw_trace.get(operator_id)
+        if not isinstance(steps, list) or not any(str(step).strip() for step in steps):
+            errors.append(
+                f"operator_to_code_trace.json entry for {operator_id} must list implementation steps"
+            )
+            continue
+        invalid_steps = [
+            str(step).strip()
+            for step in steps
+            if str(step).strip() and not _is_operator_code_trace_step(step)
+        ]
+        if invalid_steps:
+            errors.append(
+                f"operator_to_code_trace.json entry for {operator_id} must use "
+                "function.code_region implementation steps: "
+                + ", ".join(invalid_steps)
+            )
+    return errors
+
+
+def _is_operator_code_trace_step(step: Any) -> bool:
+    if isinstance(step, str):
+        return _is_dotted_code_region(step.strip())
+    if isinstance(step, Mapping):
+        function_name = str(
+            step.get("function")
+            or step.get("callable")
+            or step.get("lifecycle_callable")
+            or ""
+        ).strip()
+        code_region = str(
+            step.get("code_region")
+            or step.get("region")
+            or step.get("implementation_step")
+            or ""
+        ).strip()
+        return function_name.isidentifier() and _is_dotted_code_region(
+            f"{function_name}.{code_region}"
+        )
+    return False
+
+
+def _is_dotted_code_region(value: str) -> bool:
+    parts = value.split(".")
+    return len(parts) >= 2 and all(part.isidentifier() for part in parts)
+
+
+def _is_key_ablation(ablation: Mapping[str, Any]) -> bool:
+    name = str(
+        ablation.get("name")
+        or ablation.get("ablation")
+        or ablation.get("ablation_id")
+        or ""
+    )
+    return name == _KEY_ABLATION_NAME or ablation.get("is_key") is True
+
+
+def _removed_operator_ids(ablation: Mapping[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for field in _REMOVED_OPERATOR_FIELDS:
+        refs.extend(_operator_ids_from_value(ablation.get(field)))
+    return _merge_unique_strings(refs)
 
 
 def _lifecycle_runtime_errors(module: Any) -> list[str]:

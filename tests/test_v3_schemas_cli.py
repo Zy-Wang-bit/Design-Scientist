@@ -111,6 +111,7 @@ def test_v3_artifact_constants_freeze_framework_and_node_contracts() -> None:
         "stress_test_plan.json",
         "mechanism_metrics.json",
         "validation_report.json",
+        "operator_to_code_trace.json",
     )
 
 
@@ -131,6 +132,7 @@ def test_cli_help_exposes_v3_mechanism_commands(capsys: pytest.CaptureFixture[st
     assert "V3 mechanism scientist loop" in output
     assert "read-literature" in output
     assert "extract-mechanisms" in output
+    assert "compile-operators" in output
     assert "develop-method" not in output
     assert "benchmark-methods" not in output
 

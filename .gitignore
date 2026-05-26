@@ -6,15 +6,20 @@ __pycache__/
 *.py[cod]
 .mypy_cache/
 .ruff_cache/
+Icon?
 
 # Local scratch outputs from verification and previews.
 tmp/
+.tmp.driveupload/
+output/pptx/
+output/pdf/CMD-GD_*
 
 # Keep runtime projects out of the framework repository by default.
 projects/*/
 !projects/.gitkeep
 
 # Local reference checkouts are large read-only inputs, not part of this repo.
+references/
 references/AI-Scientist/
 references/AI-Scientist-v2/
 references/DeepScientist/

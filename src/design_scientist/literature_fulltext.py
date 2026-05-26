@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 from bs4 import BeautifulSoup, FeatureNotFound, XMLParsedAsHTMLWarning
 
 from design_scientist.io import ensure_dir, read_json, write_json
@@ -47,6 +48,7 @@ def build_literature_corpus(
     project_dir: str | Path,
     offline_fixtures: bool = False,
     max_chars_per_paper: int = 20000,
+    client: Any | None = None,
 ) -> Path:
     """Build ``framework/literature_corpus.jsonl`` from paper cards.
 
@@ -78,7 +80,7 @@ def build_literature_corpus(
         paper_id = _clean_str(card.get("paper_id")) or f"paper:{index}"
         abstract_or_summary = _abstract_or_summary(card)
         metadata_text = _metadata_text(card, paper_id=paper_id, abstract_or_summary=abstract_or_summary)
-        result = _read_fulltext(card, fixture_dir=fixture_dir, cache_dir=cache_dir)
+        result = _read_fulltext(card, fixture_dir=fixture_dir, cache_dir=cache_dir, client=client)
         text = _merge_text(metadata_text, result.text, max_chars=max_chars_per_paper)
         chunks = _chunk_text(text, paper_id=paper_id, text_source=result.text_source)
 
@@ -140,14 +142,15 @@ def build_literature_corpus(
     return corpus_path
 
 
-def _read_fulltext(card: dict[str, Any], *, fixture_dir: Path | None, cache_dir: Path) -> FulltextResult:
+def _read_fulltext(
+    card: dict[str, Any],
+    *,
+    fixture_dir: Path | None,
+    cache_dir: Path,
+    client: Any | None = None,
+) -> FulltextResult:
     if fixture_dir is None:
-        return FulltextResult(
-            status="metadata_only",
-            text="",
-            text_source="metadata",
-            reason="offline_fixtures_disabled",
-        )
+        return _read_live_open_fulltext(card, cache_dir=cache_dir, client=client)
 
     fixture_path = _find_fixture(card, fixture_dir)
     if fixture_path is None:
@@ -205,6 +208,220 @@ def _read_fulltext(card: dict[str, Any], *, fixture_dir: Path | None, cache_dir:
         fixture_path=fixture_path,
         cache_path=cache_path,
     )
+
+
+def _read_live_open_fulltext(
+    card: dict[str, Any],
+    *,
+    cache_dir: Path,
+    client: Any | None,
+) -> FulltextResult:
+    """Resolve allowed open fulltext sources without paid scraping."""
+
+    source = _clean_str(card.get("source")).lower()
+    if source == "biorxiv":
+        resolvers = (_resolve_biorxiv_pdf, _resolve_pmc_oa, _resolve_arxiv_pdf)
+    elif source == "arxiv":
+        resolvers = (_resolve_arxiv_pdf, _resolve_pmc_oa, _resolve_biorxiv_pdf)
+    else:
+        resolvers = (_resolve_pmc_oa, _resolve_arxiv_pdf, _resolve_biorxiv_pdf)
+    first_error_type: str | None = None
+    for resolver in resolvers:
+        try:
+            result = resolver(card, cache_dir=cache_dir, client=client)
+        except Exception as exc:  # pragma: no cover - defensive degradation path.
+            first_error_type = first_error_type or type(exc).__name__
+            continue
+        if result is not None:
+            return result
+    return FulltextResult(
+        status="metadata_only",
+        text="",
+        text_source="metadata",
+        reason="open_fulltext_not_found",
+        error_type=first_error_type,
+    )
+
+
+def _resolve_pmc_oa(card: dict[str, Any], *, cache_dir: Path, client: Any | None) -> FulltextResult | None:
+    pmcid = _pmcid_from_card(card)
+    doi = _clean_str(card.get("doi"))
+    pmid = _clean_str(card.get("pmid"))
+    if not pmcid and (doi or pmid):
+        response = _http_get(
+            client,
+            "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/",
+            params={"ids": doi or pmid, "format": "json"},
+        )
+        response.raise_for_status()
+        records = response.json().get("records", []) if hasattr(response, "json") else []
+        if records and isinstance(records[0], dict):
+            pmcid = _clean_str(records[0].get("pmcid"))
+    if not pmcid:
+        return None
+
+    pmc_digits = re.sub(r"^PMC", "", pmcid, flags=re.I)
+    cache_path = cache_dir / f"pmc_PMC{pmc_digits}_oa.xml"
+    if cache_path.exists():
+        text = _extract_readable_html_or_xml(cache_path, prefer_xml=True)
+        if text:
+            return FulltextResult(
+                status="open_fulltext",
+                text=text,
+                text_source="pmc_oa_xml",
+                cache_path=cache_path,
+            )
+    response = _http_get(
+        client,
+        "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi",
+        params={
+            "verb": "GetRecord",
+            "metadataPrefix": "pmc",
+            "identifier": f"oai:pubmedcentral.nih.gov:{pmc_digits}",
+        },
+    )
+    response.raise_for_status()
+    _write_bytes_or_text(cache_path, response)
+    text = _extract_readable_html_or_xml(cache_path, prefer_xml=True)
+    if not text:
+        return None
+    return FulltextResult(
+        status="open_fulltext",
+        text=text,
+        text_source="pmc_oa_xml",
+        cache_path=cache_path,
+    )
+
+
+def _resolve_arxiv_pdf(card: dict[str, Any], *, cache_dir: Path, client: Any | None) -> FulltextResult | None:
+    arxiv_id = _arxiv_id_from_card(card)
+    if not arxiv_id:
+        return None
+    cache_path = cache_dir / f"arxiv_{_safe_filename(arxiv_id)}_pdf.pdf"
+    if cache_path.exists():
+        text = _extract_pdf_text(cache_path)
+        if text:
+            return FulltextResult(
+                status="open_fulltext",
+                text=text,
+                text_source="arxiv_pdf",
+                cache_path=cache_path,
+            )
+    response = _http_get(client, f"https://arxiv.org/pdf/{arxiv_id}.pdf")
+    response.raise_for_status()
+    _write_bytes_or_text(cache_path, response)
+    text = _extract_pdf_text(cache_path)
+    if not text:
+        return None
+    return FulltextResult(
+        status="open_fulltext",
+        text=text,
+        text_source="arxiv_pdf",
+        cache_path=cache_path,
+    )
+
+
+def _resolve_biorxiv_pdf(card: dict[str, Any], *, cache_dir: Path, client: Any | None) -> FulltextResult | None:
+    source = _clean_str(card.get("source")).lower()
+    doi = _clean_str(card.get("doi")) or _clean_str(card.get("source_id"))
+    if source != "biorxiv" or not doi:
+        return None
+    cache_path = cache_dir / f"biorxiv_{_safe_filename(_strip_doi_prefix(doi))}_pdf.pdf"
+    if cache_path.exists():
+        text = _extract_pdf_text(cache_path)
+        if text:
+            return FulltextResult(
+                status="open_fulltext",
+                text=text,
+                text_source="biorxiv_pdf",
+                cache_path=cache_path,
+            )
+    landing_url = _clean_str(card.get("url")) or f"https://doi.org/{doi}"
+    landing_response = _http_get(client, landing_url)
+    landing_response.raise_for_status()
+    pdf_url = _find_pdf_url(landing_response.text, base_url=landing_url)
+    if not pdf_url:
+        return None
+    pdf_response = _http_get(client, pdf_url)
+    pdf_response.raise_for_status()
+    _write_bytes_or_text(cache_path, pdf_response)
+    text = _extract_pdf_text(cache_path)
+    if not text:
+        return None
+    return FulltextResult(
+        status="open_fulltext",
+        text=text,
+        text_source="biorxiv_pdf",
+        cache_path=cache_path,
+    )
+
+
+def _http_get(client: Any | None, url: str, *, params: dict[str, str] | None = None) -> Any:
+    headers = {"User-Agent": os.getenv("DESIGN_SCIENTIST_USER_AGENT", "design-scientist/0.1")}
+    if client is not None:
+        return client.get(url, params=params, headers=headers)
+    with httpx.Client(timeout=30.0, follow_redirects=True, headers=headers) as http_client:
+        return http_client.get(url, params=params)
+
+
+def _write_bytes_or_text(path: Path, response: Any) -> None:
+    ensure_dir(path.parent)
+    content = getattr(response, "content", None)
+    if content:
+        path.write_bytes(content)
+        return
+    path.write_text(getattr(response, "text", ""), encoding="utf-8")
+
+
+def _pmcid_from_card(card: dict[str, Any]) -> str:
+    for key in ("pmcid", "pmc_id"):
+        value = _clean_str(card.get(key))
+        if value:
+            return value
+    external_ids = card.get("external_ids")
+    if isinstance(external_ids, dict):
+        for key in ("PMCID", "pmcid", "PubMedCentral"):
+            value = _clean_str(external_ids.get(key))
+            if value:
+                return value
+    return ""
+
+
+def _arxiv_id_from_card(card: dict[str, Any]) -> str:
+    source = _clean_str(card.get("source")).lower()
+    candidates = []
+    if source == "arxiv":
+        candidates.extend([card.get("source_id"), card.get("paper_id"), card.get("url")])
+    external_ids = card.get("external_ids")
+    if isinstance(external_ids, dict):
+        candidates.extend([external_ids.get("arxiv"), external_ids.get("ArXiv")])
+    for candidate in candidates:
+        text = _clean_str(candidate)
+        if not text:
+            continue
+        text = text.rstrip("/").split("/")[-1]
+        text = re.sub(r"^arxiv:", "", text, flags=re.I)
+        text = re.sub(r"\.pdf$", "", text, flags=re.I)
+        if re.search(r"\d{4}\.\d{4,5}", text) or re.search(r"[a-z-]+/\d{7}", text, flags=re.I):
+            return text
+    return ""
+
+
+def _find_pdf_url(html: str, *, base_url: str) -> str:
+    soup = BeautifulSoup(html or "", "html.parser")
+    for link in soup.find_all("a"):
+        href = _clean_str(link.get("href"))
+        if not href:
+            continue
+        lower = href.lower()
+        if ".pdf" in lower or lower.endswith("/pdf"):
+            if href.startswith("http://") or href.startswith("https://"):
+                return href
+            if href.startswith("/"):
+                match = re.match(r"^(https?://[^/]+)", base_url)
+                return f"{match.group(1)}{href}" if match else href
+            return href
+    return ""
 
 
 def _fixture_dir() -> Path:

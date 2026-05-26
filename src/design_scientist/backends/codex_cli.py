@@ -31,7 +31,7 @@ class CodexCliBackend(ModelBackend, WorkspaceAgentBackend):
     def __init__(
         self,
         codex_binary: str = "codex",
-        timeout_seconds: int | None = None,
+        timeout_seconds: int | None = 300,
         extra_args: list[str] | None = None,
     ) -> None:
         self.codex_binary = codex_binary

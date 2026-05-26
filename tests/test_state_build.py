@@ -89,3 +89,120 @@ def test_build_state_canonicalizes_onee62_in_missing_edges(tmp_path: Path) -> No
 
     persisted = read_json(project / "state" / "design_state.json")
     assert persisted["unresolved_edges"][0]["system"] == "1E62"
+
+
+def test_build_state_from_startup_allowed_sources_counts_files_and_project_metadata(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    wet_lab = project / "raw" / "wet_lab"
+    sequences = project / "raw" / "base_sequences"
+    structures = project / "raw" / "base_structures_optional"
+    (project / "state").mkdir(parents=True)
+    wet_lab.mkdir(parents=True)
+    sequences.mkdir(parents=True)
+    structures.mkdir(parents=True)
+
+    _write_csv(
+        wet_lab / "ae_kd_ratio.csv",
+        "variant_id,antigen_genotype,endpoint,value",
+        ["1e+62,Ae,KD_ratio,2.0", "HK52H,Ae,KD_ratio,1.2"],
+    )
+    (sequences / "antigen_genotypes.fasta").write_text(
+        ">AeS\nAAAA\n>BaS\nBBBB\n",
+        encoding="utf-8",
+    )
+    (structures / "ab_wt.pdb").write_text(
+        "ATOM      1  N   GLU A   1       0.000   0.000   0.000\n"
+        "HETATM    2  O   HOH A   2       1.000   1.000   1.000\n"
+        "REMARK not a coordinate row\n",
+        encoding="utf-8",
+    )
+    write_yaml(
+        project / "project.yaml",
+        {
+            "project_id": "1E62_pH_sensitive_design_startup",
+            "system": "1E62",
+            "domain": "antibody_variant_design",
+            "objective": "Design 1E62 variants with retained neutral binding.",
+        },
+    )
+    write_yaml(
+        project / "data_contract.yaml",
+        {
+            "contract_id": "1E62_startup_data_contract",
+            "local_root": str(project),
+            "allowed_sources": {
+                "base_sequences": {
+                    "evidence_tier": "sequence_reference",
+                    "allowed_as_experimental_evidence": False,
+                    "files": ["raw/base_sequences/antigen_genotypes.fasta"],
+                },
+                "optional_base_structures": {
+                    "evidence_tier": "structure_reference_optional",
+                    "allowed_as_experimental_evidence": False,
+                    "files": ["raw/base_structures_optional/ab_wt.pdb"],
+                },
+                "wet_lab": {
+                    "evidence_tier": "primary_wet_lab",
+                    "allowed_as_experimental_evidence": True,
+                    "files": ["raw/wet_lab/ae_kd_ratio.csv"],
+                },
+            },
+            "identifier_columns": ["variant_id", "antigen_genotype"],
+        },
+    )
+
+    state = build_state(project)
+
+    assert state.project_id == "1E62_pH_sensitive_design_startup"
+    assert state.row_counts["raw/wet_lab/ae_kd_ratio.csv"] == 2
+    assert state.row_counts["raw/base_sequences/antigen_genotypes.fasta"] == 2
+    assert state.row_counts["raw/base_structures_optional/ab_wt.pdb"] == 2
+    assert "sdAb" not in state.system_roles
+    assert state.module_status == []
+    persisted = read_json(project / "state" / "design_state.json")
+    assert persisted["project_id"] == "1E62_pH_sensitive_design_startup"
+    assert persisted["domain"] == "antibody_variant_design"
+    assert persisted["objective"] == "Design 1E62 variants with retained neutral binding."
+
+
+def test_build_state_rejects_allowed_source_csv_with_empty_header(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    wet_lab = project / "raw" / "wet_lab"
+    (project / "state").mkdir(parents=True)
+    wet_lab.mkdir(parents=True)
+    _write_csv(wet_lab / "bad.csv", "variant_id,,value", ["com1,,1.0"])
+    write_yaml(
+        project / "project.yaml",
+        {
+            "project_id": "startup_with_bad_header",
+            "domain": "antibody_variant_design",
+            "objective": "Keep invalid source files out of counted evidence.",
+        },
+    )
+    write_yaml(
+        project / "data_contract.yaml",
+        {
+            "contract_id": "bad_header_contract",
+            "local_root": str(project),
+            "allowed_sources": {
+                "wet_lab": {
+                    "evidence_tier": "primary_wet_lab",
+                    "allowed_as_experimental_evidence": True,
+                    "files": ["raw/wet_lab/bad.csv"],
+                },
+            },
+        },
+    )
+
+    state = build_state(project)
+
+    assert state.row_counts["raw/wet_lab/bad.csv"] == 0
+    evidence = read_json(project / "state" / "evidence_cards.json")
+    assert any(
+        card["evidence_id"].startswith("invalid_csv_header_")
+        and card["source_tables"] == ["raw/wet_lab/bad.csv"]
+        and card["actionability"] == "needs_data"
+        for card in evidence
+    )

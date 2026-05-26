@@ -33,6 +33,7 @@ SOURCE_ADAPTERS = {
 }
 
 DEFAULT_SOURCES = ("pubmed", "biorxiv", "arxiv", "semantic_scholar")
+LITERATURE_SOURCES_ENV = "DESIGN_SCIENTIST_LITERATURE_SOURCES"
 SOURCE_PRIORITY = {
     "semantic_scholar": 4.0,
     "s2": 4.0,
@@ -55,7 +56,17 @@ METHOD_KEYWORDS = (
     "neutral binding",
     "ph dependent",
     "ph-dependent",
+    "ph sensitive",
+    "ph-sensitive",
+    "acidic ph",
+    "histidine",
+    "antibody",
+    "antibodies",
+    "antigen binding",
+    "dissociation",
+    "hbsag",
     "protein engineering",
+    "protein design",
     "retrospective",
     "sequential design",
     "variant",
@@ -74,6 +85,7 @@ SCORE_FIELDS = (
     "recency",
     "citation_count",
     "method_keyword_score",
+    "query_match_score",
     "source_priority",
     "total_score",
 )
@@ -98,8 +110,9 @@ def run_literature_search(
     framework_dir = ensure_dir(root / "framework")
     cache_dir = ensure_dir(framework_dir / "cache" / "literature_raw")
     context = _build_context(root)
-    requested = _validate_sources(list(sources or DEFAULT_SOURCES))
-    plan_queries = _build_query_plan(root, context, requested, explicit_sources=sources is not None)
+    selected_sources = _sources_from_argument_or_env(sources)
+    requested = _validate_sources(list(selected_sources or DEFAULT_SOURCES))
+    plan_queries = _build_query_plan(root, context, requested, explicit_sources=selected_sources is not None)
     plan = {
         "version": "literature_search_v2",
         "offline_fixtures": bool(offline_fixtures),
@@ -130,13 +143,14 @@ def run_literature_search(
                     f"Malformed literature cache at {source_cache_dir}"
                 )
                 raw_count = _raw_count_for_source(source, source_cache_dir, fallback=0)
+                reason = _safe_error_text(exc)
                 error = {
                     "query_id": query["query_id"],
                     "source": source,
                     "cache_path": _relative_artifact_path(source_cache_dir, root),
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "reason": str(exc),
+                    "error": reason,
+                    "reason": reason,
                 }
                 errors.append(error)
                 event = {
@@ -146,9 +160,9 @@ def run_literature_search(
                     "source": source,
                     "raw_count": raw_count,
                     "normalized_count": 0,
-                    "reason": str(exc),
+                    "reason": reason,
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
+                    "error": reason,
                 }
                 events.append(
                     _with_source_event_metadata(
@@ -242,6 +256,7 @@ def run_literature_search(
                     )
                 )
             except LiteratureSourceTemporarilyUnavailable as exc:
+                reason = _safe_error_text(exc)
                 event = {
                     "event": "source_skip",
                     "status": "degraded",
@@ -249,7 +264,7 @@ def run_literature_search(
                     "source": source,
                     "raw_count": _raw_count_for_source(source, source_cache_dir, fallback=0),
                     "normalized_count": 0,
-                    "reason": str(exc),
+                    "reason": reason,
                     "error_type": type(exc).__name__,
                 }
                 events.append(
@@ -267,13 +282,14 @@ def run_literature_search(
             except Exception as exc:
                 is_cache_error = cache_status == "cache_error" or isinstance(exc, LiteratureCacheError)
                 raw_count = _raw_count_for_source(source, source_cache_dir, fallback=0)
+                reason = _safe_error_text(exc)
                 error = {
                     "query_id": query["query_id"],
                     "source": source,
                     "cache_path": _relative_artifact_path(source_cache_dir, root),
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "reason": str(exc),
+                    "error": reason,
+                    "reason": reason,
                 }
                 errors.append(error)
                 event = {
@@ -283,9 +299,9 @@ def run_literature_search(
                     "source": source,
                     "raw_count": raw_count,
                     "normalized_count": 0,
-                    "reason": str(exc),
+                    "reason": reason,
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
+                    "error": reason,
                 }
                 events.append(
                     _with_source_event_metadata(
@@ -343,6 +359,15 @@ def _validate_sources(sources: list[str]) -> list[str]:
         if clean not in requested:
             requested.append(clean)
     return requested or list(DEFAULT_SOURCES)
+
+
+def _sources_from_argument_or_env(sources: list[str] | tuple[str, ...] | None) -> list[str] | None:
+    if sources is not None:
+        return list(sources)
+    raw = os.getenv(LITERATURE_SOURCES_ENV)
+    if raw is None:
+        return None
+    return [source for source in re.split(r"[,\s]+", raw) if source]
 
 
 def _build_query_plan(
@@ -668,7 +693,7 @@ def _rank_and_dedupe(cards: list[dict[str, Any]], *, max_papers: int) -> tuple[l
     for rank, item in enumerate(scored, start=1):
         card = item["card"]
         key = _dedupe_key(card)
-        ranked_item = {**item, "rank": rank, "dedupe_key": key}
+        ranked_item = {**item, "rank": rank, "original_rank": rank, "dedupe_key": key}
         ranked_items.append(ranked_item)
         if key is None:
             continue
@@ -684,22 +709,57 @@ def _rank_and_dedupe(cards: list[dict[str, Any]], *, max_papers: int) -> tuple[l
     first_rank_by_key = {key: selected[key]["rank"] for key in ordered_keys}
     final_items = [selected[key] for key in ordered_keys[:selected_limit]]
     final_cards = [item["card"] for item in final_items]
+    display_items = []
+    for item in ranked_items:
+        selected_flag = _score_item_selected(
+            item,
+            selected_keys=selected_keys,
+            first_rank_by_key=first_rank_by_key,
+        )
+        exclusion_reason = _score_item_exclusion_reason(
+            item,
+            selected_keys=selected_keys,
+            first_rank_by_key=first_rank_by_key,
+        )
+        display_items.append(
+            {
+                **item,
+                "selected_flag": selected_flag,
+                "exclusion_reason": exclusion_reason,
+            }
+        )
+    display_items = sorted(display_items, key=_score_row_display_sort_key)
     score_rows = [
         _score_row(
-            rank=item["rank"],
+            rank=display_rank,
             card=item["card"],
             components=item["components"],
-            selected=_score_item_selected(item, selected_keys=selected_keys, first_rank_by_key=first_rank_by_key),
-            exclusion_reason=_score_item_exclusion_reason(
-                item,
-                selected_keys=selected_keys,
-                first_rank_by_key=first_rank_by_key,
-            ),
+            selected=item["selected_flag"],
+            exclusion_reason=item["exclusion_reason"],
             dedupe_key=item["dedupe_key"],
         )
-        for item in ranked_items
+        for display_rank, item in enumerate(display_items, start=1)
     ]
     return final_cards, score_rows
+
+
+def _score_row_display_sort_key(item: dict[str, Any]) -> tuple[int, int, float, str]:
+    reason = item.get("exclusion_reason") or ""
+    if item.get("selected_flag"):
+        group = 0
+    elif reason == "below_max_papers_cutoff":
+        group = 1
+    elif reason == "duplicate_dedupe_key":
+        group = 2
+    else:
+        group = 3
+    components = item.get("components", {})
+    return (
+        group,
+        int(item.get("original_rank") or item.get("rank") or 0),
+        -float(components.get("total_score") or 0.0),
+        str(item.get("card", {}).get("paper_id") or ""),
+    )
 
 
 def _score_item_selected(
@@ -734,11 +794,18 @@ def _score_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
     scored = []
     for card in cards:
         year = _int_or_zero(card.get("year"))
-        recency = float(year - min_year) if year and min_year else 0.0
+        recency = min(float(year - min_year), 10.0) / 2.0 if year and min_year else 0.0
         citation_count = _int_or_zero(card.get("citation_count"))
         method_keyword_score = float(_method_keyword_score(card))
+        query_match_score = float(_query_match_score(card))
         source_priority = SOURCE_PRIORITY.get(str(card.get("source") or ""), 1.0)
-        total_score = recency + min(citation_count, 1000) / 100.0 + method_keyword_score + source_priority
+        total_score = (
+            recency
+            + min(citation_count, 1000) / 100.0
+            + method_keyword_score
+            + query_match_score
+            + source_priority
+        )
         scored.append(
             {
                 "card": card,
@@ -746,6 +813,7 @@ def _score_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "recency": recency,
                     "citation_count": citation_count,
                     "method_keyword_score": method_keyword_score,
+                    "query_match_score": query_match_score,
                     "source_priority": source_priority,
                     "total_score": round(total_score, 6),
                 },
@@ -768,6 +836,40 @@ def _score_sort_key(item: dict[str, Any]) -> tuple[float, int, str, str]:
 def _method_keyword_score(card: dict[str, Any]) -> int:
     haystack = f"{card.get('title', '')} {card.get('abstract', '')}".lower()
     return sum(1 for keyword in METHOD_KEYWORDS if keyword in haystack)
+
+
+def _query_match_score(card: dict[str, Any]) -> int:
+    haystack = f"{card.get('title', '')} {card.get('abstract', '')}".lower()
+    terms = _query_terms(str(card.get("search_query") or ""))
+    return sum(1 for term in terms if term in haystack)
+
+
+def _query_terms(query: str) -> list[str]:
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9-]{2,}", query.replace("_", " ").lower())
+    stop = {
+        "and",
+        "are",
+        "benchmark",
+        "design",
+        "experimental",
+        "framework",
+        "method",
+        "methods",
+        "paper",
+        "papers",
+        "project",
+        "query",
+        "retained",
+        "search",
+        "the",
+        "with",
+    }
+    terms: list[str] = []
+    for token in tokens:
+        if token in stop or token in terms:
+            continue
+        terms.append(token)
+    return terms[:20]
 
 
 def _dedupe_key(card: dict[str, Any]) -> str | None:
@@ -844,6 +946,7 @@ def _score_row(
         "recency": _format_score(components["recency"]),
         "citation_count": components["citation_count"],
         "method_keyword_score": _format_score(components["method_keyword_score"]),
+        "query_match_score": _format_score(components["query_match_score"]),
         "source_priority": _format_score(components["source_priority"]),
         "total_score": _format_score(components["total_score"]),
     }
@@ -934,19 +1037,204 @@ def _clean_str(value: Any) -> str | None:
     return text or None
 
 
+def build_project_literature_context(
+    project_dir: str | Path,
+    *,
+    fallback_domain: str | None = None,
+) -> LiteratureContext:
+    """Build search context from project, estimand, and data-contract metadata."""
+    root = Path(project_dir).expanduser().resolve()
+    project = _read_yaml_if_exists(root / "project.yaml")
+    estimands = _read_yaml_if_exists(root / "estimands.yaml")
+    data_contract = _read_yaml_if_exists(root / "data_contract.yaml")
+
+    project_phrases = _project_context_phrases(project, fallback_domain=fallback_domain)
+    estimand_phrases = _estimand_context_phrases(estimands)
+    source_hints = _data_contract_source_hints(data_contract)
+    project_terms = project_phrases + estimand_phrases + source_hints
+    query_terms = (
+        project_phrases
+        + estimand_phrases
+        + _conditional_ph_sensitive_terms(project_terms)
+        + source_hints
+        + [
+            "active learning",
+            "experimental design",
+            "sequential design",
+        ]
+    )
+    query = _join_query_phrases(query_terms) or _join_query_phrases(
+        [fallback_domain, "active learning", "experimental design"]
+    )
+    relevance = _join_relevance_phrases(project_terms) or "general iterative design-scientist project"
+    return LiteratureContext(query=query, relevance=relevance)
+
+
 def _build_context(project_dir: Path) -> LiteratureContext:
-    project = read_yaml(project_dir / "project.yaml") if (project_dir / "project.yaml").exists() else {}
-    parts: list[str] = []
-    for key in ("name", "goal", "project_id"):
-        value = project.get(key)
-        if value:
-            parts.append(str(value))
+    return build_project_literature_context(project_dir)
+
+
+def _read_yaml_if_exists(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return read_yaml(path)
+
+
+def _project_context_phrases(project: dict[str, Any], *, fallback_domain: str | None) -> list[str]:
+    phrases: list[str] = []
+    for key in (
+        "objective",
+        "primary_goal",
+        "domain",
+        "system",
+        "name",
+        "goal",
+        "project_id",
+    ):
+        phrases.extend(_text_phrases(project.get(key)))
     target_systems = project.get("target_systems")
     if isinstance(target_systems, list):
-        parts.extend(str(item) for item in target_systems)
-    query = _compact_query(" ".join(parts)) or "active learning protein engineering"
-    relevance = project.get("goal") or project.get("name") or "general iterative design-scientist project"
-    return LiteratureContext(query=query, relevance=str(relevance))
+        for target_system in target_systems:
+            phrases.extend(_text_phrases(target_system))
+    constraints = project.get("constraints")
+    if isinstance(constraints, dict):
+        system_roles = constraints.get("system_roles")
+        if isinstance(system_roles, dict):
+            for system, role in system_roles.items():
+                phrases.extend(_text_phrases(system))
+                phrases.extend(_text_phrases(role))
+    if fallback_domain:
+        phrases.extend(_text_phrases(fallback_domain))
+    return _dedupe_phrases(phrases)
+
+
+def _estimand_context_phrases(estimands: dict[str, Any]) -> list[str]:
+    phrases: list[str] = []
+    for section in ("primary", "secondary", "guardrails", "estimands", "objectives"):
+        phrases.extend(_estimand_item_phrases(estimands.get(section)))
+    return _dedupe_phrases(phrases)
+
+
+def _estimand_item_phrases(value: Any) -> list[str]:
+    phrases: list[str] = []
+    if isinstance(value, dict):
+        for key in ("name", "endpoint", "interpretation", "description", "success_direction"):
+            phrases.extend(_text_phrases(value.get(key)))
+        for nested in value.values():
+            if isinstance(nested, (dict, list)):
+                phrases.extend(_estimand_item_phrases(nested))
+    elif isinstance(value, list):
+        for item in value:
+            phrases.extend(_estimand_item_phrases(item))
+    return phrases
+
+
+def _data_contract_source_hints(data_contract: dict[str, Any]) -> list[str]:
+    phrases: list[str] = []
+    allowed_sources = data_contract.get("allowed_sources")
+    if isinstance(allowed_sources, dict):
+        for source_name, source in allowed_sources.items():
+            phrases.extend(_text_phrases(source_name))
+            if isinstance(source, dict):
+                phrases.extend(_text_phrases(source.get("evidence_tier")))
+    allowed_tables = data_contract.get("allowed_tables")
+    if isinstance(allowed_tables, list):
+        for table in allowed_tables:
+            if not isinstance(table, dict):
+                continue
+            for key in ("name", "role"):
+                phrases.extend(_text_phrases(table.get(key)))
+            measurement_types = table.get("measurement_types")
+            if isinstance(measurement_types, list):
+                for measurement_type in measurement_types:
+                    phrases.extend(_text_phrases(measurement_type))
+    return _dedupe_phrases(phrases)
+
+
+def _conditional_ph_sensitive_terms(phrases: list[str]) -> list[str]:
+    text = " ".join(phrases).lower()
+    has_ph_context = bool(
+        re.search(r"\bph\b|ph[-\s]?\d|ph-sensitive|ph-dependent|neutral-ph|acidic-ph", text)
+        or "acidic ph" in text
+        or "neutral ph" in text
+        or "acid binding" in text
+        or "neutral binding" in text
+    )
+    has_antibody_or_protein_context = any(
+        term in text
+        for term in (
+            "antibody",
+            "anti-hbsag",
+            "hbsag",
+            "protein",
+            "binding",
+        )
+    )
+    if not has_ph_context or not has_antibody_or_protein_context:
+        return []
+    return [
+        "pH-sensitive antibody protein engineering",
+        "pH-dependent binding",
+        "neutral pH binding retention",
+        "acidic pH release",
+    ]
+
+
+def _text_phrases(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        phrases: list[str] = []
+        for item in value:
+            phrases.extend(_text_phrases(item))
+        return phrases
+    if isinstance(value, dict):
+        return []
+    text = str(value).replace("_", " ")
+    text = re.sub(r"\s+", " ", text).strip(" .;,")
+    return [text] if text else []
+
+
+def _dedupe_phrases(phrases: list[str]) -> list[str]:
+    kept: list[str] = []
+    seen: set[str] = set()
+    for phrase in phrases:
+        clean = _clean_str(phrase)
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(clean)
+    return kept
+
+
+def _join_query_phrases(phrases: list[str | None], *, max_phrases: int = 32) -> str:
+    clean_phrases = _dedupe_phrases([phrase for phrase in phrases if phrase])
+    return " ".join(clean_phrases[:max_phrases])
+
+
+def _join_relevance_phrases(phrases: list[str]) -> str:
+    clean_phrases = _dedupe_phrases(phrases)
+    return "; ".join(clean_phrases[:12])
+
+
+def _safe_error_text(exc: BaseException) -> str:
+    return _redact_sensitive_text(str(exc))
+
+
+def _redact_sensitive_text(text: str) -> str:
+    redacted = text
+    for key, value in os.environ.items():
+        if not value or len(value) < 4:
+            continue
+        key_upper = key.upper()
+        if not any(marker in key_upper for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+            continue
+        redacted = redacted.replace(value, "[redacted]")
+    redacted = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[redacted]", redacted)
+    return redacted
 
 
 def _compact_query(text: str) -> str:
