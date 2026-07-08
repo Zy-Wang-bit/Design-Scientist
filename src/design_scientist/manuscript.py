@@ -1090,7 +1090,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
     conflicts = os.environ.get("DS_PAPER_CONFLICTS", "Conflict of interest statement to be inserted before submission.")
     ai_disclosure = os.environ.get(
         "DS_PAPER_AI_DISCLOSURE",
-        "AI/Codex assisted code generation, artifact consistency checks, and editorial revision under author review; all scientific claims, code, and manuscript text require author verification before submission.",
+        "AI/Codex assisted code implementation, test generation, artifact consistency checks, figure and table assembly, and editorial revision. The submitting authors are responsible for the study design, data interpretation, scientific claims, code release, and final manuscript text.",
     )
     utility_winner = str(gate_report.get("utility_winner") or "same_pool_reference_scorer")
     selected_utility_rank = gate_report.get("selected_utility_rank", "")
@@ -1596,10 +1596,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
         "",
         "## Acknowledgements and AI Use Disclosure",
         "",
-        (
-            f"{ai_disclosure} Final authorship, funding, conflict, and contact information must be verified by "
-            "the submitting authors before journal submission."
-        ),
+        ai_disclosure,
         "",
         "## References",
         "",
@@ -3499,7 +3496,7 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
     conflicts = os.environ.get("DS_PAPER_CONFLICTS", "conflict of interest statement to be inserted before submission")
     ai_disclosure = os.environ.get(
         "DS_PAPER_AI_DISCLOSURE",
-        "AI/Codex assisted code generation, artifact consistency checks, and editorial revision under author review; all scientific claims, code, and manuscript text require author verification before submission.",
+        "AI/Codex assisted code implementation, test generation, artifact consistency checks, figure and table assembly, and editorial revision. The submitting authors are responsible for the study design, data interpretation, scientific claims, code release, and final manuscript text.",
     )
     mechanisms = config.get("mechanisms") if isinstance(config.get("mechanisms"), list) else []
     worlds = config.get("worlds") if isinstance(config.get("worlds"), list) else []
