@@ -1293,7 +1293,8 @@ def test_external_antibody_benchmark_artifacts_feed_ph_switch_manuscript(
     assert artifacts["summary_rows"][0]["method"] == "pcig_external_replay"
     assert len(_ph_switch_graph_external_antibody_rows(context)) == 4
     sentence = _ph_switch_graph_external_benchmark_sentence(context)
-    assert "External antibody replay adds an independent held-out affinity-ranking check" in sentence
+    assert "External antibody replay adds an out-of-project held-out affinity-ranking check" in sentence
+    assert "rather than evidence that pH-Switch Graph outperforms generic affinity ranking" in sentence
     assert "0.937" in sentence
     assert "does not validate 1E62 pH 6.0 dissociation" in sentence
 

@@ -1174,11 +1174,10 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "have not yet been measured. We introduce pH-Switch Graph Search, a computational hypothesis-generation algorithm that builds a "
             "sequence-context protonation-prior graph from standardized sequence and endpoint records, proposes "
             "new mutation positions, composes multi-site design-state programs, and selects a cost-constrained "
-            "computational panel under internal feasibility priors. In a fixed-seed synthetic stress benchmark, "
-            f"the selected mechanism reached mean best-in-batch synthetic-oracle utility {_compact_float_text(selected_row.get('mean_best_selected_utility'))}, "
-            f"{same_pool_abstract_relation}, "
-            f"while maintaining a generated-pool new-site rate of {_compact_float_text(selected_row.get('mean_new_site_rate'))} "
-            f"with mean selected new-site count {_compact_float_text(selected_row.get('mean_selected_new_site_count'))}. "
+            "computational panel under internal feasibility priors. In fixed-seed computational stress tests, "
+            f"it maintained mean best-in-batch synthetic-oracle utility {_compact_float_text(selected_row.get('mean_best_selected_utility'))}, "
+            f"{same_pool_abstract_relation}, and generated new-site candidates at rate "
+            f"{_compact_float_text(selected_row.get('mean_new_site_rate'))}. "
             "The resulting project panel contains generated heavy/light sequences rather than a re-ranking of "
             "the observed pool. This is a candidate-space expansion result with a near-tie selected-utility "
             "boundary, not evidence that rank 1 in the eligibility-gated report is a statistically significant "
@@ -1394,7 +1393,9 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
         "## Evaluation Design",
         "",
         (
-            "The benchmark evaluates whether a mechanism can generate useful new sequences, not merely recover "
+            "The evaluation is organized in three evidence tiers: public pH-switch table replay and public "
+            "antibody ranking replay, project-data masking on measured 1E62 variants, and internal stress tests "
+            "that ask whether a mechanism can generate useful new sequences. The benchmark evaluates whether a mechanism can generate useful new sequences, not merely recover "
             "known variants. pH-Switch Graph Search was compared with random editing, single-edit scanning, "
             "observed recombination, protonatable-residue scans, charge-swap scans, combinatorial edit-library "
             "generation, fixed-pool selection, random feasible selection, fixed mix selection, "
@@ -1407,13 +1408,14 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "capability and excludes observed-pool-only methods from becoming the selected generated mechanism. "
             "The synthetic oracle is used only after selection, so these measurements evaluate computational "
             "stress-test behavior rather than true 1E62 wet-lab activity. The 60 overall rows are a fixed "
-            "6 worlds x 10 seeds computational stress grid, not independent biological replicates. False-claim "
-            "rate is the fraction of selected candidates that fail the hidden stress-world feasibility/claim "
-            "criterion after selection; selector-visible records do not contain that hidden criterion. A separate retrospective masking "
+            "6 worlds x 10 seeds computational stress grid, not independent biological replicates. The "
+            "post-selection hidden-feasibility failure rate, stored in machine-readable tables as "
+            "`false_claim_rate`, is the fraction of selected candidates that fail the hidden stress-world "
+            "feasibility criterion after selection; selector-visible records do not contain that hidden criterion. A separate retrospective masking "
             "benchmark hides measured project variants and tests observed-pool ranking against held-out endpoints. "
             f"Benchmark rows, paired comparisons, and ablations are provided in {table_links['benchmark']}, "
             f"{table_links['pairwise']}, and {table_links['ablation']}. The multi-objective metric table "
-            f"({table_links['quality']}) reports utility, pH-contrast score, false-claim rate, constraint pass "
+            f"({table_links['quality']}) reports utility, pH-contrast score, hidden-feasibility failure rate, constraint pass "
             "rate, cost, generated new-site count, and selected new-site count for the same mechanisms. "
             f"The Pareto claim-boundary table ({table_links['pareto']}) records which conclusions are supported "
             "and which are not supported by the benchmark. A separate external antibody replay table "
@@ -1438,9 +1440,12 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "penalizes high-prior distractor sites to expose mechanisms that only replay the hand-coded pH-switch prior, "
             "but it is still a computational stress test rather than an independent biological assay. "
             "This method is therefore evaluated as a bounded-evidence design algorithm, not as a conventional "
-            "sequence-to-fitness supervised-learning model trained on a large labeled sequence family; the real-data "
-            "masking run checks leakage and observed-pool ranking, while the external replays check ranking transfer "
-            "on public antibody tables. "
+            "sequence-to-fitness supervised-learning model trained on a large labeled sequence family. It does "
+            "not claim a homology-controlled independent test set: the leave-one-variant project masking checks "
+            "leakage and observed-pool ranking, the leave-one-study public pH replay checks out-of-project "
+            "ranking transfer across curated literature tables, and the FLAb-style replay checks generic antibody "
+            "affinity ranking rather than pH switching. These checks make the evidence auditable, but they remain "
+            "below the evidentiary strength of a prospective 1E62 wet-lab validation set. "
             f"{claim_boundary_text}"
         ),
         "",
@@ -1478,7 +1483,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             f"{quality_metric_text} This table is included because the claim is not that one scalar score proves "
             "biological activity. The relevant computational evidence is whether a mechanism simultaneously "
             f"generates non-observed sequence space, {same_pool_quality_relation}, avoids "
-            "worse false-claim behavior than fixed-pool baselines, and spends a feasible assay budget."
+            "worse hidden-feasibility failure behavior than fixed-pool baselines, and spends a feasible assay budget."
         ),
         "",
         comparison_text,
@@ -1524,7 +1529,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "Real-data retrospective masking provides a separate, conservative check on measured 1E62 variants. "
             f"The top observed-pool mechanism was `{project_masking_top.get('mechanism', 'not recorded')}` with "
             f"mean best feasible held-out utility {_compact_float_text(project_masking_top.get('mean_best_feasible_utility'))}, "
-            f"mean hit rate {_compact_float_text(project_masking_top.get('mean_hit_rate'))}, and mean false-claim rate "
+            f"mean hit rate {_compact_float_text(project_masking_top.get('mean_hit_rate'))}, and mean hidden-feasibility failure rate "
             f"{_compact_float_text(project_masking_top.get('mean_false_claim_rate'))}. All observed-pool methods tied "
             "under this very small leave-one-variant task. This benchmark is observed-pool only and does not evaluate "
             "generated candidates, so it is a leakage and boundary check rather than evidence that the generated "
@@ -3740,43 +3745,48 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
             [
                 "# Supplementary Data",
                 "",
-                "This single supplementary file indexes the machine-readable tables and files supplied with the draft.",
+                "This reader-facing supplement summarizes the machine-readable tables and files supplied with the draft.",
+                "It is the intended entry point for reviewers; raw literature API responses and cached third-party full text are not part of the submission package.",
+                "",
+                "## How to Read the Supplement",
+                "",
+                "The evidence is organized in four layers. Tables S1 and S17 describe the literature-derived design context and run configuration. Tables S2-S4, S8-S10, S12, and S18 describe computational stress tests and ablations. Tables S13-S16 describe out-of-project public antibody and pH-switch replays. Tables S5-S7 and S11 describe the proposed 1E62 computational panel and sequence annotations. Generated 1E62 candidates are hypotheses for a future assay round and are not wet-lab observations.",
                 "",
                 "## Tables",
                 "",
-                "- Table S1: `tables/related_work_matrix.csv`",
-                "- Table S2: `tables/benchmark_summary.csv`",
-                "- Table S3: `tables/pairwise_comparisons.csv`",
-                "- Table S4: `tables/ablation_summary.csv`",
-                "- Table S5: `tables/project_selected_candidates.csv`",
-                "- Table S6: `tables/project_candidate_rationale.csv`",
-                "- Table S7: `tables/design_examples.csv`",
-                "- Table S8: `tables/statistical_summary.csv`",
-                "- Table S9: `tables/weight_sensitivity.csv`",
-                "- Table S10: `tables/quality_metrics.csv`",
-                "- Table S11: `tables/candidate_annotation.csv`",
-                "- Table S12: `tables/pareto_claim_boundary.csv`",
-                "- Table S13: `tables/external_antibody_benchmark_summary.csv`",
-                "- Table S14: `tables/external_ph_switch_benchmark_summary.csv`",
-                "- Table S15: `tables/external_ph_switch_variant_replay.csv`",
-                "- Table S16: `tables/external_ph_switch_variant_method_summary.csv`",
-                "- Table S17: `tables/configuration_contract.csv`",
-                "- Table S18: `tables/world_block_comparison.csv`",
+                "- Table S1: `tables/related_work_matrix.csv` - mechanism classes and evidence boundaries extracted from the literature search.",
+                "- Table S2: `tables/benchmark_summary.csv` - per-mechanism summary across the declared computational stress worlds.",
+                "- Table S3: `tables/pairwise_comparisons.csv` - paired seed/world comparisons against each baseline; use this table for same-pool near-tie interpretation.",
+                "- Table S4: `tables/ablation_summary.csv` - component ablations testing whether generation, counterfactual site mapping, pair programs, and selection reserve contribute.",
+                "- Table S5: `tables/project_selected_candidates.csv` - selected 1E62 computational hypotheses with generated sequence fields.",
+                "- Table S6: `tables/project_candidate_rationale.csv` - candidate-level rationale, evidence boundary, and unsupported-claim notes.",
+                "- Table S7: `tables/design_examples.csv` - example generated candidates and edit programs.",
+                "- Table S8: `tables/statistical_summary.csv` - descriptive intervals over the fixed computational stress grid.",
+                "- Table S9: `tables/weight_sensitivity.csv` - sensitivity of selected utility and new-site generation to acquisition-weight perturbations.",
+                "- Table S10: `tables/quality_metrics.csv` - multi-objective metrics including utility, pH contrast, hidden-feasibility failure, cost, and new-site counts.",
+                "- Table S11: `tables/candidate_annotation.csv` - sequence-only mutation annotations; these are not structural contact assignments.",
+                "- Table S12: `tables/pareto_claim_boundary.csv` - supported and unsupported claims for each major mechanism.",
+                "- Table S13: `tables/external_antibody_benchmark_summary.csv` - public FLAb-style held-out affinity-ranking replay; not a pH-switch validation.",
+                "- Table S14: `tables/external_ph_switch_benchmark_summary.csv` - leave-one-study public pH-switch literature-table replay.",
+                "- Table S15: `tables/external_ph_switch_variant_replay.csv` - leave-one-variant public pH-switch replay with held-out ratios hidden during scoring.",
+                "- Table S16: `tables/external_ph_switch_variant_method_summary.csv` - method-level public pH-switch replay correlations and top-tertile enrichment.",
+                "- Table S17: `tables/configuration_contract.csv` - benchmark budget, generation budget, edit-width settings, and sentinel values.",
+                "- Table S18: `tables/world_block_comparison.csv` - per-world comparison against same-pool, fixed-pool, and strong simple generation controls.",
                 "",
                 "## Files",
                 "",
-                "- File S1: `reproducibility_contract.md`",
-                "- File S2: `oracle_and_stress_worlds.md`",
-                "- File S3: `data_dictionary.json`",
-                "- File S4: `algorithm_hyperparameters.json`",
-                "- File S5: `submission_metadata.md`",
-                "- File S6: `algorithm_formal_definition.md`",
-                "- File S7: `figure_alt_text.json`",
-                "- File S8: `submission_readiness_checklist.md`",
+                "- File S1: `reproducibility_contract.md` - command sequence and fixed run contract.",
+                "- File S2: `oracle_and_stress_worlds.md` - hidden-oracle and stress-world definitions, including leakage limits.",
+                "- File S3: `data_dictionary.json` - standardized input and output schema definitions.",
+                "- File S4: `algorithm_hyperparameters.json` - fixed pH-Switch Graph defaults and lifecycle contract.",
+                "- File S5: `submission_metadata.md` - author-provided submission metadata; draft placeholders remain blockers until authors complete them.",
+                "- File S6: `algorithm_formal_definition.md` - formal mechanism definition, score terms, and update contract.",
+                "- File S7: `figure_alt_text.json` - accessibility text for figures.",
+                "- File S8: `submission_readiness_checklist.md` - checklist separating scientific artifacts from author-side submission metadata.",
                 "",
                 "## Evidence Boundary",
                 "",
-                "Generated 1E62 candidates are computational hypotheses. The supplement does not contain prospective wet-lab validation.",
+                "Generated 1E62 candidates are computational hypotheses. The supplement does not contain prospective wet-lab validation, kinetic pH 6.0 release measurements, or solved antigen-bound structural evidence. The public pH-switch replay is an out-of-project sanity check on mutation-context ranking, not an independent validation of the 1E62 generator.",
             ]
         )
         + "\n",
@@ -4516,7 +4526,8 @@ def _ph_switch_graph_quality_metric_sentence(context: dict[str, Any]) -> str:
     selected_new_sites = _compact_float_text(ph_row.get("mean_selected_new_site_count"))
     return (
         "The multi-objective quality table reports that pH-Switch Graph reached selected utility "
-        f"{utility}, pH-contrast score {contrast}, false-claim rate {false_claim}, constraint pass rate "
+        f"{utility}, pH-contrast score {contrast}, post-selection hidden-feasibility failure rate "
+        f"{false_claim}, constraint pass rate "
         f"{constraint}, generated new-site count {new_sites}, and selected new-site count {selected_new_sites} "
         "in the overall benchmark row."
     )
@@ -4582,13 +4593,14 @@ def _ph_switch_graph_external_benchmark_sentence(context: dict[str, Any]) -> str
     oracle_norm = _compact_float_text(oracle_row.get("mean_best_selected_normalized_fitness"))
     regret = _compact_float_text(pcig_row.get("mean_regret_vs_oracle"))
     return (
-        "External antibody replay adds an independent held-out affinity-ranking check using public FLAb-style "
+        "External antibody replay adds an out-of-project held-out affinity-ranking check using public FLAb-style "
         f"antibody datasets. Across {dataset_count} datasets, pH-Switch Graph external replay reached mean "
         f"best selected normalized fitness {pcig_norm}, compared with random measured-candidate selection "
         f"{random_norm}, the fewest-edits baseline {fewest_norm}, and the measured oracle upper bound "
-        f"{oracle_norm}; mean regret versus the measured oracle was {regret}. This supports a limited "
-        "external ranking sanity check but still does not validate 1E62 pH 6.0 dissociation or prospective "
-        "wet-lab activity."
+        f"{oracle_norm}; mean regret versus the measured oracle was {regret}. Because all simple selectors "
+        "tie on this small measured-candidate replay, it is a leakage and transfer sanity check rather than "
+        "evidence that pH-Switch Graph outperforms generic affinity ranking. It does not validate 1E62 pH 6.0 "
+        "dissociation or prospective wet-lab activity."
     )
 
 
@@ -4865,8 +4877,10 @@ def _ph_switch_graph_external_ph_benchmark_sentence(context: dict[str, Any]) -> 
         f"{histidine_ratio}, the ionizable-count baseline {ionizable_ratio}, and the measured oracle upper bound "
         f"{oracle_ratio}; regret versus the oracle was {regret}. On normalized log-ratio, the primary "
         f"literature-transfer score {normalized_histidine_relation} histidine-count performance, while the raw "
-        f"mean ratio {raw_histidine_relation} the histidine-count baseline; both views are reported because "
-        "datasets have different selectivity ranges. The transition score tests mutation-context features rather "
+        f"mean ratio {raw_histidine_relation} the histidine-count baseline. This discordance is reported as a "
+        "claim boundary: the public-table replay supports a modest mutation-context transfer signal after "
+        "study-scale normalization, not a robust raw-ratio win over simple histidine counting. The transition "
+        "score tests mutation-context features rather "
         f"than counts alone.{variant_sentence} It remains a public-table sanity check, not validation of the full "
         f"1E62 generator or prospective pH 6.0 dissociation.{her2_boundary}"
     )
@@ -6479,7 +6493,7 @@ def _validate_algorithm_manuscript(
             "soft feasibility/guardrail proxy",
             "6 worlds",
             "not independent biological replicates",
-            "false-claim rate",
+            ("hidden-feasibility failure rate", "false-claim rate"),
             "Table S15",
             "Table S16",
         )

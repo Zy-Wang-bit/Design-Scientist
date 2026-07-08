@@ -61,5 +61,23 @@ def test_bioinformatics_structured_abstract_uses_external_ph_switch_table(
     assert "5-table public pH-switch replay" in abstract
     assert "0.846 versus 0.709" in abstract
     assert "leave-one-variant replay over 35 variants gave r=0.378 and context-prior enrichment 1.296" in abstract
-    assert "provide bounded, auditable checks" in abstract
+    assert "Public pH-switch replays, project-data masking, and computational stress tests provide bounded, auditable checks" in abstract
     renderer._validate_structured_bioinformatics_abstract(abstract)
+
+
+def test_bioinformatics_source_package_excludes_literature_caches(tmp_path: Path) -> None:
+    renderer = _load_renderer()
+    project_dir = tmp_path / "project"
+    cache_raw = project_dir / "framework" / "cache" / "literature_raw" / "query" / "raw.json"
+    cache_fulltext = project_dir / "framework" / "cache" / "literature_fulltext" / "paper.txt"
+    regular_framework = project_dir / "framework" / "paper_cards.json"
+    cache_raw.parent.mkdir(parents=True)
+    cache_fulltext.parent.mkdir(parents=True)
+    regular_framework.parent.mkdir(parents=True, exist_ok=True)
+    cache_raw.write_text("{}", encoding="utf-8")
+    cache_fulltext.write_text("full text", encoding="utf-8")
+    regular_framework.write_text("[]", encoding="utf-8")
+
+    assert renderer._is_submission_cache_file(cache_raw, project_dir)
+    assert renderer._is_submission_cache_file(cache_fulltext, project_dir)
+    assert not renderer._is_submission_cache_file(regular_framework, project_dir)

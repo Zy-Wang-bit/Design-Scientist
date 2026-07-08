@@ -74,7 +74,8 @@ FIGURE_SPECS = {
             "selected synthetic-oracle utility with 95% confidence intervals "
             "across the fixed 6-world x 10-seed computational stress grid, not "
             "independent biological replicates. Pairwise win/tie/loss "
-            "statistics against the same-pool reference are reported in Table S3."
+            "statistics against the same-pool reference are reported in Table S3; "
+            "near ties should not be read as selected-utility superiority."
         ),
         "alt_text": (
             "Bar chart comparing selected computational utility for pH-Switch Graph "
@@ -429,7 +430,7 @@ def _structured_bioinformatics_abstract(paper_dir: Path) -> str:
         "testable mutation sites beyond measured candidates. "
         "Results: pH-Switch Graph Search builds a protonation-prior site graph, generates "
         "one- to three-edit heavy/light-chain hypotheses, and selects a cost-constrained 1E62 panel. "
-        "Computational stress tests and public pH-switch replays provide bounded, auditable checks; "
+        "Public pH-switch replays, project-data masking, and computational stress tests provide bounded, auditable checks; "
         f"{external_ph_clause} "
         "Prospective wet-lab activity is left for validation. "
         f"Availability and Implementation: Code and test artifacts are available at {repository_url}; "
@@ -634,7 +635,11 @@ def _write_source_package(paper_dir: Path, output_zip: Path) -> None:
         project_dir / "framework",
     ):
         if directory.is_dir():
-            file_paths.update(path for path in directory.rglob("*") if path.is_file())
+            file_paths.update(
+                path
+                for path in directory.rglob("*")
+                if path.is_file() and not _is_submission_cache_file(path, project_dir)
+            )
 
     for pattern in ("*.csv", "*.json", "*.md"):
         file_paths.update(path for path in run_dir.glob(pattern) if path.is_file())
@@ -673,6 +678,17 @@ def _write_source_package(paper_dir: Path, output_zip: Path) -> None:
     with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(file_paths):
             archive.write(path, path.relative_to(repo_root))
+
+
+def _is_submission_cache_file(path: Path, project_dir: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(project_dir.resolve())
+    except ValueError:
+        return False
+    parts = set(relative.parts)
+    if "cache" not in parts:
+        return False
+    return bool({"literature_raw", "literature_fulltext"} & parts)
 
 
 def _find_repo_root(path: Path) -> Path:
