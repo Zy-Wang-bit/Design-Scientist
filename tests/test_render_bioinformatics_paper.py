@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -33,6 +34,19 @@ def test_bioinformatics_structured_abstract_uses_external_ph_switch_table(
         + "\n",
         encoding="utf-8",
     )
+    (paper_dir / "algorithm_results_summary.json").write_text(
+        json.dumps(
+            {
+                "external_ph_switch_benchmark": {
+                    "variant_replay_summary": {
+                        "variant_count": 35,
+                        "predicted_vs_observed_normalized_log_ratio_pearson": 0.377779,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("DS_ALLOW_SUBMISSION_PLACEHOLDERS", "1")
     monkeypatch.setenv("DS_PAPER_ARCHIVE_URL", "https://archive.softwareheritage.org/swh:1:snp:test")
 
@@ -40,4 +54,6 @@ def test_bioinformatics_structured_abstract_uses_external_ph_switch_table(
 
     assert "5-table public pH-switch replay" in abstract
     assert "0.846 versus 0.709" in abstract
+    assert "leave-one-variant replay over 35 variants gave r=0.378" in abstract
+    assert "provide bounded, auditable checks" in abstract
     renderer._validate_structured_bioinformatics_abstract(abstract)

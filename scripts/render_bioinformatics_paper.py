@@ -428,8 +428,8 @@ def _structured_bioinformatics_abstract(paper_dir: Path) -> str:
         "testable mutation sites beyond measured candidates. "
         "Results: pH-Switch Graph Search builds a protonation-prior site graph, generates "
         "one- to three-edit heavy/light-chain hypotheses, and selects a cost-constrained 1E62 panel. "
-        "Synthetic stress tests and external pH-switch literature replay support auditable "
-        f"candidate-space expansion; {external_ph_clause} "
+        "Computational stress tests and public pH-switch replays provide bounded, auditable checks; "
+        f"{external_ph_clause} "
         "Prospective wet-lab activity is left for validation. "
         f"Availability and Implementation: Code and test artifacts are available at {repository_url}; "
         f"the submission version is archived at {archive_url}. "
@@ -450,10 +450,34 @@ def _external_ph_switch_abstract_clause(paper_dir: Path) -> str:
     dataset_count = _compact_number(transfer.get("dataset_count"))
     transfer_norm = _compact_number(transfer.get("mean_best_selected_normalized_log_ratio"))
     histidine_norm = _compact_number(histidine.get("mean_best_selected_normalized_log_ratio")) if histidine else "n/a"
+    variant_clause = _external_ph_switch_variant_abstract_clause(paper_dir)
     return (
         f"a {dataset_count}-table public pH-switch replay reached normalized log-ratio "
-        f"{transfer_norm} versus {histidine_norm} for histidine-count selection."
+        f"{transfer_norm} versus {histidine_norm} for histidine-count selection{variant_clause}."
     )
+
+
+def _external_ph_switch_variant_abstract_clause(paper_dir: Path) -> str:
+    summary_path = paper_dir / "algorithm_results_summary.json"
+    if not summary_path.is_file():
+        return ""
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return ""
+    benchmark = payload.get("external_ph_switch_benchmark")
+    if not isinstance(benchmark, dict):
+        return ""
+    variant_summary = benchmark.get("variant_replay_summary")
+    if not isinstance(variant_summary, dict) or not variant_summary:
+        return ""
+    variant_count = _compact_number(variant_summary.get("variant_count"))
+    correlation = _compact_number(
+        variant_summary.get("predicted_vs_observed_normalized_log_ratio_pearson")
+    )
+    if not variant_count or not correlation:
+        return ""
+    return f"; leave-one-variant replay over {variant_count} variants gave r={correlation}"
 
 
 def _summary_row(rows: list[dict[str, str]], method: str) -> dict[str, str]:
