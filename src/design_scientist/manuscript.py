@@ -72,6 +72,18 @@ SUBMISSION_PLACEHOLDER_PHRASES = (
     "no archival DOI is claimed",
     "data release and reviewer-access statement to be inserted before submission",
 )
+SUBMISSION_METADATA_FINDING_CODES = {
+    "bioinformatics_abstract_placeholder",
+    "missing_ai_use_disclosure",
+    "missing_archival_software_url",
+    "missing_conflict_statement",
+    "missing_corresponding_author_email",
+    "missing_data_availability_statement",
+    "missing_funding_statement",
+    "missing_software_license",
+    "missing_stable_repository_url",
+    "unresolved_submission_placeholder",
+}
 STABLE_SOFTWARE_ARCHIVE_MARKERS = (
     "doi.org/",
     "zenodo",
@@ -6786,12 +6798,35 @@ def _validate_algorithm_manuscript(
     _validate_artifact_links(manuscript, paper_dir, "manuscript.md", findings)
     errors = sum(1 for finding in findings if finding["severity"] == "error")
     warnings = sum(1 for finding in findings if finding["severity"] == "warning")
+    scientific_findings = [
+        finding for finding in findings if not _readiness_finding_is_submission_metadata(finding)
+    ]
+    scientific_errors = sum(
+        1 for finding in scientific_findings if finding["severity"] == "error"
+    )
+    scientific_warnings = sum(
+        1 for finding in scientific_findings if finding["severity"] == "warning"
+    )
+    submission_metadata_errors = sum(
+        1
+        for finding in findings
+        if finding["severity"] == "error" and _readiness_finding_is_submission_metadata(finding)
+    )
     return {
         "schema_version": 1,
         "ready": errors == 0,
         "valid": errors == 0,
         "status": "passed" if errors == 0 else "failed",
-        "summary": {"errors": errors, "warnings": warnings},
+        "scientific_ready": scientific_errors == 0,
+        "scientific_valid": scientific_errors == 0,
+        "scientific_status": "passed" if scientific_errors == 0 else "failed",
+        "summary": {
+            "errors": errors,
+            "warnings": warnings,
+            "scientific_errors": scientific_errors,
+            "scientific_warnings": scientific_warnings,
+            "submission_metadata_errors": submission_metadata_errors,
+        },
         "findings": findings,
         "artifacts": {"paper_dir": str(paper_dir), **dict(artifacts or {})},
     }
@@ -9146,18 +9181,51 @@ def _build_readiness_report(
 ) -> dict[str, Any]:
     errors = sum(1 for finding in findings if finding["severity"] == "error")
     warnings = sum(1 for finding in findings if finding["severity"] == "warning")
+    scientific_findings = [
+        finding for finding in findings if not _readiness_finding_is_submission_metadata(finding)
+    ]
+    scientific_errors = sum(
+        1 for finding in scientific_findings if finding["severity"] == "error"
+    )
+    scientific_warnings = sum(
+        1 for finding in scientific_findings if finding["severity"] == "warning"
+    )
+    submission_metadata_errors = sum(
+        1
+        for finding in findings
+        if finding["severity"] == "error" and _readiness_finding_is_submission_metadata(finding)
+    )
     return {
         "schema_version": 1,
         "ready": errors == 0,
         "valid": errors == 0,
         "status": "passed" if errors == 0 else "failed",
+        "scientific_ready": scientific_errors == 0,
+        "scientific_valid": scientific_errors == 0,
+        "scientific_status": "passed" if scientific_errors == 0 else "failed",
         "run_id": run_id,
         "project_dir": str(root),
         "run_dir": str(run_dir) if run_dir is not None else None,
-        "summary": {"errors": errors, "warnings": warnings},
+        "summary": {
+            "errors": errors,
+            "warnings": warnings,
+            "scientific_errors": scientific_errors,
+            "scientific_warnings": scientific_warnings,
+            "submission_metadata_errors": submission_metadata_errors,
+        },
         "findings": findings,
         "artifacts": artifacts,
     }
+
+
+def _readiness_finding_is_submission_metadata(finding: Mapping[str, Any]) -> bool:
+    code = str(finding.get("code") or "")
+    artifact = str(finding.get("artifact") or "")
+    if code in SUBMISSION_METADATA_FINDING_CODES:
+        return True
+    return artifact in {"submission_metadata.md", "bioinformatics_preamble.tex"} and code.startswith(
+        ("missing_", "unresolved_submission_", "bioinformatics_abstract_")
+    )
 
 
 def _add_finding(

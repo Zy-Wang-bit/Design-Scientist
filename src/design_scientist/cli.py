@@ -255,6 +255,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review_framework.add_argument("root")
     review_framework.add_argument("--run-id")
+    review_framework.add_argument(
+        "--scientific-only",
+        action="store_true",
+        help="Ignore submission-metadata-only paper readiness blockers while keeping scientific artifact validation strict.",
+    )
     review_framework.add_argument("--json", action="store_true")
 
     short_paper = subparsers.add_parser(
@@ -671,7 +676,11 @@ def main(argv: list[str] | None = None) -> int:
         from design_scientist.framework_validation import review_framework_run
 
         try:
-            report = review_framework_run(args.root, run_id=args.run_id)
+            report = review_framework_run(
+                args.root,
+                run_id=args.run_id,
+                scientific_only=args.scientific_only,
+            )
         except ValueError as exc:
             parser.error(str(exc))
         if args.json:

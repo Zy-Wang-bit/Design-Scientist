@@ -344,7 +344,12 @@ V3_METHOD_REPORT_REQUIRED_SECTIONS = (
 )
 
 
-def review_framework_run(project_dir: str | Path, run_id: str | None = None) -> dict[str, Any]:
+def review_framework_run(
+    project_dir: str | Path,
+    run_id: str | None = None,
+    *,
+    scientific_only: bool = False,
+) -> dict[str, Any]:
     """Validate framework R&D artifacts for a run.
 
     Parameters
@@ -364,13 +369,20 @@ def review_framework_run(project_dir: str | Path, run_id: str | None = None) -> 
     """
 
     root, selected_run_id, run_dir = resolve_framework_run(project_dir, run_id=run_id)
-    return _review_framework_run_v3(root, selected_run_id, run_dir)
+    return _review_framework_run_v3(
+        root,
+        selected_run_id,
+        run_dir,
+        scientific_only=scientific_only,
+    )
 
 
 def _review_framework_run_v3(
     root: Path,
     selected_run_id: str | None,
     run_dir: Path | None,
+    *,
+    scientific_only: bool = False,
 ) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     artifacts: dict[str, str] = {}
@@ -426,7 +438,14 @@ def _review_framework_run_v3(
             "No framework run directory was found for validation.",
             artifact,
         )
-        return _build_report(root, selected_run_id, run_dir, findings, artifacts)
+        return _build_report(
+            root,
+            selected_run_id,
+            run_dir,
+            findings,
+            artifacts,
+            scientific_only=scientific_only,
+        )
 
     artifacts["run_dir"] = str(run_dir)
     journal_path = _require_v3_run_file(
@@ -531,12 +550,25 @@ def _review_framework_run_v3(
                 _rel(method_report_path, root),
             )
 
-    _validate_v3_claim_gate_artifacts(root, run_dir, findings, artifacts)
+    _validate_v3_claim_gate_artifacts(
+        root,
+        run_dir,
+        findings,
+        artifacts,
+        scientific_only=scientific_only,
+    )
     _validate_v3_reference_data_sources(root, run_dir, selected_record, findings, artifacts)
     if is_v4:
         _validate_v4_run_artifacts(root, run_dir, findings, artifacts)
 
-    return _build_report(root, selected_run_id, run_dir, findings, artifacts)
+    return _build_report(
+        root,
+        selected_run_id,
+        run_dir,
+        findings,
+        artifacts,
+        scientific_only=scientific_only,
+    )
 
 
 def resolve_framework_run(
@@ -3938,8 +3970,16 @@ def _validate_v3_claim_gate_artifacts(
     run_dir: Path,
     findings: list[dict[str, Any]],
     artifacts: dict[str, str],
+    *,
+    scientific_only: bool = False,
 ) -> None:
-    paper_ready = _v3_paper_ready_for_claim_gate(root, run_dir, findings, artifacts)
+    paper_ready = _v3_paper_ready_for_claim_gate(
+        root,
+        run_dir,
+        findings,
+        artifacts,
+        scientific_only=scientific_only,
+    )
     missing_severity = "error" if paper_ready else "warning"
     claim_gate_payloads: dict[str, dict[str, Any]] = {}
 
@@ -4532,6 +4572,8 @@ def _v3_paper_ready_for_claim_gate(
     run_dir: Path,
     findings: list[dict[str, Any]],
     artifacts: dict[str, str],
+    *,
+    scientific_only: bool = False,
 ) -> bool:
     path = run_dir / V3_PAPER_READINESS_ARTIFACT
     artifacts["paper_readiness_report"] = str(path)
@@ -4572,7 +4614,14 @@ def _v3_paper_ready_for_claim_gate(
             _rel(path, root),
         )
         return False
-    return _validate_v3_paper_readiness_report(data, root, run_dir, _rel(path, root), findings)
+    return _validate_v3_paper_readiness_report(
+        data,
+        root,
+        run_dir,
+        _rel(path, root),
+        findings,
+        scientific_only=scientific_only,
+    )
 
 
 def _validate_v3_paper_readiness_report(
@@ -4581,10 +4630,15 @@ def _validate_v3_paper_readiness_report(
     run_dir: Path,
     artifact: str,
     findings: list[dict[str, Any]],
+    *,
+    scientific_only: bool = False,
 ) -> bool:
     status = str(data.get("status") or "").strip().lower()
     ready = _paper_readiness_payload_is_ready(data)
-    if not ready or status in PAPER_READINESS_FAILURE_STATUSES:
+    scientific_ready = _paper_readiness_payload_is_scientifically_ready(data)
+    if (not ready or status in PAPER_READINESS_FAILURE_STATUSES) and not (
+        scientific_only and scientific_ready
+    ):
         _add_finding(
             findings,
             "error",
@@ -4592,8 +4646,17 @@ def _validate_v3_paper_readiness_report(
             "paper_readiness_report.json must have ready/valid true and must not mark the paper as failed.",
             artifact,
         )
+    elif scientific_only and scientific_ready and not ready:
+        _add_finding(
+            findings,
+            "warning",
+            "paper_submission_metadata_incomplete",
+            "paper_readiness_report.json is scientifically ready, but submission metadata remains incomplete.",
+            artifact,
+        )
     has_error_findings = _paper_readiness_has_error_findings(data)
-    if has_error_findings:
+    has_scientific_error_findings = _paper_readiness_has_scientific_error_findings(data)
+    if has_error_findings and not (scientific_only and not has_scientific_error_findings):
         _add_finding(
             findings,
             "error",
@@ -4603,6 +4666,8 @@ def _validate_v3_paper_readiness_report(
         )
     _validate_v3_paper_readiness_artifacts(data, root, run_dir, artifact, findings)
     _validate_v3_biology_overclaim_artifact(data, artifact, findings)
+    if scientific_only:
+        return scientific_ready and not has_scientific_error_findings
     return ready and not has_error_findings and status not in PAPER_READINESS_FAILURE_STATUSES
 
 
@@ -4616,6 +4681,22 @@ def _paper_readiness_payload_is_ready(data: Any) -> bool:
     return status not in PAPER_READINESS_FAILURE_STATUSES
 
 
+def _paper_readiness_payload_is_scientifically_ready(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    readiness_flags = [
+        data[key]
+        for key in ("scientific_ready", "scientific_valid")
+        if key in data
+    ]
+    if readiness_flags:
+        if any(flag is not True for flag in readiness_flags):
+            return False
+        status = str(data.get("scientific_status") or "").strip().lower()
+        return status not in PAPER_READINESS_FAILURE_STATUSES
+    return _paper_readiness_payload_is_ready(data)
+
+
 def _paper_readiness_has_error_findings(data: dict[str, Any]) -> bool:
     summary = data.get("summary")
     if isinstance(summary, dict) and _positive_count(summary.get("errors")):
@@ -4624,6 +4705,43 @@ def _paper_readiness_has_error_findings(data: dict[str, Any]) -> bool:
     if isinstance(findings, list):
         return any(_paper_readiness_finding_is_error(finding) for finding in findings)
     return False
+
+
+def _paper_readiness_has_scientific_error_findings(data: dict[str, Any]) -> bool:
+    summary = data.get("summary")
+    if isinstance(summary, dict) and _positive_count(summary.get("scientific_errors")):
+        return True
+    findings = data.get("findings")
+    if isinstance(findings, list):
+        return any(
+            _paper_readiness_finding_is_error(finding)
+            and not _paper_readiness_finding_is_submission_metadata(finding)
+            for finding in findings
+        )
+    return False
+
+
+def _paper_readiness_finding_is_submission_metadata(finding: Any) -> bool:
+    if not isinstance(finding, dict):
+        return False
+    code = str(finding.get("code") or "")
+    artifact = str(finding.get("artifact") or "")
+    if code in {
+        "bioinformatics_abstract_placeholder",
+        "missing_ai_use_disclosure",
+        "missing_archival_software_url",
+        "missing_conflict_statement",
+        "missing_corresponding_author_email",
+        "missing_data_availability_statement",
+        "missing_funding_statement",
+        "missing_software_license",
+        "missing_stable_repository_url",
+        "unresolved_submission_placeholder",
+    }:
+        return True
+    return artifact in {"submission_metadata.md", "bioinformatics_preamble.tex"} and code.startswith(
+        ("missing_", "unresolved_submission_", "bioinformatics_abstract_")
+    )
 
 
 def _positive_count(value: Any) -> bool:
@@ -4990,18 +5108,23 @@ def _build_report(
     run_dir: Path | None,
     findings: list[dict[str, Any]],
     artifacts: dict[str, str],
+    *,
+    scientific_only: bool = False,
 ) -> dict[str, Any]:
     errors = sum(1 for finding in findings if finding["severity"] == "error")
     warnings = sum(1 for finding in findings if finding["severity"] == "warning")
     infos = sum(1 for finding in findings if finding["severity"] == "info")
+    effective_errors = errors
     return {
         "project_dir": str(root),
         "run_id": run_id,
         "run_dir": str(run_dir) if run_dir is not None else None,
-        "valid": errors == 0,
-        "status": "passed" if errors == 0 else "failed",
+        "valid": effective_errors == 0,
+        "status": "passed" if effective_errors == 0 else "failed",
+        "validation_mode": "scientific_only" if scientific_only else "full_submission",
         "summary": {
             "errors": errors,
+            "effective_errors": effective_errors,
             "warnings": warnings,
             "infos": infos,
             "checked_artifacts": len(artifacts),
@@ -5070,11 +5193,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m design_scientist.framework_validation")
     parser.add_argument("project_dir")
     parser.add_argument("--run-id")
+    parser.add_argument(
+        "--scientific-only",
+        action="store_true",
+        help="Ignore submission-metadata-only paper readiness blockers.",
+    )
     parser.add_argument("--json", action="store_true", help="Print the full validation report as JSON")
     args = parser.parse_args(argv)
 
     try:
-        report = review_framework_run(args.project_dir, run_id=args.run_id)
+        report = review_framework_run(
+            args.project_dir,
+            run_id=args.run_id,
+            scientific_only=args.scientific_only,
+        )
     except ValueError as exc:
         parser.error(str(exc))
     if args.json:

@@ -269,6 +269,56 @@ def test_v3_validation_rejects_invalid_paper_readiness_report(tmp_path: Path) ->
     } <= _error_codes(report)
 
 
+def test_v3_scientific_only_validation_ignores_submission_metadata_only_readiness_errors(
+    tmp_path: Path,
+) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    paper_path = project / "runs" / "v3_unit" / "paper" / "paper_readiness_report.json"
+    payload = _ready_paper_payload(project)
+    payload.update(
+        {
+            "ready": False,
+            "valid": False,
+            "status": "failed",
+            "scientific_ready": True,
+            "scientific_valid": True,
+            "scientific_status": "passed",
+            "summary": {
+                "errors": 1,
+                "warnings": 0,
+                "scientific_errors": 0,
+                "scientific_warnings": 0,
+                "submission_metadata_errors": 1,
+            },
+            "findings": [
+                {
+                    "severity": "error",
+                    "code": "missing_corresponding_author_email",
+                    "message": "Bioinformatics structured abstracts require a corresponding-author contact email.",
+                    "artifact": "submission_metadata.md",
+                }
+            ],
+        }
+    )
+    _write_json(paper_path, payload)
+    write_method_report(project, run_id="v3_unit")
+
+    strict_report = review_framework_run(project, run_id="v3_unit")
+    scientific_report = review_framework_run(
+        project,
+        run_id="v3_unit",
+        scientific_only=True,
+    )
+
+    assert not strict_report["valid"]
+    assert strict_report["validation_mode"] == "full_submission"
+    assert scientific_report["valid"]
+    assert scientific_report["validation_mode"] == "scientific_only"
+    assert scientific_report["summary"]["effective_errors"] == 0
+    assert "paper_submission_metadata_incomplete" in _warning_codes(scientific_report)
+
+
 def test_v3_validation_requires_literature_corpus_and_mechanism_library(tmp_path: Path) -> None:
     project = _build_v3_framework_run(tmp_path)
     (project / "framework" / "literature_corpus.jsonl").unlink()
@@ -1409,6 +1459,9 @@ def _ready_paper_payload(project: Path) -> dict[str, object]:
         "ready": True,
         "valid": True,
         "status": "passed",
+        "scientific_ready": True,
+        "scientific_valid": True,
+        "scientific_status": "passed",
         "run_id": "v3_unit",
         "project_dir": str(project),
         "run_dir": str(run_dir),

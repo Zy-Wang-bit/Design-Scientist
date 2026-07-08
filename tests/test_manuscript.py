@@ -14,6 +14,7 @@ from design_scientist.manuscript import (
     PH_SWITCH_GRAPH_RELEASE_SOURCE_FILES,
     _algorithm_claim_evidence_map,
     _bar_svg,
+    _build_readiness_report,
     _ph_switch_graph_ablation_summary_sentence,
     _ph_switch_graph_algorithm_formal_definition,
     _ph_switch_graph_candidate_rationale_rows,
@@ -1310,6 +1311,28 @@ def test_ph_switch_graph_claim_map_includes_public_ph_switch_replay() -> None:
     assert public_ph_claim["evidence_scope"] == "external_pH_switch_prior_sanity_check_not_1E62_validation"
     assert "external_ph_switch_variant_method_summary" in public_ph_claim["evidence_artifacts"]
     assert any("not prospective 1E62 measurements" in limitation for limitation in public_ph_claim["limitations"])
+
+
+def test_paper_readiness_reports_scientific_status_separately_from_submission_metadata(
+    tmp_path: Path,
+) -> None:
+    findings = [
+        {
+            "severity": "error",
+            "code": "missing_corresponding_author_email",
+            "message": "Bioinformatics structured abstracts require a corresponding-author contact email.",
+            "artifact": "submission_metadata.md",
+        }
+    ]
+
+    report = _build_readiness_report(tmp_path, "unit", tmp_path / "runs" / "unit", findings, {})
+
+    assert report["valid"] is False
+    assert report["scientific_valid"] is True
+    assert report["scientific_status"] == "passed"
+    assert report["summary"]["errors"] == 1
+    assert report["summary"]["scientific_errors"] == 0
+    assert report["summary"]["submission_metadata_errors"] == 1
 
 
 def test_ph_switch_graph_submission_metadata_rejects_journal_placeholders(
