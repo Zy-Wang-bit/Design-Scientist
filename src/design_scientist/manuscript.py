@@ -141,6 +141,7 @@ EXTERNAL_PH_SWITCH_BENCHMARK_ARTIFACT_FILENAMES = {
     "external_ph_switch_benchmark_summary": "external_ph_switch_benchmark_summary.csv",
     "external_ph_switch_variant_replay_results": "external_ph_switch_variant_replay_results.csv",
     "external_ph_switch_variant_replay_summary": "external_ph_switch_variant_replay_summary.json",
+    "external_ph_switch_variant_method_summary": "external_ph_switch_variant_method_summary.csv",
     "external_ph_switch_benchmark_config": "external_ph_switch_benchmark_config.json",
     "external_ph_switch_source_trace": "external_ph_switch_source_trace.json",
     "external_ph_switch_claims": "external_ph_switch_claims.json",
@@ -1055,8 +1056,13 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
         "external": _md_link("Table S13", "tables/external_antibody_benchmark_summary.csv", paper_dir),
         "external_ph": _md_link("Table S14", "tables/external_ph_switch_benchmark_summary.csv", paper_dir),
         "external_ph_variant": _md_link("Table S15", "tables/external_ph_switch_variant_replay.csv", paper_dir),
-        "configuration": _md_link("Table S16", "tables/configuration_contract.csv", paper_dir),
-        "world_blocks": _md_link("Table S17", "tables/world_block_comparison.csv", paper_dir),
+        "external_ph_variant_methods": _md_link(
+            "Table S16",
+            "tables/external_ph_switch_variant_method_summary.csv",
+            paper_dir,
+        ),
+        "configuration": _md_link("Table S17", "tables/configuration_contract.csv", paper_dir),
+        "world_blocks": _md_link("Table S18", "tables/world_block_comparison.csv", paper_dir),
     }
     formal_definition_link = _md_link(
         "File S6",
@@ -1404,7 +1410,9 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             f"pH-switch literature-table replay ({table_links['external_ph']}) tests whether a leave-one-study "
             "literature-calibrated transition model and simpler residue-transition priors rank published "
             f"pH-selective variants above their parent; the leave-one-variant replay ({table_links['external_ph_variant']}) "
-            "adds a variant-level check in which each held-out pH ratio is hidden during scoring."
+            f"adds a variant-level check in which each held-out pH ratio is hidden during scoring, and "
+            f"{table_links['external_ph_variant_methods']} separates learned-score correlation from fixed-prior "
+            "top-tertile enrichment."
         ),
         "",
         (
@@ -2749,6 +2757,8 @@ def _write_ph_switch_graph_tables(context: dict[str, Any], paper_dir: Path) -> d
         "external_antibody_benchmark_summary": tables_dir / "external_antibody_benchmark_summary.csv",
         "external_ph_switch_benchmark_summary": tables_dir / "external_ph_switch_benchmark_summary.csv",
         "external_ph_switch_variant_replay": tables_dir / "external_ph_switch_variant_replay.csv",
+        "external_ph_switch_variant_method_summary": tables_dir
+        / "external_ph_switch_variant_method_summary.csv",
         "configuration_contract": tables_dir / "configuration_contract.csv",
         "world_block_comparison": tables_dir / "world_block_comparison.csv",
         "developability_risk_summary": paper_dir / "developability_risk_summary.json",
@@ -2788,6 +2798,10 @@ def _write_ph_switch_graph_tables(context: dict[str, Any], paper_dir: Path) -> d
     _write_csv_rows(
         paths["external_ph_switch_variant_replay"],
         _ph_switch_graph_external_ph_switch_variant_rows(context),
+    )
+    _write_csv_rows(
+        paths["external_ph_switch_variant_method_summary"],
+        _ph_switch_graph_external_ph_switch_variant_method_rows(context),
     )
     _write_csv_rows(paths["configuration_contract"], _ph_switch_graph_configuration_contract_rows(context))
     _write_csv_rows(paths["world_block_comparison"], _ph_switch_graph_world_block_rows(context))
@@ -2904,8 +2918,9 @@ def _ph_switch_graph_supplement_manifest(
         ("Table S13", paths["external_antibody_benchmark_summary"], "External FLAb-style held-out antibody replay summary; this tests affinity ranking, not pH-switch activity."),
         ("Table S14", paths["external_ph_switch_benchmark_summary"], "Curated public pH-switch antibody literature-table replay; this tests the residue-class prior only, not 1E62 wet-lab activity."),
         ("Table S15", paths["external_ph_switch_variant_replay"], "Leave-one-variant public pH-switch replay; held-out pH ratios are hidden during scoring and used only for evaluation."),
-        ("Table S16", paths["configuration_contract"], "Configuration contract separating defaults, benchmark budgets, project generation counts, sentinel caps, and actual selected program widths."),
-        ("Table S17", paths["world_block_comparison"], "Per-world block comparison of pH-Switch Graph against same-pool, fixed-pool, and strong simple generation controls; use this table rather than treating 6 worlds x 10 seeds as independent biological replicates."),
+        ("Table S16", paths["external_ph_switch_variant_method_summary"], "Method-level summary of the leave-one-variant public pH-switch replay, including correlation and top-tertile enrichment for truth-blind score columns."),
+        ("Table S17", paths["configuration_contract"], "Configuration contract separating defaults, benchmark budgets, project generation counts, sentinel caps, and actual selected program widths."),
+        ("Table S18", paths["world_block_comparison"], "Per-world block comparison of pH-Switch Graph against same-pool, fixed-pool, and strong simple generation controls; use this table rather than treating 6 worlds x 10 seeds as independent biological replicates."),
         (
             "File S1",
             run_dir / "generative_benchmark_config.json",
@@ -3718,8 +3733,9 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
                 "- Table S13: `tables/external_antibody_benchmark_summary.csv`",
                 "- Table S14: `tables/external_ph_switch_benchmark_summary.csv`",
                 "- Table S15: `tables/external_ph_switch_variant_replay.csv`",
-                "- Table S16: `tables/configuration_contract.csv`",
-                "- Table S17: `tables/world_block_comparison.csv`",
+                "- Table S16: `tables/external_ph_switch_variant_method_summary.csv`",
+                "- Table S17: `tables/configuration_contract.csv`",
+                "- Table S18: `tables/world_block_comparison.csv`",
                 "",
                 "## Files",
                 "",
@@ -3857,6 +3873,7 @@ def _write_ph_switch_graph_supplementary_package(paper_dir: Path) -> Path:
         "tables/external_antibody_benchmark_summary.csv",
         "tables/external_ph_switch_benchmark_summary.csv",
         "tables/external_ph_switch_variant_replay.csv",
+        "tables/external_ph_switch_variant_method_summary.csv",
         "tables/configuration_contract.csv",
         "tables/world_block_comparison.csv",
     ]
@@ -4595,9 +4612,46 @@ def _ph_switch_graph_external_ph_switch_variant_rows(context: dict[str, Any]) ->
                 "observed_normalized_log_ratio": row.get("observed_normalized_log_ratio", ""),
                 "predicted_score": row.get("predicted_score", ""),
                 "transition_context_score": row.get("transition_context_score", ""),
+                "ph_switch_prior_score": row.get("ph_switch_prior_score", ""),
                 "histidine_count_score": row.get("histidine_count_score", ""),
+                "ionizable_count_score": row.get("ionizable_count_score", ""),
                 "actual_top_tertile": row.get("actual_top_tertile", ""),
                 "model_training_row_count": row.get("model_training_row_count", ""),
+            }
+        )
+    return out
+
+
+def _ph_switch_graph_external_ph_switch_variant_method_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
+    benchmark = context.get("external_ph_switch_benchmark", {})
+    rows = benchmark.get("variant_method_summary_rows", []) if isinstance(benchmark, dict) else []
+    out: list[dict[str, Any]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            {
+                "method": row.get("method", ""),
+                "variant_count": row.get("variant_count", ""),
+                "dataset_count": row.get("dataset_count", ""),
+                "score_column": row.get("score_column", ""),
+                "selector_inputs_exclude_heldout_reported_pH_ratio": row.get(
+                    "selector_inputs_exclude_heldout_reported_pH_ratio", ""
+                ),
+                "predicted_vs_observed_normalized_log_ratio_pearson": row.get(
+                    "predicted_vs_observed_normalized_log_ratio_pearson", ""
+                ),
+                "predicted_vs_observed_normalized_log_ratio_spearman": row.get(
+                    "predicted_vs_observed_normalized_log_ratio_spearman", ""
+                ),
+                "top_tertile_base_rate": row.get("top_tertile_base_rate", ""),
+                "top_tertile_hit_rate_at_top_third_by_score": row.get(
+                    "top_tertile_hit_rate_at_top_third_by_score", ""
+                ),
+                "top_tertile_enrichment_at_top_third_by_score": row.get(
+                    "top_tertile_enrichment_at_top_third_by_score", ""
+                ),
+                "interpretation": row.get("interpretation", ""),
             }
         )
     return out
@@ -4614,6 +4668,15 @@ def _external_ph_switch_summary_row(
         if not isinstance(row, dict):
             continue
         if str(row.get("method")) == method and str(row.get("dataset_id")) == dataset_id:
+            return row
+    return {}
+
+
+def _external_ph_switch_variant_method_row(context: dict[str, Any], method: str) -> dict[str, Any]:
+    benchmark = context.get("external_ph_switch_benchmark", {})
+    rows = benchmark.get("variant_method_summary_rows", []) if isinstance(benchmark, dict) else []
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and str(row.get("method")) == method:
             return row
     return {}
 
@@ -4637,16 +4700,22 @@ def _ph_switch_graph_external_ph_abstract_clause(context: dict[str, Any]) -> str
     histidine_row = _external_ph_switch_summary_row(context, "histidine_count", "overall")
     histidine_norm = _compact_float_text(histidine_row.get("mean_best_selected_normalized_log_ratio"))
     variant_summary = benchmark.get("variant_replay_summary", {})
+    variant_context_row = _external_ph_switch_variant_method_row(context, "transition_context_prior")
     variant_clause = ""
     if isinstance(variant_summary, dict) and variant_summary:
         variant_count = _compact_float_text(variant_summary.get("variant_count"))
         correlation = _compact_float_text(
             variant_summary.get("predicted_vs_observed_normalized_log_ratio_pearson")
         )
+        context_enrichment = _compact_float_text(
+            variant_context_row.get("top_tertile_enrichment_at_top_third_by_score")
+        )
         variant_clause = (
             f"; a leave-one-variant replay over {variant_count} public variants gave "
-            f"predicted/observed normalized log-ratio correlation {correlation}"
+            f"learned-score correlation {correlation}"
         )
+        if context_enrichment:
+            variant_clause += f" and transition-context top-tertile enrichment {context_enrichment}"
     return (
         f"A curated public pH-switch table replay over {dataset_count} antibody study tables "
         f"reached normalized log-ratio {primary_norm} versus {histidine_norm} for a histidine-count baseline"
@@ -4700,6 +4769,13 @@ def _ph_switch_graph_external_ph_benchmark_sentence(context: dict[str, Any]) -> 
         else ("exceeds" if primary_ratio_value > histidine_ratio_value else "falls below")
     )
     variant_summary = benchmark.get("variant_replay_summary", {})
+    variant_transition_row = _external_ph_switch_variant_method_row(
+        context, "transition_context_prior"
+    )
+    variant_residue_row = _external_ph_switch_variant_method_row(
+        context, "ph_switch_residue_prior"
+    )
+    variant_histidine_row = _external_ph_switch_variant_method_row(context, "histidine_count")
     variant_sentence = ""
     if isinstance(variant_summary, dict) and variant_summary:
         variant_count = _compact_float_text(variant_summary.get("variant_count"))
@@ -4713,12 +4789,31 @@ def _ph_switch_graph_external_ph_benchmark_sentence(context: dict[str, Any]) -> 
             variant_summary.get("top_tertile_hit_rate_at_top_third_by_score")
         )
         variant_base_rate = _compact_float_text(variant_summary.get("top_tertile_base_rate"))
+        transition_top_rate = _compact_float_text(
+            variant_transition_row.get("top_tertile_hit_rate_at_top_third_by_score")
+        )
+        transition_enrichment = _compact_float_text(
+            variant_transition_row.get("top_tertile_enrichment_at_top_third_by_score")
+        )
+        residue_enrichment = _compact_float_text(
+            variant_residue_row.get("top_tertile_enrichment_at_top_third_by_score")
+        )
+        histidine_enrichment = _compact_float_text(
+            variant_histidine_row.get("top_tertile_enrichment_at_top_third_by_score")
+        )
         variant_sentence = (
             f" A stricter leave-one-variant replay over {variant_count} public variants hid each held-out "
             f"pH ratio during scoring and gave Pearson correlation {variant_correlation}, Spearman correlation "
             f"{variant_spearman}, and top-tertile hit rate {variant_top_rate} versus base rate "
-            f"{variant_base_rate}."
+            f"{variant_base_rate} for the learned transition score."
         )
+        if transition_top_rate and transition_enrichment:
+            variant_sentence += (
+                " The fixed transition-context score gave top-tertile hit rate "
+                f"{transition_top_rate} and enrichment {transition_enrichment}; the residue-prior and "
+                f"histidine-count enrichments were {residue_enrichment} and {histidine_enrichment}, respectively "
+                "(Table S16)."
+            )
     her2_transition = _external_ph_switch_summary_row(
         context, "transition_context_prior", "her2_bh1_fab_release_2019"
     )
@@ -6360,6 +6455,7 @@ def _validate_algorithm_manuscript(
             "not independent biological replicates",
             "false-claim rate",
             "Table S15",
+            "Table S16",
         )
         for claim in required_ph_switch_claims:
             phrases = (claim,) if isinstance(claim, str) else claim
@@ -6455,6 +6551,7 @@ def _validate_algorithm_manuscript(
             "tables/project_candidate_rationale.csv",
             "tables/external_ph_switch_benchmark_summary.csv",
             "tables/external_ph_switch_variant_replay.csv",
+            "tables/external_ph_switch_variant_method_summary.csv",
             "tables/configuration_contract.csv",
             "algorithm_formal_definition.md",
             "developability_risk_summary.json",
@@ -8457,7 +8554,9 @@ def _external_ph_switch_benchmark_summary_payload(context: dict[str, Any]) -> di
         "summary_row_count": len(benchmark.get("summary_rows", [])),
         "result_row_count": len(benchmark.get("result_rows", [])),
         "variant_replay_row_count": len(benchmark.get("variant_replay_rows", [])),
+        "variant_method_summary_row_count": len(benchmark.get("variant_method_summary_rows", [])),
         "variant_replay_summary": benchmark.get("variant_replay_summary", {}),
+        "variant_method_summary_rows": benchmark.get("variant_method_summary_rows", []),
         "config": benchmark.get("config", {}),
         "residue_prior_overall_summary_row": _external_ph_switch_summary_row(
             context,
@@ -9308,6 +9407,12 @@ def _load_external_ph_switch_benchmark_artifacts(run_dir: Path) -> dict[str, Any
             "external_ph_switch_variant_replay_summary"
         ]
     )
+    variant_method_summary_rows = _read_csv(
+        run_dir
+        / EXTERNAL_PH_SWITCH_BENCHMARK_ARTIFACT_FILENAMES[
+            "external_ph_switch_variant_method_summary"
+        ]
+    )
     config = _load_json(
         run_dir / EXTERNAL_PH_SWITCH_BENCHMARK_ARTIFACT_FILENAMES["external_ph_switch_benchmark_config"]
     )
@@ -9330,6 +9435,7 @@ def _load_external_ph_switch_benchmark_artifacts(run_dir: Path) -> dict[str, Any
         "summary_rows": summary_rows,
         "result_rows": result_rows,
         "variant_replay_rows": variant_replay_rows,
+        "variant_method_summary_rows": variant_method_summary_rows,
         "variant_replay_summary": (
             variant_replay_summary
             if isinstance(variant_replay_summary, dict)

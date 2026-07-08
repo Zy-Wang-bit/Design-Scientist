@@ -41,6 +41,12 @@ def test_bioinformatics_structured_abstract_uses_external_ph_switch_table(
                     "variant_replay_summary": {
                         "variant_count": 35,
                         "predicted_vs_observed_normalized_log_ratio_pearson": 0.377779,
+                        "method_summaries": [
+                            {
+                                "method": "transition_context_prior",
+                                "top_tertile_enrichment_at_top_third_by_score": 1.296296,
+                            }
+                        ],
                     }
                 }
             }
@@ -54,6 +60,6 @@ def test_bioinformatics_structured_abstract_uses_external_ph_switch_table(
 
     assert "5-table public pH-switch replay" in abstract
     assert "0.846 versus 0.709" in abstract
-    assert "leave-one-variant replay over 35 variants gave r=0.378" in abstract
+    assert "leave-one-variant replay over 35 variants gave r=0.378 and context-prior enrichment 1.296" in abstract
     assert "provide bounded, auditable checks" in abstract
     renderer._validate_structured_bioinformatics_abstract(abstract)

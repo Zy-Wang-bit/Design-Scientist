@@ -129,6 +129,7 @@ def test_ph_switch_graph_supplementary_package_includes_declared_tables(tmp_path
         "algorithm_formal_definition.md",
         "data_dictionary.json",
         "tables/external_ph_switch_variant_replay.csv",
+        "tables/external_ph_switch_variant_method_summary.csv",
         "tables/world_block_comparison.csv",
     ):
         path = paper_dir / relative
@@ -142,6 +143,7 @@ def test_ph_switch_graph_supplementary_package_includes_declared_tables(tmp_path
         names = set(archive.namelist())
     assert "supplementary_data.md" in names
     assert "tables/external_ph_switch_variant_replay.csv" in names
+    assert "tables/external_ph_switch_variant_method_summary.csv" in names
     assert "tables/world_block_comparison.csv" in names
 
 

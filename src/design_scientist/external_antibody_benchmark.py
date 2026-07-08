@@ -590,9 +590,25 @@ PH_SWITCH_VARIANT_REPLAY_COLUMNS = (
     "observed_normalized_log_ratio",
     "predicted_score",
     "transition_context_score",
+    "ph_switch_prior_score",
     "histidine_count_score",
+    "ionizable_count_score",
     "actual_top_tertile",
     "model_training_row_count",
+)
+
+PH_SWITCH_VARIANT_METHOD_SUMMARY_COLUMNS = (
+    "method",
+    "variant_count",
+    "dataset_count",
+    "score_column",
+    "selector_inputs_exclude_heldout_reported_pH_ratio",
+    "predicted_vs_observed_normalized_log_ratio_pearson",
+    "predicted_vs_observed_normalized_log_ratio_spearman",
+    "top_tertile_base_rate",
+    "top_tertile_hit_rate_at_top_third_by_score",
+    "top_tertile_enrichment_at_top_third_by_score",
+    "interpretation",
 )
 
 
@@ -651,6 +667,7 @@ def run_external_ph_switch_benchmark(
     summary_path = run_dir / "external_ph_switch_benchmark_summary.csv"
     variant_replay_path = run_dir / "external_ph_switch_variant_replay_results.csv"
     variant_replay_summary_path = run_dir / "external_ph_switch_variant_replay_summary.json"
+    variant_method_summary_path = run_dir / "external_ph_switch_variant_method_summary.csv"
     config_path = run_dir / "external_ph_switch_benchmark_config.json"
     trace_path = run_dir / "external_ph_switch_source_trace.json"
     claims_path = run_dir / "external_ph_switch_claims.json"
@@ -659,6 +676,11 @@ def run_external_ph_switch_benchmark(
     _write_csv(benchmark_path, result_rows, PH_SWITCH_RESULT_COLUMNS)
     _write_csv(summary_path, summary_rows, PH_SWITCH_SUMMARY_COLUMNS)
     _write_csv(variant_replay_path, variant_replay_rows, PH_SWITCH_VARIANT_REPLAY_COLUMNS)
+    _write_csv(
+        variant_method_summary_path,
+        variant_replay_summary.get("method_summaries", []),
+        PH_SWITCH_VARIANT_METHOD_SUMMARY_COLUMNS,
+    )
     _write_json(variant_replay_summary_path, variant_replay_summary)
     _write_csv(
         raw_path,
@@ -751,6 +773,7 @@ def run_external_ph_switch_benchmark(
         "curated_records_path": str(raw_path),
         "variant_replay_results_path": str(variant_replay_path),
         "variant_replay_summary_path": str(variant_replay_summary_path),
+        "variant_method_summary_path": str(variant_method_summary_path),
     }
 
 
@@ -1497,7 +1520,12 @@ def _evaluate_ph_switch_variant_replay(
                 "observed_normalized_log_ratio": _round(heldout.get("normalized_log_ratio")),
                 "predicted_score": _round(predicted_score),
                 "transition_context_score": _round(_transition_context_prior_score(heldout)),
+                "ph_switch_prior_score": _round(_ph_switch_prior_score(heldout)),
                 "histidine_count_score": _round(heldout.get("histidine_count")),
+                "ionizable_count_score": _round(
+                    float(heldout.get("histidine_count") or 0.0)
+                    + float(heldout.get("acidic_count") or 0.0)
+                ),
                 "actual_top_tertile": (
                     float(heldout["ph74_over_ph60_kd_ratio"]) >= thresholds[dataset_id]
                 ),
@@ -1511,6 +1539,15 @@ def _evaluate_ph_switch_variant_replay(
 def _ph_switch_variant_replay_summary(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    method_rows = _ph_switch_variant_method_summary_rows(rows)
+    primary = next(
+        (
+            row
+            for row in method_rows
+            if row.get("method") == "leave_one_variant_transition_calibration"
+        ),
+        {},
+    )
     scores = [_float(row.get("predicted_score")) for row in rows]
     observed = [_float(row.get("observed_normalized_log_ratio")) for row in rows]
     paired = [
@@ -1539,6 +1576,108 @@ def _ph_switch_variant_replay_summary(
         "dataset_count": len(dataset_ids),
         "selector_inputs_exclude_heldout_reported_pH_ratio": True,
         "predicted_vs_observed_normalized_log_ratio_pearson": _round_number(
+            primary.get("predicted_vs_observed_normalized_log_ratio_pearson")
+            if primary
+            else _pearson_correlation([item[0] for item in paired], [item[1] for item in paired])
+        ),
+        "predicted_vs_observed_normalized_log_ratio_spearman": _round_number(
+            primary.get("predicted_vs_observed_normalized_log_ratio_spearman")
+            if primary
+            else _pearson_correlation(
+                    _rank_values([item[0] for item in paired]),
+                    _rank_values([item[1] for item in paired]),
+                )
+        ),
+        "top_tertile_base_rate": _round_number(
+            primary.get("top_tertile_base_rate") if primary else base_rate
+        ),
+        "top_tertile_hit_rate_at_top_third_by_score": _round_number(
+            primary.get("top_tertile_hit_rate_at_top_third_by_score") if primary else top_rate
+        ),
+        "top_tertile_enrichment_at_top_third_by_score": _round_number(
+            primary.get("top_tertile_enrichment_at_top_third_by_score")
+            if primary
+            else (top_rate / base_rate if base_rate > 0 else float("nan"))
+        ),
+        "method_summaries": method_rows,
+        "interpretation": (
+            "Leave-one-variant public pH-switch replay; the held-out pH ratio is hidden during scoring. "
+            "This is a literature-table sanity check, not 1E62 wet-lab validation."
+        ),
+    }
+
+
+def _ph_switch_variant_method_summary_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    method_columns = (
+        (
+            "leave_one_variant_transition_calibration",
+            "predicted_score",
+            "learned transition-feature model refit after each held-out public variant is removed",
+        ),
+        (
+            "transition_context_prior",
+            "transition_context_score",
+            "fixed direction-aware mutation-context prior; no fitted pH-ratio outcome is used",
+        ),
+        (
+            "ph_switch_residue_prior",
+            "ph_switch_prior_score",
+            "fixed histidine/acidic-residue synergy prior",
+        ),
+        (
+            "histidine_count",
+            "histidine_count_score",
+            "simple histidine-count baseline",
+        ),
+        (
+            "ionizable_count",
+            "ionizable_count_score",
+            "simple histidine-plus-acidic-residue-count baseline",
+        ),
+    )
+    return [
+        _ph_switch_variant_method_summary_row(rows, method, score_column, interpretation)
+        for method, score_column, interpretation in method_columns
+    ]
+
+
+def _ph_switch_variant_method_summary_row(
+    rows: Sequence[Mapping[str, Any]],
+    method: str,
+    score_column: str,
+    interpretation: str,
+) -> dict[str, Any]:
+    paired = [
+        (float(score), float(value))
+        for score, value in (
+            (_float(row.get(score_column)), _float(row.get("observed_normalized_log_ratio")))
+            for row in rows
+        )
+        if score is not None and value is not None
+    ]
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (
+            _float(row.get(score_column)) if _float(row.get(score_column)) is not None else -math.inf,
+            str(row.get("dataset_id") or ""),
+            str(row.get("variant_id") or ""),
+        ),
+        reverse=True,
+    )
+    top_k = max(1, math.ceil(len(ranked_rows) / 3))
+    top_rows = ranked_rows[:top_k]
+    base_rate = mean([1.0 if row.get("actual_top_tertile") else 0.0 for row in rows]) if rows else 0.0
+    top_rate = mean([1.0 if row.get("actual_top_tertile") else 0.0 for row in top_rows]) if top_rows else 0.0
+    dataset_ids = sorted({str(row.get("dataset_id") or "") for row in rows if row.get("dataset_id")})
+    return {
+        "method": method,
+        "variant_count": len(rows),
+        "dataset_count": len(dataset_ids),
+        "score_column": score_column,
+        "selector_inputs_exclude_heldout_reported_pH_ratio": True,
+        "predicted_vs_observed_normalized_log_ratio_pearson": _round_number(
             _pearson_correlation([item[0] for item in paired], [item[1] for item in paired])
         ),
         "predicted_vs_observed_normalized_log_ratio_spearman": _round_number(
@@ -1552,10 +1691,7 @@ def _ph_switch_variant_replay_summary(
         "top_tertile_enrichment_at_top_third_by_score": _round_number(
             top_rate / base_rate if base_rate > 0 else float("nan")
         ),
-        "interpretation": (
-            "Leave-one-variant public pH-switch replay; the held-out pH ratio is hidden during scoring. "
-            "This is a literature-table sanity check, not 1E62 wet-lab validation."
-        ),
+        "interpretation": interpretation,
     }
 
 

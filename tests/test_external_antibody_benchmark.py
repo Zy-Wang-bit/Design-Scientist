@@ -164,6 +164,7 @@ def test_external_ph_switch_benchmark_writes_public_literature_table_replay(
     assert Path(result["curated_records_path"]).exists()
     assert Path(result["variant_replay_results_path"]).exists()
     assert Path(result["variant_replay_summary_path"]).exists()
+    assert Path(result["variant_method_summary_path"]).exists()
 
     rows = _csv_rows(result["benchmark_results_path"])
     assert {
@@ -237,6 +238,9 @@ def test_external_ph_switch_benchmark_writes_public_literature_table_replay(
     assert {
         "predicted_score",
         "observed_normalized_log_ratio",
+        "transition_context_score",
+        "ph_switch_prior_score",
+        "ionizable_count_score",
         "actual_top_tertile",
         "model_training_row_count",
     } <= set(variant_rows[0])
@@ -248,3 +252,19 @@ def test_external_ph_switch_benchmark_writes_public_literature_table_replay(
     assert variant_summary["variant_count"] == len(curated)
     assert variant_summary["dataset_count"] >= 5
     assert "predicted_vs_observed_normalized_log_ratio_pearson" in variant_summary
+    assert {
+        "leave_one_variant_transition_calibration",
+        "transition_context_prior",
+        "histidine_count",
+        "ionizable_count",
+    } <= {row["method"] for row in variant_summary["method_summaries"]}
+    method_summary_rows = _csv_rows(result["variant_method_summary_path"])
+    assert len(method_summary_rows) == len(variant_summary["method_summaries"])
+    context_row = next(
+        row for row in method_summary_rows if row["method"] == "transition_context_prior"
+    )
+    assert float(context_row["top_tertile_enrichment_at_top_third_by_score"]) > 1.0
+    learned_row = next(
+        row for row in method_summary_rows if row["method"] == "leave_one_variant_transition_calibration"
+    )
+    assert learned_row["selector_inputs_exclude_heldout_reported_pH_ratio"] == "True"

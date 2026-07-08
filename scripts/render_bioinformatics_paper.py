@@ -476,9 +476,19 @@ def _external_ph_switch_variant_abstract_clause(paper_dir: Path) -> str:
     correlation = _compact_number(
         variant_summary.get("predicted_vs_observed_normalized_log_ratio_pearson")
     )
+    context_enrichment = ""
+    for row in variant_summary.get("method_summaries", []):
+        if isinstance(row, dict) and row.get("method") == "transition_context_prior":
+            context_enrichment = _compact_number(
+                row.get("top_tertile_enrichment_at_top_third_by_score")
+            )
+            break
     if not variant_count or not correlation:
         return ""
-    return f"; leave-one-variant replay over {variant_count} variants gave r={correlation}"
+    suffix = f"; leave-one-variant replay over {variant_count} variants gave r={correlation}"
+    if context_enrichment:
+        suffix += f" and context-prior enrichment {context_enrichment}"
+    return suffix
 
 
 def _summary_row(rows: list[dict[str, str]], method: str) -> dict[str, str]:
