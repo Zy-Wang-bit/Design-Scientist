@@ -1060,6 +1060,13 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
     selected_candidate_rows = [
         _ph_switch_graph_public_candidate_row(dict(row), context) for row in selected_candidates
     ]
+    project_selected_count = _to_int(project_summary.get("selected_count")) or len(selected_candidate_rows)
+    project_selected_new_count = (
+        _to_int(project_summary.get("selected_new_position_count"))
+        or _to_int(project_summary.get("selected_new_mutation_site_count"))
+        or 0
+    )
+    project_anchor_count = max(project_selected_count - project_selected_new_count, 0)
     top_new_sites = _ph_switch_graph_top_new_sites(selected_candidate_rows, context)
     ablation_text = _ph_switch_graph_ablation_summary_sentence(context)
     weight_sensitivity_text = _ph_switch_graph_weight_sensitivity_sentence(context)
@@ -1146,7 +1153,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "utility advantage. The selected-utility comparison is interpreted only as synthetic-oracle "
             "stress-test evidence, not as prospective experimental evidence. "
             "The study provides an executable candidate-space expansion algorithm and "
-            "falsifiable hypotheses for a future assay round; it does not establish prospective 1E62 pH-switch activity."
+            "falsifiable hypotheses for a future assay round; no prospective activity or kinetic release is claimed."
         ),
         "",
         "## Introduction",
@@ -1397,6 +1404,10 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "the acquisition claim, not as evidence of real 1E62 activity. The anti-prior negative-control world "
             "penalizes high-prior distractor sites to expose mechanisms that only replay the hand-coded pH-switch prior, "
             "but it is still a computational stress test rather than an independent biological assay. "
+            "This method is therefore evaluated as a bounded-evidence design algorithm, not as a conventional "
+            "sequence-to-fitness supervised-learning model trained on a large labeled sequence family; the real-data "
+            "masking run checks leakage and observed-pool ranking, while the external replays check ranking transfer "
+            "on public antibody tables. "
             f"{claim_boundary_text}"
         ),
         "",
@@ -1449,7 +1460,11 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             f"per replicate on average and a generated-pool new-site rate of {_compact_float_text(selected_row.get('mean_new_site_rate'))}; "
             f"mean selected new-site count was {_compact_float_text(selected_row.get('mean_selected_new_site_count'))}. "
             f"The 1E62 project run generated {project_summary.get('generated_candidate_count', '')} candidates and "
-            f"selected {project_summary.get('selected_count', '')}. The full selected panel is reported in "
+            f"selected {project_summary.get('selected_count', '')}. The selected panel contains "
+            f"{project_anchor_count} empirical-anchor or mixed guardrail program(s) and "
+            f"{project_selected_new_count} counterfactual new-position probe(s); the probe reserve keeps those "
+            "lower-posterior but high-information rows in the assay proposal so the next experiment can test "
+            "whether the graph's unmeasured site hypotheses are useful. The full selected panel is reported in "
             f"{table_links['panel']}, with candidate-level evidence boundaries in {table_links['rationale']}; "
             f"its new-position hypotheses include {top_new_sites}. The project candidate tables and Figure 3 "
             "display each selected candidate's role, posterior mean, uncertainty, and soft feasibility rather "
