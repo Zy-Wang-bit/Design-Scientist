@@ -111,6 +111,24 @@ PH_SWITCH_GRAPH_RELEASE_SOURCE_FILES = (
     "tests/test_project_replay_cmdgd.py",
     "uv.lock",
 )
+SUBMISSION_METADATA_FILE_ENV = "DS_PAPER_METADATA_FILE"
+SUBMISSION_METADATA_FIELD_ALIASES = {
+    "authors": ("authors", "author", "author_list", "DS_PAPER_AUTHORS"),
+    "affiliation": ("affiliation", "affiliations", "DS_PAPER_AFFILIATION"),
+    "contact": ("contact", "corresponding_author", "corresponding_author_email", "DS_PAPER_CONTACT"),
+    "repository_url": ("repository_url", "repo_url", "code_url", "DS_PAPER_REPOSITORY_URL"),
+    "archive_url": ("archive_url", "archival_release", "software_archive", "DS_PAPER_ARCHIVE_URL"),
+    "license": ("license", "software_license", "DS_PAPER_LICENSE"),
+    "data_availability": (
+        "data_availability",
+        "data_availability_statement",
+        "data_statement",
+        "DS_PAPER_DATA_AVAILABILITY",
+    ),
+    "funding": ("funding", "funding_statement", "DS_PAPER_FUNDING"),
+    "conflicts": ("conflicts", "conflicts_of_interest", "competing_interests", "DS_PAPER_CONFLICTS"),
+    "ai_disclosure": ("ai_disclosure", "ai_use_disclosure", "DS_PAPER_AI_DISCLOSURE"),
+}
 
 EVIDENCE_SCOPE = "computational_synthetic_only"
 EVIDENCE_TYPE = "computational/synthetic"
@@ -124,6 +142,73 @@ PROJECT_MASKING_ARTIFACT_FILENAMES = {
     "project_masking_ablation_results": "project_masking_ablation_results.csv",
     "project_masking_config": "project_masking_config.json",
 }
+
+
+def _paper_submission_value(key: str, env_name: str, default: str) -> str:
+    env_value = os.environ.get(env_name)
+    if env_value not in (None, ""):
+        return env_value
+    metadata = _paper_submission_metadata_from_file()
+    for alias in SUBMISSION_METADATA_FIELD_ALIASES.get(key, (key,)):
+        value = metadata.get(alias.lower())
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _paper_submission_metadata_from_file() -> dict[str, str]:
+    path_text = os.environ.get(SUBMISSION_METADATA_FILE_ENV)
+    if not path_text:
+        return {}
+    path = Path(path_text).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"{SUBMISSION_METADATA_FILE_ENV} points to missing file: {path}")
+    if path.suffix.lower() == ".json":
+        payload = read_json(path)
+    else:
+        payload = read_yaml(path)
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{SUBMISSION_METADATA_FILE_ENV} must contain a mapping: {path}")
+    nested = payload.get("submission_metadata")
+    if isinstance(nested, Mapping):
+        payload = nested
+    out: dict[str, str] = {}
+    for key, value in payload.items():
+        normalized = str(key).strip().lower()
+        if not normalized or value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            out[normalized] = ", ".join(str(item).strip() for item in value if str(item).strip())
+        elif isinstance(value, Mapping):
+            out[normalized] = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        else:
+            out[normalized] = str(value).strip()
+    return out
+
+
+def _render_submission_metadata_template() -> str:
+    return "\n".join(
+        [
+            "# Fill with author-confirmed submission metadata, then regenerate with:",
+            "# DS_PAPER_METADATA_FILE=/path/to/submission_metadata.yaml uv run design-scientist generate-algorithm-paper ...",
+            "# Environment variables DS_PAPER_* override this file when both are present.",
+            "authors: \"\"",
+            "affiliation: \"\"",
+            "corresponding_author: \"\"",
+            "repository_url: \"https://github.com/Zy-Wang-bit/Design-Scientist/tree/design-scientist-v3\"",
+            "archival_release: \"\"",
+            "license: \"\"",
+            "data_availability_statement: \"\"",
+            "funding: \"\"",
+            "conflicts_of_interest: \"\"",
+            (
+                "ai_use_disclosure: \"AI/Codex assisted code implementation, test generation, artifact "
+                "consistency checks, figure and table assembly, and editorial revision. The submitting authors "
+                "are responsible for the study design, data interpretation, scientific claims, code release, "
+                "and final manuscript text.\""
+            ),
+        ]
+    ) + "\n"
 MCCBD_BENCHMARK_ARTIFACT_FILENAMES = {
     "mccbd_benchmark_summary": "mccbd_benchmark_summary.csv",
     "mccbd_benchmark_results": "mccbd_benchmark_results.csv",
@@ -1111,16 +1196,36 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
     world_block_text = _ph_switch_graph_world_block_sentence(context)
     literature_protocol = _ph_switch_graph_literature_protocol_sentence(context)
     defaults = _pcig_config_defaults()
-    repository_url = os.environ.get("DS_PAPER_REPOSITORY_URL", "https://github.com/Zy-Wang-bit/Design-Scientist")
-    archive_url = os.environ.get("DS_PAPER_ARCHIVE_URL", "archival DOI or Software Heritage URL to be inserted before submission")
-    license_text = os.environ.get("DS_PAPER_LICENSE", "repository license to be confirmed before submission")
-    data_availability_statement = os.environ.get(
+    repository_url = _paper_submission_value(
+        "repository_url",
+        "DS_PAPER_REPOSITORY_URL",
+        "https://github.com/Zy-Wang-bit/Design-Scientist",
+    )
+    archive_url = _paper_submission_value(
+        "archive_url",
+        "DS_PAPER_ARCHIVE_URL",
+        "archival DOI or Software Heritage URL to be inserted before submission",
+    )
+    license_text = _paper_submission_value(
+        "license",
+        "DS_PAPER_LICENSE",
+        "repository license to be confirmed before submission",
+    )
+    data_availability_statement = _paper_submission_value(
+        "data_availability",
         "DS_PAPER_DATA_AVAILABILITY",
         "Data release and reviewer-access statement to be inserted before submission",
     )
-    funding = os.environ.get("DS_PAPER_FUNDING", "Funding statement to be inserted before submission.")
-    conflicts = os.environ.get("DS_PAPER_CONFLICTS", "Conflict of interest statement to be inserted before submission.")
-    ai_disclosure = os.environ.get(
+    funding = _paper_submission_value(
+        "funding", "DS_PAPER_FUNDING", "Funding statement to be inserted before submission."
+    )
+    conflicts = _paper_submission_value(
+        "conflicts",
+        "DS_PAPER_CONFLICTS",
+        "Conflict of interest statement to be inserted before submission.",
+    )
+    ai_disclosure = _paper_submission_value(
+        "ai_disclosure",
         "DS_PAPER_AI_DISCLOSURE",
         "AI/Codex assisted code implementation, test generation, artifact consistency checks, figure and table assembly, and editorial revision. The submitting authors are responsible for the study design, data interpretation, scientific claims, code release, and final manuscript text.",
     )
@@ -3548,18 +3653,40 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
     repo_root = _repo_root_from_context(context)
     commit_hash = _git_commit_hash(repo_root)
     remote_url = _git_remote_url(repo_root)
-    repository_url = os.environ.get("DS_PAPER_REPOSITORY_URL") or remote_url or "https://github.com/Zy-Wang-bit/Design-Scientist"
-    archive_url = os.environ.get("DS_PAPER_ARCHIVE_URL", "archival DOI or Software Heritage URL to be inserted before submission")
-    license_text = os.environ.get("DS_PAPER_LICENSE", "repository license to be confirmed before submission")
-    data_availability_statement = os.environ.get(
+    repository_url = _paper_submission_value(
+        "repository_url",
+        "DS_PAPER_REPOSITORY_URL",
+        remote_url or "https://github.com/Zy-Wang-bit/Design-Scientist",
+    )
+    archive_url = _paper_submission_value(
+        "archive_url",
+        "DS_PAPER_ARCHIVE_URL",
+        "archival DOI or Software Heritage URL to be inserted before submission",
+    )
+    license_text = _paper_submission_value(
+        "license",
+        "DS_PAPER_LICENSE",
+        "repository license to be confirmed before submission",
+    )
+    data_availability_statement = _paper_submission_value(
+        "data_availability",
         "DS_PAPER_DATA_AVAILABILITY",
         "Data release and reviewer-access statement to be inserted before submission",
     )
-    authors = os.environ.get("DS_PAPER_AUTHORS", "author details to be inserted before submission")
-    contact = os.environ.get("DS_PAPER_CONTACT", "corresponding author email to be inserted before submission")
-    funding = os.environ.get("DS_PAPER_FUNDING", "funding statement to be inserted before submission")
-    conflicts = os.environ.get("DS_PAPER_CONFLICTS", "conflict of interest statement to be inserted before submission")
-    ai_disclosure = os.environ.get(
+    authors = _paper_submission_value(
+        "authors", "DS_PAPER_AUTHORS", "author details to be inserted before submission"
+    )
+    contact = _paper_submission_value(
+        "contact", "DS_PAPER_CONTACT", "corresponding author email to be inserted before submission"
+    )
+    funding = _paper_submission_value(
+        "funding", "DS_PAPER_FUNDING", "funding statement to be inserted before submission"
+    )
+    conflicts = _paper_submission_value(
+        "conflicts", "DS_PAPER_CONFLICTS", "conflict of interest statement to be inserted before submission"
+    )
+    ai_disclosure = _paper_submission_value(
+        "ai_disclosure",
         "DS_PAPER_AI_DISCLOSURE",
         "AI/Codex assisted code implementation, test generation, artifact consistency checks, figure and table assembly, and editorial revision. The submitting authors are responsible for the study design, data interpretation, scientific claims, code release, and final manuscript text.",
     )
@@ -3716,6 +3843,10 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
         + "\n",
         encoding="utf-8",
     )
+    (paper_dir / "submission_metadata_template.yaml").write_text(
+        _render_submission_metadata_template(),
+        encoding="utf-8",
+    )
     (paper_dir / "submission_readiness_checklist.md").write_text(
         _render_submission_readiness_checklist(
             authors=authors,
@@ -3783,6 +3914,7 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
                 "- File S6: `algorithm_formal_definition.md` - formal mechanism definition, score terms, and update contract.",
                 "- File S7: `figure_alt_text.json` - accessibility text for figures.",
                 "- File S8: `submission_readiness_checklist.md` - checklist separating scientific artifacts from author-side submission metadata.",
+                "- File S9: `submission_metadata_template.yaml` - fillable metadata file for author-confirmed submission information.",
                 "",
                 "## Evidence Boundary",
                 "",
@@ -3894,6 +4026,7 @@ def _write_ph_switch_graph_supplementary_package(paper_dir: Path) -> Path:
         "claim_boundary_analysis.json",
         "figure_alt_text.json",
         "submission_readiness_checklist.md",
+        "submission_metadata_template.yaml",
         "tables/related_work_matrix.csv",
         "tables/benchmark_summary.csv",
         "tables/pairwise_comparisons.csv",
@@ -3978,6 +4111,7 @@ def _render_submission_readiness_checklist(
         [
             "",
             "The readiness validator must continue to fail until all author-action rows are resolved with real submission information.",
+            f"Author-confirmed values can be supplied in `submission_metadata_template.yaml` and loaded with `{SUBMISSION_METADATA_FILE_ENV}=/path/to/submission_metadata.yaml`; direct `DS_PAPER_*` environment variables override file values.",
         ]
     )
     return "\n".join(lines)

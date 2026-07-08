@@ -22,6 +22,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import yaml
+
 BIOINFORMATICS_ABSTRACT_LIMIT = 150
 
 SUBMISSION_PLACEHOLDER_PHRASES = (
@@ -41,6 +43,14 @@ STRUCTURED_ABSTRACT_HEADINGS = (
     "Contact:",
     "Supplementary information:",
 )
+SUBMISSION_METADATA_FILE_ENV = "DS_PAPER_METADATA_FILE"
+SUBMISSION_METADATA_FIELD_ALIASES = {
+    "authors": ("authors", "author", "author_list", "DS_PAPER_AUTHORS"),
+    "affiliation": ("affiliation", "affiliations", "DS_PAPER_AFFILIATION"),
+    "contact": ("contact", "corresponding_author", "corresponding_author_email", "DS_PAPER_CONTACT"),
+    "repository_url": ("repository_url", "repo_url", "code_url", "DS_PAPER_REPOSITORY_URL"),
+    "archive_url": ("archive_url", "archival_release", "software_archive", "DS_PAPER_ARCHIVE_URL"),
+}
 
 
 FIGURE_SPECS = {
@@ -366,11 +376,23 @@ def _bioinformatics_preamble(abstract: str, paper_dir: Path) -> str:
     structured_abstract = _structured_bioinformatics_abstract(paper_dir)
     _validate_structured_bioinformatics_abstract(structured_abstract)
     escaped_abstract = _escape_latex(structured_abstract)
-    author = _escape_latex(os.environ.get("DS_PAPER_AUTHORS", "Author details to be inserted before submission"))
-    affiliation = _escape_latex(
-        os.environ.get("DS_PAPER_AFFILIATION", "Affiliation details to be inserted before submission")
+    author = _escape_latex(
+        _paper_submission_value("authors", "DS_PAPER_AUTHORS", "Author details to be inserted before submission")
     )
-    contact = _escape_latex(os.environ.get("DS_PAPER_CONTACT", "Corresponding author email to be inserted before submission"))
+    affiliation = _escape_latex(
+        _paper_submission_value(
+            "affiliation",
+            "DS_PAPER_AFFILIATION",
+            "Affiliation details to be inserted before submission",
+        )
+    )
+    contact = _escape_latex(
+        _paper_submission_value(
+            "contact",
+            "DS_PAPER_CONTACT",
+            "Corresponding author email to be inserted before submission",
+        )
+    )
     return "\n".join(
         [
             "\\documentclass[unnumsec,webpdf,contemporary,large]{oup-authoring-template}",
@@ -415,15 +437,21 @@ def _bioinformatics_preamble(abstract: str, paper_dir: Path) -> str:
 
 
 def _structured_bioinformatics_abstract(paper_dir: Path) -> str:
-    repository_url = os.environ.get(
+    repository_url = _paper_submission_value(
+        "repository_url",
         "DS_PAPER_REPOSITORY_URL",
         "https://github.com/Zy-Wang-bit/Design-Scientist",
     )
-    archive_url = os.environ.get(
+    archive_url = _paper_submission_value(
+        "archive_url",
         "DS_PAPER_ARCHIVE_URL",
         "archival DOI or Software Heritage URL to be inserted before submission",
     )
-    contact = os.environ.get("DS_PAPER_CONTACT", "corresponding author email to be inserted before submission")
+    contact = _paper_submission_value(
+        "contact",
+        "DS_PAPER_CONTACT",
+        "corresponding author email to be inserted before submission",
+    )
     external_ph_clause = _external_ph_switch_abstract_clause(paper_dir)
     return (
         "Motivation: Sparse antibody pH-switch campaigns need algorithms that propose "
@@ -438,6 +466,48 @@ def _structured_bioinformatics_abstract(paper_dir: Path) -> str:
         f"Contact: {contact}. "
         "Supplementary information: Supplementary Data are available with the manuscript."
     )
+
+
+def _paper_submission_value(key: str, env_name: str, default: str) -> str:
+    env_value = os.environ.get(env_name)
+    if env_value not in (None, ""):
+        return env_value
+    metadata = _paper_submission_metadata_from_file()
+    for alias in SUBMISSION_METADATA_FIELD_ALIASES.get(key, (key,)):
+        value = metadata.get(alias.lower())
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _paper_submission_metadata_from_file() -> dict[str, str]:
+    path_text = os.environ.get(SUBMISSION_METADATA_FILE_ENV)
+    if not path_text:
+        return {}
+    path = Path(path_text).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"{SUBMISSION_METADATA_FILE_ENV} points to missing file: {path}")
+    if path.suffix.lower() == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"{SUBMISSION_METADATA_FILE_ENV} must contain a mapping: {path}")
+    nested = payload.get("submission_metadata")
+    if isinstance(nested, dict):
+        payload = nested
+    out: dict[str, str] = {}
+    for key, value in payload.items():
+        normalized = str(key).strip().lower()
+        if not normalized or value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            out[normalized] = ", ".join(str(item).strip() for item in value if str(item).strip())
+        elif isinstance(value, dict):
+            out[normalized] = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        else:
+            out[normalized] = str(value).strip()
+    return out
 
 
 def _external_ph_switch_abstract_clause(paper_dir: Path) -> str:
@@ -665,6 +735,7 @@ def _write_source_package(paper_dir: Path, output_zip: Path) -> None:
         "data_availability.md",
         "code_availability.md",
         "submission_metadata.md",
+        "submission_metadata_template.yaml",
         "figure_alt_text.json",
         "supplementary_data.md",
         "submission_package_manifest.md",

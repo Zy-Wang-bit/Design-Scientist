@@ -29,6 +29,8 @@ from design_scientist.manuscript import (
     _ph_switch_graph_developability_risk_summary,
     _ph_switch_graph_quality_metric_rows,
     _ph_switch_graph_quality_metric_sentence,
+    _paper_submission_value,
+    _render_submission_metadata_template,
     _render_submission_readiness_checklist,
     _ph_switch_graph_world_block_rows,
     _ph_switch_graph_world_block_sentence,
@@ -1465,6 +1467,52 @@ def test_submission_readiness_checklist_separates_author_actions_from_artifacts(
     assert "| `authors` | author action required |" in checklist
     assert "| `license` | author action required |" in checklist
     assert "must continue to fail until all author-action rows are resolved" in checklist
+    assert "DS_PAPER_METADATA_FILE=/path/to/submission_metadata.yaml" in checklist
+
+
+def test_submission_metadata_file_supplies_author_fields(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    metadata_file = tmp_path / "submission_metadata.yaml"
+    metadata_file.write_text(
+        "\n".join(
+            [
+                "submission_metadata:",
+                "  authors:",
+                "    - Author One",
+                "    - Author Two",
+                "  corresponding_author: contact@example.org",
+                "  license: MIT License",
+                "  data_availability_statement: Stable repository and reviewer access are declared.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DS_PAPER_METADATA_FILE", str(metadata_file))
+    monkeypatch.delenv("DS_PAPER_AUTHORS", raising=False)
+    monkeypatch.delenv("DS_PAPER_LICENSE", raising=False)
+
+    assert _paper_submission_value("authors", "DS_PAPER_AUTHORS", "missing") == "Author One, Author Two"
+    assert _paper_submission_value("contact", "DS_PAPER_CONTACT", "missing") == "contact@example.org"
+    assert _paper_submission_value("license", "DS_PAPER_LICENSE", "missing") == "MIT License"
+    assert (
+        _paper_submission_value("data_availability", "DS_PAPER_DATA_AVAILABILITY", "missing")
+        == "Stable repository and reviewer access are declared."
+    )
+
+    monkeypatch.setenv("DS_PAPER_AUTHORS", "Environment Author")
+    assert _paper_submission_value("authors", "DS_PAPER_AUTHORS", "missing") == "Environment Author"
+
+
+def test_submission_metadata_template_documents_required_fields() -> None:
+    template = _render_submission_metadata_template()
+
+    assert "DS_PAPER_METADATA_FILE=/path/to/submission_metadata.yaml" in template
+    assert "authors:" in template
+    assert "corresponding_author:" in template
+    assert "data_availability_statement:" in template
 
 
 def test_ph_switch_graph_submission_metadata_accepts_explicit_submit_ready_fields(

@@ -65,6 +65,40 @@ def test_bioinformatics_structured_abstract_uses_external_ph_switch_table(
     renderer._validate_structured_bioinformatics_abstract(abstract)
 
 
+def test_bioinformatics_renderer_reads_submission_metadata_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    renderer = _load_renderer()
+    paper_dir = tmp_path / "paper"
+    paper_dir.mkdir()
+    metadata_file = tmp_path / "submission_metadata.yaml"
+    metadata_file.write_text(
+        "\n".join(
+            [
+                "authors: Render Author",
+                "affiliation: Render Institute",
+                "corresponding_author: render@example.org",
+                "repository_url: https://github.com/Zy-Wang-bit/Design-Scientist/tree/design-scientist-v3",
+                "archival_release: https://archive.softwareheritage.org/swh:1:snp:test",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DS_PAPER_METADATA_FILE", str(metadata_file))
+    monkeypatch.delenv("DS_PAPER_AUTHORS", raising=False)
+    monkeypatch.delenv("DS_PAPER_AFFILIATION", raising=False)
+    monkeypatch.delenv("DS_PAPER_CONTACT", raising=False)
+
+    abstract = renderer._structured_bioinformatics_abstract(paper_dir)
+    preamble = renderer._bioinformatics_preamble("", paper_dir)
+
+    assert "Contact: render@example.org" in abstract
+    assert "\\author[1,$\\ast$]{Render Author}" in preamble
+    assert "\\address[1]{Render Institute}" in preamble
+
+
 def test_bioinformatics_source_package_excludes_literature_caches(tmp_path: Path) -> None:
     renderer = _load_renderer()
     project_dir = tmp_path / "project"
