@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
+from math import ceil
 from statistics import mean
 from typing import Any
 
@@ -103,6 +104,9 @@ class PCIGConfig:
     literature_transition_weight: float = 0.04
     cost_weight: float = 0.08
     diversity_weight: float = 0.04
+    min_counterfactual_probe_fraction: float = 0.20
+    max_counterfactual_probe_reserve: int = 2
+    counterfactual_probe_value_tolerance: float = 0.12
     enable_counterfactual_site_map: bool = True
     enable_pair_programs: bool = True
     enable_uncertainty: bool = True
@@ -595,6 +599,14 @@ def select_panel(
     del rng
     fitted = _state_from_context(state)
     remaining = [dict(candidate) for candidate in candidates]
+    selection_mode = str(fitted.config.selection_mode or "balanced")
+    target_probe_count = _target_counterfactual_probe_count(fitted, remaining, budget)
+    reserve_probe_ids = _counterfactual_probe_reserve_ids(
+        fitted,
+        remaining,
+        budget,
+        target_probe_count=target_probe_count,
+    )
     selected: list[Mapping[str, Any]] = []
     selected_ids: list[str] = []
     spent = 0.0
@@ -602,7 +614,6 @@ def select_panel(
         affordable = [row for row in remaining if spent + _cost(row) <= float(budget)]
         if not affordable:
             break
-        selection_mode = str(fitted.config.selection_mode or "balanced")
         if selection_mode == "anchor_only":
             anchor_affordable = [
                 row
@@ -618,17 +629,15 @@ def select_panel(
             if not de_novo_affordable:
                 break
             affordable = de_novo_affordable
-        elif selection_mode == "balanced" and not any(_uses_de_novo_site(row) for row in selected):
-            best_value = max(_selection_value(fitted, row, selected) for row in affordable)
-            de_novo_affordable = [
+        elif selection_mode == "balanced":
+            selected_probe_count = sum(1 for row in selected if _uses_de_novo_site(row))
+            reserved_affordable = [
                 row
                 for row in affordable
-                if _uses_de_novo_site(row)
-                and _selection_value(fitted, row, selected) >= best_value - 0.055
+                if str(row.get("candidate_id") or row.get("variant_id")) in reserve_probe_ids
             ]
-            slots_remaining = max(1, int((float(budget) - spent) // 1.0))
-            if de_novo_affordable and len(selected) >= max(1, slots_remaining - 2):
-                affordable = de_novo_affordable
+            if selected_probe_count < target_probe_count and reserved_affordable:
+                affordable = reserved_affordable
         best = max(
             affordable,
             key=lambda row: (
@@ -647,8 +656,84 @@ def select_panel(
     return selected_ids
 
 
+def _target_counterfactual_probe_count(
+    state: PCIGState,
+    candidates: Sequence[Mapping[str, Any]],
+    budget: int | float,
+) -> int:
+    if state.config.selection_mode != "balanced":
+        return 0
+    if state.config.min_counterfactual_probe_fraction <= 0.0:
+        return 0
+    if not any(_uses_de_novo_site(row) for row in candidates):
+        return 0
+    positive_costs = [_cost(row) for row in candidates if _cost(row) > 0]
+    if not positive_costs:
+        return 0
+    estimated_slots = max(1, int(float(budget) // min(positive_costs)))
+    target = ceil(estimated_slots * state.config.min_counterfactual_probe_fraction)
+    return max(1, min(int(state.config.max_counterfactual_probe_reserve), target))
+
+
+def _counterfactual_probe_reserve_ids(
+    state: PCIGState,
+    candidates: Sequence[Mapping[str, Any]],
+    budget: int | float,
+    *,
+    target_probe_count: int,
+) -> set[str]:
+    if target_probe_count <= 0:
+        return set()
+    affordable = [row for row in candidates if _cost(row) <= float(budget)]
+    if not affordable:
+        return set()
+    best_value = max(_selection_value(state, row, []) for row in affordable)
+    floor = best_value - max(0.0, float(state.config.counterfactual_probe_value_tolerance))
+    probes = [
+        row
+        for row in affordable
+        if _uses_de_novo_site(row) and row.get("feasibility_status") != "infeasible"
+    ]
+    qualified = [row for row in probes if _selection_value(state, row, []) >= floor]
+    reserve_pool = qualified or probes
+    reserve_pool.sort(
+        key=lambda row: (
+            _probe_selection_value(state, row),
+            _selection_value(state, row, []),
+            _to_float(row.get("score")),
+            -_cost(row),
+            str(row.get("candidate_id") or row.get("variant_id")),
+        ),
+        reverse=True,
+    )
+    return {
+        str(row.get("candidate_id") or row.get("variant_id"))
+        for row in reserve_pool[:target_probe_count]
+    }
+
+
+def _probe_selection_value(state: PCIGState, row: Mapping[str, Any]) -> float:
+    components = row.get("score_components")
+    if not isinstance(components, Mapping):
+        components = {}
+    field = _to_float(components.get("counterfactual_site_field"))
+    uncertainty = _to_float(components.get("posterior_uncertainty"))
+    pair_bonus = _to_float(components.get("pair_program_bonus"))
+    feasibility = _to_float(components.get("feasibility_prior"))
+    return (
+        _selection_value(state, row, [])
+        + 0.18 * uncertainty
+        + 0.08 * field
+        + 0.10 * pair_bonus
+        + 0.06 * feasibility
+    )
+
+
 def _uses_de_novo_site(row: Mapping[str, Any]) -> bool:
     if row.get("uses_de_novo_site_proposal") is True:
+        return True
+    raw_flag = row.get("uses_de_novo_site_proposal")
+    if isinstance(raw_flag, str) and raw_flag.strip().lower() in {"true", "1", "yes"}:
         return True
     raw = row.get("de_novo_site_edit_ids")
     if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):

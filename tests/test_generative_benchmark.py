@@ -157,6 +157,7 @@ def test_ph_switch_graph_is_default_generative_mechanism_and_not_cmdgd(tmp_path:
     ph_rows = [row for row in rows if row["mechanism"] == "ph_switch_graph"]
     assert ph_rows
     assert all(int(row["generated_new_site_count"]) > 0 for row in ph_rows)
+    assert all(int(row["selected_new_site_count"]) > 0 for row in ph_rows)
 
 
 def test_legacy_cmdgd_is_not_selectable_when_explicitly_included(tmp_path: Path) -> None:

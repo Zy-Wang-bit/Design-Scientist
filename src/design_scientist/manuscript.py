@@ -1099,7 +1099,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
         same_pool_results_relation = (
             "the same-pool reference scorer remains a near-tie acquisition boundary; the full mechanism's "
             "stronger contribution is candidate-space expansion together with a performance-first selector "
-            "that admits new-position probes only when their predicted utility is competitive"
+            "that reserves a small share of the batch for high-information new-position probes"
         )
         same_pool_quality_relation = "keeps selected utility near the best same-pool scorer in this stress suite"
     elif same_pool_delta < -0.005:
@@ -1139,7 +1139,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             f"the selected mechanism reached mean best-in-batch synthetic-oracle utility {_compact_float_text(selected_row.get('mean_best_selected_utility'))}, "
             f"{same_pool_abstract_relation}, "
             f"while maintaining a generated-pool new-site rate of {_compact_float_text(selected_row.get('mean_new_site_rate'))} "
-            f"and selecting {_compact_float_text(selected_row.get('mean_selected_new_site_count'))} new-site probe per batch. "
+            f"with mean selected new-site count {_compact_float_text(selected_row.get('mean_selected_new_site_count'))}. "
             "The resulting project panel contains generated heavy/light sequences rather than a re-ranking of "
             "the observed pool. This is a candidate-space expansion result with a near-tie selected-utility "
             "boundary, not evidence that rank 1 in the eligibility-gated report is a statistically significant "
@@ -1234,8 +1234,9 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "each y a vector of posterior effect, uncertainty, counterfactual-site, pair-program, feasibility, "
             "context, anchor, and cost terms. `select_panel` solves the bounded batch allocation problem by "
             "choosing a nonredundant subset whose total cost is at most B. Empirical anchors and counterfactual "
-            "probes enter one scored pool, so new-position probes are retained only when their predicted utility "
-            "is competitive. The full pseudocode, object definitions, score terms, and update contract "
+            "probes enter one scored pool, but the selector reserves a small budget-aware share for counterfactual "
+            "probes so the next wet-lab panel can test new sites instead of only exploiting observed edit combinations. "
+            "The full pseudocode, object definitions, score terms, and update contract "
             f"are provided in {formal_definition_link}."
         ),
         "",
@@ -1281,8 +1282,10 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "triplet program combines one counterfactual site with two high-support pH-switch edits. Fourth, "
             "generated sequences are scored by a posterior mean-plus-uncertainty acquisition rule with feasibility "
             "and cost terms. Finally, panel selection chooses a nonredundant batch whose total cost stays within "
-            "budget and whose allocation contains both evidence anchors and counterfactual probes when the budget "
-            "allows."
+            "budget. In the balanced mode used for the reported run, the selector estimates how many candidates "
+            "the budget can support, reserves roughly one-fifth of that capacity for the highest probe-specific-value "
+            "counterfactual programs, and fills the remaining budget with evidence anchors and high-scoring mixed "
+            "programs. The `no_new_site_reserve` ablation removes only this allocation step."
         ),
         "",
         (
@@ -1329,9 +1332,10 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "weight-sensitivity table; they are not learned from hidden benchmark oracle values. The novelty therefore lies "
             "in the lifecycle that defines x, c(x), and p(x), and in the ablation-tested coupling between graph "
             "state, generation, and selection. The reported selector is performance-first: it ranks generated "
-            "programs by predicted utility and feasibility, then admits counterfactual probes only when they remain "
-            "competitive under that utility score. New-site generation is therefore a candidate-space expansion "
-            "mechanism, not a forced selection quota."
+            "programs by predicted utility and feasibility, then applies a counterfactual-probe reserve whose "
+            "probe-specific value combines score, posterior uncertainty, counterfactual-site field, pair-program "
+            "support, and feasibility. The reserve is capped in the default configuration, so it tests new sites "
+            "without letting low-value exploratory probes dominate the panel."
         ),
         "",
         "```text",
@@ -1443,7 +1447,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             f"New-site generation was active rather than cosmetic. The benchmark row reports "
             f"{_compact_float_text(selected_row.get('mean_generated_new_site_count'))} generated new-site candidates "
             f"per replicate on average and a generated-pool new-site rate of {_compact_float_text(selected_row.get('mean_new_site_rate'))}; "
-            f"the selected batches averaged {_compact_float_text(selected_row.get('mean_selected_new_site_count'))} new-site candidates. "
+            f"mean selected new-site count was {_compact_float_text(selected_row.get('mean_selected_new_site_count'))}. "
             f"The 1E62 project run generated {project_summary.get('generated_candidate_count', '')} candidates and "
             f"selected {project_summary.get('selected_count', '')}. The full selected panel is reported in "
             f"{table_links['panel']}, with candidate-level evidence boundaries in {table_links['rationale']}; "
@@ -3805,7 +3809,7 @@ def _ph_switch_graph_algorithm_formal_definition(context: dict[str, Any]) -> str
             "6. Generate candidate programs P as single-site probes, supported-counterfactual pairs, and one-counterfactual/two-supported triplets.",
             "7. Materialize candidates x=apply(b,P), then compute feasibility and cost.",
             "8. Score candidates with the acquisition function below.",
-            "9. Select a nonredundant panel with total cost <= B using performance-first utility, feasibility, and diversity; counterfactual probes enter the panel only when competitive under that score.",
+            "9. Select a nonredundant panel with total cost <= B using performance-first utility, feasibility, diversity, and a capped counterfactual-probe reserve.",
             "Output: generated candidate pool, selected panel, component trace, and benchmark artifacts",
             "```",
             "",
@@ -3963,7 +3967,7 @@ def _ph_switch_graph_configuration_contract_rows(context: dict[str, Any]) -> lis
             "setting": "selection_mode",
             "value": defaults.get("selection_mode", "balanced"),
             "scope": "algorithm_default",
-            "interpretation": "Performance-first selector ranks evidence anchors and counterfactual probes in one pool, then applies redundancy, diversity, and cost constraints.",
+            "interpretation": "Performance-first selector ranks evidence anchors and counterfactual probes in one pool, then applies redundancy, diversity, cost constraints, and a capped probe reserve.",
         },
     ]
 

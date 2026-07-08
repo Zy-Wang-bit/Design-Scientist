@@ -286,6 +286,14 @@ def test_pcig_panel_is_utility_first_but_keeps_counterfactual_probe_when_afforda
 
     assert len(selected) >= 3
     assert sum(float(by_id[candidate_id]["cost"]) for candidate_id in selected) <= 5.0
+    assert (
+        sum(
+            1
+            for candidate_id in selected
+            if by_id[candidate_id].get("uses_de_novo_site_proposal") is True
+        )
+        >= 1
+    )
     assert any(
         by_id[candidate_id].get("uses_de_novo_site_proposal") is True
         for candidate_id in selected
@@ -363,3 +371,38 @@ def test_pcig_selector_boundary_modes_are_explicit() -> None:
     assert all(by_id[candidate_id].get("uses_de_novo_site_proposal") for candidate_id in new_site_selected)
     assert no_reserve_selected
     assert no_reserve_state.config.selection_mode == "no_new_site_reserve"
+
+
+def test_pcig_probe_reserve_is_mechanism_level_and_survives_string_flags() -> None:
+    state = pcig.fit_state(
+        {
+            "base_heavy_chain_seq": BASE_HEAVY,
+            "base_light_chain_seq": BASE_LIGHT,
+            "observed_variants": _observed_variants(),
+            "observed_mutation_sites": [
+                {"chain": "H", "position": 4},
+                {"chain": "H", "position": 13},
+                {"chain": "L", "position": 4},
+            ],
+            "visible_mutation_sites": _visible_sites(),
+            "pcig_config": {
+                "min_counterfactual_probe_fraction": 0.50,
+                "max_counterfactual_probe_reserve": 2,
+            },
+        }
+    )
+    candidates = pcig.score_candidates(state, pcig.generate_candidates(state, max_candidates=64))
+    round_tripped = []
+    for candidate in candidates:
+        row = dict(candidate)
+        if row.get("uses_de_novo_site_proposal") is True:
+            row["uses_de_novo_site_proposal"] = "true"
+        round_tripped.append(row)
+
+    selected = pcig.select_panel(state, round_tripped, 5, random.Random(0))
+    by_id = {str(candidate["candidate_id"]): candidate for candidate in round_tripped}
+
+    assert (
+        sum(1 for candidate_id in selected if pcig._uses_de_novo_site(by_id[candidate_id]))
+        >= 2
+    )
