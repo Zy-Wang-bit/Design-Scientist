@@ -10,6 +10,7 @@ the scientific content of the manuscript.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -147,7 +148,7 @@ def main() -> int:
     (paper_dir / "bioinformatics_body.tex").write_text(body_tex.rstrip() + "\n", encoding="utf-8")
 
     abstract = _abstract_text(manuscript.read_text(encoding="utf-8"))
-    preamble = _bioinformatics_preamble(abstract)
+    preamble = _bioinformatics_preamble(abstract, paper_dir)
     (paper_dir / "bioinformatics_preamble.tex").write_text(preamble, encoding="utf-8")
     manuscript_tex = preamble + "\n" + body_tex.rstrip() + "\n\n" + _bibliography_block() + "\n\\end{document}\n"
     (paper_dir / "bioinformatics_manuscript.tex").write_text(manuscript_tex, encoding="utf-8")
@@ -359,9 +360,9 @@ def _wrap_raw_urls(text: str) -> str:
     return re.sub(r"(?<![{])https?://[^\s}]+", replace, text)
 
 
-def _bioinformatics_preamble(abstract: str) -> str:
+def _bioinformatics_preamble(abstract: str, paper_dir: Path) -> str:
     del abstract
-    structured_abstract = _structured_bioinformatics_abstract()
+    structured_abstract = _structured_bioinformatics_abstract(paper_dir)
     _validate_structured_bioinformatics_abstract(structured_abstract)
     escaped_abstract = _escape_latex(structured_abstract)
     author = _escape_latex(os.environ.get("DS_PAPER_AUTHORS", "Author details to be inserted before submission"))
@@ -411,7 +412,7 @@ def _bioinformatics_preamble(abstract: str) -> str:
     )
 
 
-def _structured_bioinformatics_abstract() -> str:
+def _structured_bioinformatics_abstract(paper_dir: Path) -> str:
     repository_url = os.environ.get(
         "DS_PAPER_REPOSITORY_URL",
         "https://github.com/Zy-Wang-bit/Design-Scientist",
@@ -421,18 +422,55 @@ def _structured_bioinformatics_abstract() -> str:
         "archival DOI or Software Heritage URL to be inserted before submission",
     )
     contact = os.environ.get("DS_PAPER_CONTACT", "corresponding author email to be inserted before submission")
+    external_ph_clause = _external_ph_switch_abstract_clause(paper_dir)
     return (
         "Motivation: Sparse antibody pH-switch campaigns need algorithms that propose "
         "testable mutation sites beyond measured candidates. "
         "Results: pH-Switch Graph Search builds a protonation-prior site graph, generates "
         "one- to three-edit heavy/light-chain hypotheses, and selects a cost-constrained 1E62 panel. "
         "Synthetic stress tests and external pH-switch literature replay support auditable "
-        "candidate-space expansion, with prospective wet-lab activity left for validation. "
+        f"candidate-space expansion; {external_ph_clause} "
+        "Prospective wet-lab activity is left for validation. "
         f"Availability and Implementation: Code and test artifacts are available at {repository_url}; "
         f"the submission version is archived at {archive_url}. "
         f"Contact: {contact}. "
         "Supplementary information: Supplementary Data are available with the manuscript."
     )
+
+
+def _external_ph_switch_abstract_clause(paper_dir: Path) -> str:
+    summary = paper_dir / "tables" / "external_ph_switch_benchmark_summary.csv"
+    if not summary.is_file():
+        return "public pH-switch replay data are indexed in the supplement."
+    rows = list(csv.DictReader(summary.open(encoding="utf-8")))
+    transfer = _summary_row(rows, "leave_one_study_transition_calibration")
+    histidine = _summary_row(rows, "histidine_count")
+    if not transfer:
+        return "public pH-switch replay data are indexed in the supplement."
+    dataset_count = _compact_number(transfer.get("dataset_count"))
+    transfer_norm = _compact_number(transfer.get("mean_best_selected_normalized_log_ratio"))
+    histidine_norm = _compact_number(histidine.get("mean_best_selected_normalized_log_ratio")) if histidine else "n/a"
+    return (
+        f"a {dataset_count}-table public pH-switch replay reached normalized log-ratio "
+        f"{transfer_norm} versus {histidine_norm} for histidine-count selection."
+    )
+
+
+def _summary_row(rows: list[dict[str, str]], method: str) -> dict[str, str]:
+    for row in rows:
+        if row.get("method") == method and row.get("dataset_id") == "overall":
+            return row
+    return {}
+
+
+def _compact_number(value: object) -> str:
+    try:
+        number = float(str(value))
+    except (TypeError, ValueError):
+        return str(value or "")
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.3f}".rstrip("0").rstrip(".")
 
 
 def _validate_structured_bioinformatics_abstract(text: str) -> None:

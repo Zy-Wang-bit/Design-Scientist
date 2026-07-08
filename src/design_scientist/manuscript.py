@@ -385,6 +385,9 @@ def generate_algorithm_manuscript(
                 "data_availability.md": str(paper_dir / "data_availability.md"),
                 "code_availability.md": str(paper_dir / "code_availability.md"),
                 "submission_metadata.md": str(paper_dir / "submission_metadata.md"),
+                "submission_readiness_checklist.md": str(
+                    paper_dir / "submission_readiness_checklist.md"
+                ),
                 "figure_alt_text.json": str(paper_dir / "figure_alt_text.json"),
                 "supplementary_data.md": str(paper_dir / "supplementary_data.md"),
                 "submission_package_manifest.md": str(paper_dir / "submission_package_manifest.md"),
@@ -1076,6 +1079,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
     claim_boundary_text = _ph_switch_graph_claim_boundary_sentence(context)
     external_benchmark_text = _ph_switch_graph_external_benchmark_sentence(context)
     external_ph_benchmark_text = _ph_switch_graph_external_ph_benchmark_sentence(context)
+    external_ph_abstract_clause = _ph_switch_graph_external_ph_abstract_clause(context)
     world_block_text = _ph_switch_graph_world_block_sentence(context)
     literature_protocol = _ph_switch_graph_literature_protocol_sentence(context)
     defaults = _pcig_config_defaults()
@@ -1152,6 +1156,7 @@ def _render_ph_switch_graph_algorithm_manuscript(context: dict[str, Any], paper_
             "boundary, not evidence that rank 1 in the eligibility-gated report is a statistically significant "
             "utility advantage. The selected-utility comparison is interpreted only as synthetic-oracle "
             "stress-test evidence, not as prospective experimental evidence. "
+            f"{external_ph_abstract_clause} "
             "The study provides an executable candidate-space expansion algorithm and "
             "falsifiable hypotheses for a future assay round; no prospective activity or kinetic release is claimed."
         ),
@@ -3651,6 +3656,21 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
         + "\n",
         encoding="utf-8",
     )
+    (paper_dir / "submission_readiness_checklist.md").write_text(
+        _render_submission_readiness_checklist(
+            authors=authors,
+            contact=contact,
+            repository_url=repository_url,
+            archive_url=archive_url,
+            license_text=license_text,
+            data_availability_statement=data_availability_statement,
+            funding=funding,
+            conflicts=conflicts,
+            ai_disclosure=ai_disclosure,
+        ).rstrip()
+        + "\n",
+        encoding="utf-8",
+    )
 
     figure_alt_text = {
         "figure_1": "Workflow diagram showing standardized 1E62 startup data entering a protonation-coupled site graph, candidate generation, scoring, panel selection, and evidence-boundary outputs.",
@@ -3693,6 +3713,7 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
                 "- File S5: `submission_metadata.md`",
                 "- File S6: `algorithm_formal_definition.md`",
                 "- File S7: `figure_alt_text.json`",
+                "- File S8: `submission_readiness_checklist.md`",
                 "",
                 "## Evidence Boundary",
                 "",
@@ -3733,6 +3754,7 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
                 "- `data_availability.md`",
                 "- `code_availability.md`",
                 "- `submission_metadata.md`",
+                "- `submission_readiness_checklist.md`",
                 "- `figure_alt_text.json`",
                 "- `supplementary_data.md`",
                 "- reproducibility source package under `output/pdf/` containing manuscript files, core source files, tests, `pyproject.toml`, `uv.lock`, standardized startup data, and key run artifacts",
@@ -3783,6 +3805,68 @@ def _write_ph_switch_graph_reproducibility_artifacts(context: dict[str, Any], pa
             },
         },
     )
+
+
+def _render_submission_readiness_checklist(
+    *,
+    authors: str,
+    contact: str,
+    repository_url: str,
+    archive_url: str,
+    license_text: str,
+    data_availability_statement: str,
+    funding: str,
+    conflicts: str,
+    ai_disclosure: str,
+) -> str:
+    fields = [
+        ("authors", authors, "Author list and affiliations confirmed by all authors."),
+        ("corresponding_author", contact, "Corresponding author email is present and approved for submission."),
+        ("repository_url", repository_url, "Public repository URL resolves to the submitted code state."),
+        ("archival_release", archive_url, "Submitted version has a DOI or Software Heritage archive identifier."),
+        ("license", license_text, "Repository has an explicit reuse license."),
+        (
+            "data_availability_statement",
+            data_availability_statement,
+            "Data release or reviewer-access statement covers standardized inputs and generated artifacts.",
+        ),
+        ("funding", funding, "Funding statement is author-confirmed, including explicit no-funding wording if applicable."),
+        ("conflicts_of_interest", conflicts, "Competing-interest status is author-confirmed."),
+        ("ai_use_disclosure", ai_disclosure, "AI/Codex use is disclosed with author responsibility stated."),
+    ]
+    lines = [
+        "# Submission Readiness Checklist",
+        "",
+        "This file separates remaining author-side submission actions from algorithm or artifact failures. It is generated with the manuscript so unresolved journal metadata cannot be mistaken for scientific validation failure.",
+        "",
+        "| Field | Status | Current value | Required action |",
+        "|---|---:|---|---|",
+    ]
+    for name, value, action in fields:
+        text = _one_line(value)
+        status = "ready"
+        lowered = text.lower()
+        if not text or any(phrase.lower() in lowered for phrase in SUBMISSION_PLACEHOLDER_PHRASES):
+            status = "author action required"
+        elif name == "corresponding_author" and "@" not in text:
+            status = "author action required"
+        elif name == "license" and text.lower() in {"unrecorded", "none", "unknown"}:
+            status = "author action required"
+        elif name == "repository_url" and not re.search(r"https?://", text):
+            status = "author action required"
+        elif name == "archival_release" and not any(
+            marker in text.lower() for marker in STABLE_SOFTWARE_ARCHIVE_MARKERS
+        ):
+            status = "author action required"
+        safe_value = text.replace("|", "\\|") if text else "missing"
+        lines.append(f"| `{name}` | {status} | {safe_value} | {action} |")
+    lines.extend(
+        [
+            "",
+            "The readiness validator must continue to fail until all author-action rows are resolved with real submission information.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _ph_switch_graph_algorithm_formal_definition(context: dict[str, Any]) -> str:
@@ -4444,6 +4528,31 @@ def _external_ph_switch_summary_row(
         if str(row.get("method")) == method and str(row.get("dataset_id")) == dataset_id:
             return row
     return {}
+
+
+def _ph_switch_graph_external_ph_abstract_clause(context: dict[str, Any]) -> str:
+    benchmark = context.get("external_ph_switch_benchmark", {})
+    if not isinstance(benchmark, dict) or not benchmark.get("available"):
+        return "No independent public pH-switch table replay was available for this draft."
+    transfer_row = _external_ph_switch_summary_row(
+        context,
+        "leave_one_study_transition_calibration",
+        "overall",
+    )
+    transition_row = _external_ph_switch_summary_row(context, "transition_context_prior", "overall")
+    prior_row = _external_ph_switch_summary_row(context, "ph_switch_residue_prior", "overall")
+    primary_row = transfer_row or transition_row or prior_row
+    if not primary_row:
+        return "The public pH-switch table replay was present but did not contain an overall summary row."
+    dataset_count = _compact_float_text(primary_row.get("dataset_count"))
+    primary_norm = _compact_float_text(primary_row.get("mean_best_selected_normalized_log_ratio"))
+    histidine_row = _external_ph_switch_summary_row(context, "histidine_count", "overall")
+    histidine_norm = _compact_float_text(histidine_row.get("mean_best_selected_normalized_log_ratio"))
+    return (
+        f"A curated public pH-switch table replay over {dataset_count} antibody study tables "
+        f"reached normalized log-ratio {primary_norm} versus {histidine_norm} for a histidine-count baseline, "
+        "supporting the residue-transition prior as a limited external sanity check."
+    )
 
 
 def _ph_switch_graph_external_ph_benchmark_sentence(context: dict[str, Any]) -> str:
@@ -6222,6 +6331,7 @@ def _validate_algorithm_manuscript(
             "developability_risk_summary.json",
             "claim_boundary_analysis.json",
             "submission_metadata.md",
+            "submission_readiness_checklist.md",
             "figure_alt_text.json",
             "supplementary_data.md",
         ):

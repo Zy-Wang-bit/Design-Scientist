@@ -20,10 +20,13 @@ from design_scientist.manuscript import (
     _ph_switch_graph_configuration_contract_rows,
     _ph_switch_graph_external_antibody_rows,
     _ph_switch_graph_external_benchmark_sentence,
+    _ph_switch_graph_external_ph_abstract_clause,
+    _ph_switch_graph_external_ph_benchmark_sentence,
     _ph_switch_graph_pareto_claim_boundary_rows,
     _ph_switch_graph_developability_risk_summary,
     _ph_switch_graph_quality_metric_rows,
     _ph_switch_graph_quality_metric_sentence,
+    _render_submission_readiness_checklist,
     _ph_switch_graph_world_block_rows,
     _ph_switch_graph_world_block_sentence,
     _validate_bioinformatics_render_artifacts,
@@ -1278,6 +1281,87 @@ def test_ph_switch_graph_submission_metadata_rejects_journal_placeholders(
     assert "unresolved_submission_placeholder" in codes
     assert "missing_archival_software_url" in codes
     assert "missing_corresponding_author_email" in codes
+
+
+def test_ph_switch_graph_external_ph_clause_reports_limited_public_table_anchor() -> None:
+    context = {
+        "external_ph_switch_benchmark": {
+            "available": True,
+            "summary_rows": [
+                {
+                    "method": "leave_one_study_transition_calibration",
+                    "dataset_id": "overall",
+                    "dataset_count": 5,
+                    "mean_best_selected_normalized_log_ratio": 0.846,
+                    "mean_best_selected_ph_ratio": 987.6,
+                    "mean_hit_rate_top_tertile": 0.3,
+                    "mean_regret_vs_oracle": 835.2,
+                },
+                {
+                    "method": "histidine_count",
+                    "dataset_id": "overall",
+                    "mean_best_selected_normalized_log_ratio": 0.709,
+                    "mean_best_selected_ph_ratio": 1004.9,
+                },
+                {
+                    "method": "transition_context_prior",
+                    "dataset_id": "overall",
+                    "mean_best_selected_normalized_log_ratio": 0.758,
+                    "mean_best_selected_ph_ratio": 953.2,
+                },
+                {
+                    "method": "ph_switch_residue_prior",
+                    "dataset_id": "overall",
+                    "mean_best_selected_ph_ratio": 1004.9,
+                },
+                {
+                    "method": "parent_reference",
+                    "dataset_id": "overall",
+                    "mean_best_selected_ph_ratio": 8.0,
+                },
+                {
+                    "method": "ionizable_count",
+                    "dataset_id": "overall",
+                    "mean_best_selected_ph_ratio": 1004.9,
+                },
+                {
+                    "method": "oracle_top_pH_ratio",
+                    "dataset_id": "overall",
+                    "mean_best_selected_ph_ratio": 1822.8,
+                },
+            ],
+        }
+    }
+
+    abstract_clause = _ph_switch_graph_external_ph_abstract_clause(context)
+    sentence = _ph_switch_graph_external_ph_benchmark_sentence(context)
+
+    assert "5 antibody study tables" in abstract_clause
+    assert "0.846 versus 0.709" in abstract_clause
+    assert "limited external sanity check" in abstract_clause
+    assert "not validation of the full 1E62 generator" in sentence
+
+
+def test_submission_readiness_checklist_separates_author_actions_from_artifacts() -> None:
+    checklist = _render_submission_readiness_checklist(
+        authors="author details to be inserted before submission",
+        contact="corresponding author email to be inserted before submission",
+        repository_url="https://github.com/Zy-Wang-bit/Design-Scientist",
+        archive_url="https://archive.softwareheritage.org/swh:1:snp:test",
+        license_text="repository license to be confirmed before submission",
+        data_availability_statement=(
+            "Data release and reviewer-access statement to be inserted before submission"
+        ),
+        funding="funding statement to be inserted before submission",
+        conflicts="conflict of interest statement to be inserted before submission",
+        ai_disclosure="AI/Codex assisted code implementation under author responsibility.",
+    )
+
+    assert "Submission Readiness Checklist" in checklist
+    assert "| `repository_url` | ready |" in checklist
+    assert "| `authors` | author action required |" in checklist
+    assert "| `license` | author action required |" in checklist
+    assert "must continue to fail until all author-action rows are resolved" in checklist
 
 
 def test_ph_switch_graph_submission_metadata_accepts_explicit_submit_ready_fields(
