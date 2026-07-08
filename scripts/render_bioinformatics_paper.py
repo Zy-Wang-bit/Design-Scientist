@@ -391,6 +391,7 @@ def _bioinformatics_preamble(abstract: str, paper_dir: Path) -> str:
             "\\setlength{\\dblfloatsep}{2pt plus 1pt minus 1pt}",
             "\\setlength{\\dbltextfloatsep}{2pt plus 1pt minus 1pt}",
             "\\raggedbottom",
+            "\\hfuzz=12pt",
             "\\begin{document}",
             "\\journaltitle{Bioinformatics}",
             "\\appnotes{Methods}",
