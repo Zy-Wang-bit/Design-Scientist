@@ -98,6 +98,23 @@ V3_CLAIM_GATE_ARTIFACTS: dict[str, str] = {
     "benchmark_saturation": "benchmark_saturation.json",
 }
 
+V4_CRITICAL_FRAMEWORK_ARTIFACTS: dict[str, str] = {
+    "v4_claim_ledger": artifact_constants.V4_CLAIM_LEDGER,
+    "v4_evidence_ledger": artifact_constants.V4_EVIDENCE_LEDGER,
+    "v4_mechanism_ledger": artifact_constants.V4_MECHANISM_LEDGER,
+    "v4_research_harness_summary": artifact_constants.V4_RESEARCH_HARNESS_SUMMARY,
+    "v4_mechanism_cards": artifact_constants.V4_MECHANISM_CARDS,
+    "v4_mechanism_library": artifact_constants.V4_MECHANISM_LIBRARY,
+    "v4_mechanism_gap_matrix": artifact_constants.V4_MECHANISM_GAP_MATRIX,
+    "v4_literature_mine_trace": artifact_constants.V4_LITERATURE_MINE_TRACE,
+    "v4_mechanism_graph": artifact_constants.V4_MECHANISM_GRAPH,
+}
+
+V4_CRITICAL_RUN_ARTIFACTS: dict[str, str] = {
+    "v4_novelty_audit": artifact_constants.V4_NOVELTY_AUDIT,
+    "v4_verification_ladder": artifact_constants.V4_VERIFICATION_LADDER,
+}
+
 V3_REVIEWER_ARTIFACTS: dict[str, str] = {
     "novelty_review": "novelty_review.json",
     "baseline_audit": "baseline_audit.json",
@@ -137,6 +154,7 @@ SIMPLE_BASELINE_METHODS = {
 }
 
 REQUIRED_BENCHMARK_BASELINES = ("random_feasible", "fixed_mix")
+V3_LEGACY_REJECTED_MECHANISMS = {"cmdgd", "cmd_gd", "cmdgd_generative", "cmdgd_observed_pool"}
 FALSE_CLAIM_RATE_TOLERANCE = 1e-9
 BASELINE_OVERLAP_ERROR_THRESHOLD = 0.85
 V3_STRONG_CLAIM_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -421,6 +439,9 @@ def _review_framework_run_v3(
     )
     journal = _load_json(journal_path, "scientist_journal", findings)
     selected_record = _validate_v3_scientist_journal(journal, selected_run_id, _rel(journal_path, root), findings)
+    is_v4 = isinstance(journal, dict) and journal.get("research_harness_version") == "v4"
+    if is_v4:
+        _validate_v4_framework_artifacts(root, findings, artifacts)
 
     stage_progress = _validate_required_v3_run_json(root, run_dir, "stage_progress", findings, artifacts)
     _validate_v3_stage_progress(
@@ -501,9 +522,19 @@ def _review_framework_run_v3(
     method_report_text = _load_text(method_report_path, "method_report", findings)
     if method_report_text is not None:
         _validate_v3_method_report(method_report_text, _rel(method_report_path, root), findings)
+        if is_v4 and "## Research Harness V4" not in method_report_text:
+            _add_finding(
+                findings,
+                "error",
+                "v4_method_report_missing_research_harness",
+                "V4 method report must include a Research Harness V4 section.",
+                _rel(method_report_path, root),
+            )
 
     _validate_v3_claim_gate_artifacts(root, run_dir, findings, artifacts)
     _validate_v3_reference_data_sources(root, run_dir, selected_record, findings, artifacts)
+    if is_v4:
+        _validate_v4_run_artifacts(root, run_dir, findings, artifacts)
 
     return _build_report(root, selected_run_id, run_dir, findings, artifacts)
 
@@ -1066,6 +1097,203 @@ def _validate_v3_operator_artifacts(
                 "operator_negative_controls_empty",
                 "operator_negative_controls.json must contain a non-empty negative_controls mapping.",
                 _rel(controls_path, root),
+            )
+
+
+def _validate_v4_framework_artifacts(
+    root: Path,
+    findings: list[dict[str, Any]],
+    artifacts: dict[str, str],
+) -> None:
+    for key in ("v4_claim_ledger", "v4_evidence_ledger", "v4_mechanism_ledger"):
+        path = _require_file(
+            root,
+            V4_CRITICAL_FRAMEWORK_ARTIFACTS[key],
+            f"missing_{key}",
+            findings,
+            artifacts,
+        )
+        _validate_jsonl_records(path, key, _rel(path, root), findings)
+
+    summary_path = _require_file(
+        root,
+        V4_CRITICAL_FRAMEWORK_ARTIFACTS["v4_research_harness_summary"],
+        "missing_v4_research_harness_summary",
+        findings,
+        artifacts,
+    )
+    summary = _load_json(summary_path, "v4_research_harness_summary", findings)
+    if isinstance(summary, dict):
+        if summary.get("valid") is not True:
+            _add_finding(
+                findings,
+                "error",
+                "v4_research_harness_invalid",
+                "research_harness_summary.json must contain valid: true.",
+                _rel(summary_path, root),
+            )
+        for key, code in (
+            ("unsupported_claim_ids", "v4_unsupported_claims_present"),
+            ("empty_component_mechanism_ids", "v4_empty_component_mechanisms"),
+            ("selected_unsupported_claim_ids", "v4_selected_unsupported_claims"),
+        ):
+            if summary.get(key):
+                _add_finding(
+                    findings,
+                    "error",
+                    code,
+                    f"Research Harness V4 summary contains non-empty {key}.",
+                    _rel(summary_path, root),
+                )
+        if summary.get("missing_evidence_by_claim"):
+            _add_finding(
+                findings,
+                "error",
+                "v4_supported_claims_missing_evidence",
+                "Research Harness V4 has supported claims whose evidence ids are missing.",
+                _rel(summary_path, root),
+            )
+
+    cards_path = _require_file(
+        root,
+        V4_CRITICAL_FRAMEWORK_ARTIFACTS["v4_mechanism_cards"],
+        "missing_v4_mechanism_cards",
+        findings,
+        artifacts,
+    )
+    _validate_nonempty_v3_collection(
+        _load_json(cards_path, "v4_mechanism_cards", findings),
+        "v4_mechanism_cards",
+        _rel(cards_path, root),
+        findings,
+    )
+
+    library_path = _require_file(
+        root,
+        V4_CRITICAL_FRAMEWORK_ARTIFACTS["v4_mechanism_library"],
+        "missing_v4_mechanism_library",
+        findings,
+        artifacts,
+    )
+    _validate_nonempty_v3_collection(
+        _load_json(library_path, "v4_mechanism_library", findings),
+        "v4_mechanism_library",
+        _rel(library_path, root),
+        findings,
+    )
+
+    gap_path = _require_file(
+        root,
+        V4_CRITICAL_FRAMEWORK_ARTIFACTS["v4_mechanism_gap_matrix"],
+        "missing_v4_mechanism_gap_matrix",
+        findings,
+        artifacts,
+    )
+    gap_rows = _load_csv(gap_path, "v4_mechanism_gap_matrix", findings)
+    if gap_rows is not None and (not gap_rows or "mechanism_id" not in gap_rows[0]):
+        _add_finding(
+            findings,
+            "error",
+            "v4_mechanism_gap_matrix_invalid",
+            "mechanism_gap_matrix_v4.csv must contain at least one row with mechanism_id.",
+            _rel(gap_path, root),
+        )
+
+    trace_path = _require_file(
+        root,
+        V4_CRITICAL_FRAMEWORK_ARTIFACTS["v4_literature_mine_trace"],
+        "missing_v4_literature_mine_trace",
+        findings,
+        artifacts,
+    )
+    trace = _load_json(trace_path, "v4_literature_mine_trace", findings)
+    if isinstance(trace, dict) and trace.get("status") not in {"ok", "degraded"}:
+        _add_finding(
+            findings,
+            "error",
+            "v4_literature_mine_trace_invalid",
+            "literature_mine_trace_v4.json must record status ok or degraded.",
+            _rel(trace_path, root),
+        )
+
+    graph_path = _require_file(
+        root,
+        V4_CRITICAL_FRAMEWORK_ARTIFACTS["v4_mechanism_graph"],
+        "missing_v4_mechanism_graph",
+        findings,
+        artifacts,
+    )
+    graph = _load_json(graph_path, "v4_mechanism_graph", findings)
+    if isinstance(graph, dict):
+        for key in ("components", "gaps", "edges"):
+            if not isinstance(graph.get(key), list):
+                _add_finding(
+                    findings,
+                    "error",
+                    "v4_mechanism_graph_invalid",
+                    f"mechanism_graph_v4.json must contain a {key} list.",
+                    _rel(graph_path, root),
+                )
+
+
+def _validate_v4_run_artifacts(
+    root: Path,
+    run_dir: Path,
+    findings: list[dict[str, Any]],
+    artifacts: dict[str, str],
+) -> None:
+    novelty_path = _require_v4_run_file(
+        root,
+        run_dir,
+        "v4_novelty_audit",
+        "missing_v4_novelty_audit",
+        findings,
+        artifacts,
+    )
+    novelty = _load_json(novelty_path, "v4_novelty_audit", findings)
+    if isinstance(novelty, dict):
+        if novelty.get("verdict") != "pass":
+            _add_finding(
+                findings,
+                "error",
+                "v4_novelty_audit_rejected",
+                "Selected mechanism must pass novelty_audit.json.",
+                _rel(novelty_path, root),
+            )
+        if novelty.get("baseline_clone") is True or novelty.get("weak_delta") is True:
+            _add_finding(
+                findings,
+                "error",
+                "v4_novelty_audit_clone_or_weak_delta",
+                "Selected mechanism cannot be a baseline clone or weak architecture delta.",
+                _rel(novelty_path, root),
+            )
+
+    ladder_path = _require_v4_run_file(
+        root,
+        run_dir,
+        "v4_verification_ladder",
+        "missing_v4_verification_ladder",
+        findings,
+        artifacts,
+    )
+    ladder = _load_json(ladder_path, "v4_verification_ladder", findings)
+    if isinstance(ladder, dict):
+        if ladder.get("passed") is not True:
+            _add_finding(
+                findings,
+                "error",
+                "v4_verification_ladder_failed",
+                "verification_ladder.json must contain passed: true.",
+                _rel(ladder_path, root),
+            )
+        if ladder.get("claim_findings"):
+            _add_finding(
+                findings,
+                "error",
+                "v4_verification_ladder_claim_findings",
+                "verification_ladder.json contains unresolved claim findings.",
+                _rel(ladder_path, root),
             )
 
 
@@ -2612,6 +2840,17 @@ def _validate_v3_mechanism_benchmark_summary(
             artifact,
         )
         return
+    if selected_mechanism.lower() in V3_LEGACY_REJECTED_MECHANISMS:
+        _add_finding(
+            findings,
+            "error",
+            "selected_v3_mechanism_is_legacy_cmdgd",
+            (
+                f"Selected mechanism {selected_mechanism!r} is a legacy CMD-GD route. "
+                "V3 runs must select a mechanism implemented under the V3 lifecycle."
+            ),
+            artifact,
+        )
     selected_row = by_mechanism.get(selected_mechanism)
     if selected_row is None:
         _add_finding(
@@ -3501,6 +3740,36 @@ def _require_v3_run_file(
     return path
 
 
+def _require_v4_run_file(
+    root: Path,
+    run_dir: Path,
+    key: str,
+    code: str,
+    findings: list[dict[str, Any]],
+    artifacts: dict[str, str],
+) -> Path:
+    rel = V4_CRITICAL_RUN_ARTIFACTS[key]
+    path = run_dir / rel
+    artifacts[key] = str(path)
+    if not path.exists():
+        _add_finding(
+            findings,
+            "error",
+            code,
+            f"Missing critical V4 run artifact: {rel}.",
+            _rel(path, root),
+        )
+    elif path.is_file() and path.stat().st_size == 0:
+        _add_finding(
+            findings,
+            "error",
+            f"empty_{key}",
+            f"Critical V4 run artifact is empty: {rel}.",
+            _rel(path, root),
+        )
+    return path
+
+
 def _validate_required_v3_run_json(
     root: Path,
     run_dir: Path,
@@ -3991,12 +4260,7 @@ def _reference_source_path(root: Path, source: str) -> tuple[Path, str | None]:
 
 def _reference_manifest_missing_severity(run_dir: Path) -> str:
     readiness = _load_json_mapping_silent(run_dir / V3_PAPER_READINESS_ARTIFACT)
-    if not isinstance(readiness, dict):
-        return "warning"
-    if readiness.get("valid") is True:
-        return "error"
-    status = str(readiness.get("status") or "").strip().lower()
-    return "error" if status in {"passed", "pass", "accepted", "ready"} else "warning"
+    return "error" if _paper_readiness_payload_is_ready(readiness) else "warning"
 
 
 def _validate_v3_baseline_audit(
@@ -4272,6 +4536,31 @@ def _v3_paper_ready_for_claim_gate(
     path = run_dir / V3_PAPER_READINESS_ARTIFACT
     artifacts["paper_readiness_report"] = str(path)
     if not path.exists():
+        _add_finding(
+            findings,
+            "error",
+            "missing_paper_readiness_report",
+            "Complete framework scientist runs must include paper/paper_readiness_report.json.",
+            _rel(path, root),
+        )
+        return False
+    if not path.is_file():
+        _add_finding(
+            findings,
+            "error",
+            "paper_readiness_report_not_file",
+            "paper/paper_readiness_report.json must be a file.",
+            _rel(path, root),
+        )
+        return False
+    if path.stat().st_size == 0:
+        _add_finding(
+            findings,
+            "error",
+            "empty_paper_readiness_report",
+            "paper/paper_readiness_report.json must not be empty.",
+            _rel(path, root),
+        )
         return False
     data = _load_json(path, "paper_readiness_report", findings)
     if not isinstance(data, dict):
@@ -4283,28 +4572,160 @@ def _v3_paper_ready_for_claim_gate(
             _rel(path, root),
         )
         return False
-    _validate_v3_paper_readiness_report(data, _rel(path, root), findings)
-    if data.get("valid") is True:
-        return True
-    status = str(data.get("status") or "").strip().lower()
-    return status in {"passed", "pass", "accepted", "ready"}
+    return _validate_v3_paper_readiness_report(data, root, run_dir, _rel(path, root), findings)
 
 
 def _validate_v3_paper_readiness_report(
     data: dict[str, Any],
+    root: Path,
+    run_dir: Path,
     artifact: str,
     findings: list[dict[str, Any]],
-) -> None:
+) -> bool:
     status = str(data.get("status") or "").strip().lower()
-    if data.get("valid") is False or status in PAPER_READINESS_FAILURE_STATUSES:
+    ready = _paper_readiness_payload_is_ready(data)
+    if not ready or status in PAPER_READINESS_FAILURE_STATUSES:
         _add_finding(
             findings,
             "error",
             "paper_readiness_report_invalid",
-            "paper_readiness_report.json is present but marks the paper as invalid or failed.",
+            "paper_readiness_report.json must have ready/valid true and must not mark the paper as failed.",
             artifact,
         )
+    has_error_findings = _paper_readiness_has_error_findings(data)
+    if has_error_findings:
+        _add_finding(
+            findings,
+            "error",
+            "paper_readiness_report_has_error_findings",
+            "paper_readiness_report.json contains error findings or a nonzero error summary.",
+            artifact,
+        )
+    _validate_v3_paper_readiness_artifacts(data, root, run_dir, artifact, findings)
     _validate_v3_biology_overclaim_artifact(data, artifact, findings)
+    return ready and not has_error_findings and status not in PAPER_READINESS_FAILURE_STATUSES
+
+
+def _paper_readiness_payload_is_ready(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    readiness_flags = [data[key] for key in ("ready", "valid") if key in data]
+    if not readiness_flags or any(flag is not True for flag in readiness_flags):
+        return False
+    status = str(data.get("status") or "").strip().lower()
+    return status not in PAPER_READINESS_FAILURE_STATUSES
+
+
+def _paper_readiness_has_error_findings(data: dict[str, Any]) -> bool:
+    summary = data.get("summary")
+    if isinstance(summary, dict) and _positive_count(summary.get("errors")):
+        return True
+    findings = data.get("findings")
+    if isinstance(findings, list):
+        return any(_paper_readiness_finding_is_error(finding) for finding in findings)
+    return False
+
+
+def _positive_count(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, str):
+        try:
+            return float(value.strip()) > 0
+        except ValueError:
+            return False
+    return False
+
+
+def _paper_readiness_finding_is_error(finding: Any) -> bool:
+    if isinstance(finding, dict):
+        for key in ("severity", "level", "status"):
+            if str(finding.get(key) or "").strip().lower() == "error":
+                return True
+    return False
+
+
+def _validate_v3_paper_readiness_artifacts(
+    data: dict[str, Any],
+    root: Path,
+    run_dir: Path,
+    artifact: str,
+    findings: list[dict[str, Any]],
+) -> None:
+    paper_dir = (run_dir / "paper").resolve()
+    declared_artifacts = data.get("artifacts")
+    if not isinstance(declared_artifacts, dict) or not declared_artifacts:
+        _add_finding(
+            findings,
+            "error",
+            "paper_readiness_artifacts_missing",
+            "paper_readiness_report.json must declare generated paper artifacts.",
+            artifact,
+        )
+        return
+
+    for key, value in declared_artifacts.items():
+        if str(key) == "paper_dir":
+            continue
+        path = _coerce_paper_readiness_artifact_path(root, paper_dir, value)
+        if path is None:
+            _add_finding(
+                findings,
+                "error",
+                "paper_readiness_artifact_path_invalid",
+                f"paper_readiness_report.json artifact {key!r} must be a non-empty path string.",
+                artifact,
+            )
+            continue
+        try:
+            path.relative_to(paper_dir)
+        except ValueError:
+            _add_finding(
+                findings,
+                "error",
+                "paper_readiness_artifact_outside_paper_dir",
+                f"Readiness artifact {key!r} must stay under runs/{run_dir.name}/paper.",
+                artifact,
+            )
+            continue
+        if not path.exists():
+            _add_finding(
+                findings,
+                "error",
+                "missing_paper_readiness_artifact",
+                f"Readiness artifact {key!r} does not exist.",
+                _rel(path, root),
+            )
+        elif not path.is_file():
+            _add_finding(
+                findings,
+                "error",
+                "paper_readiness_artifact_not_file",
+                f"Readiness artifact {key!r} must be a file.",
+                _rel(path, root),
+            )
+        elif path.stat().st_size == 0:
+            _add_finding(
+                findings,
+                "error",
+                "empty_paper_readiness_artifact",
+                f"Readiness artifact {key!r} must not be empty.",
+                _rel(path, root),
+            )
+
+
+def _coerce_paper_readiness_artifact_path(root: Path, paper_dir: Path, value: Any) -> Path | None:
+    if not _has_text(value):
+        return None
+    raw = Path(str(value)).expanduser()
+    if raw.is_absolute():
+        return raw.resolve()
+    root_relative = (root / raw).resolve()
+    if root_relative.exists() or root_relative.is_relative_to(paper_dir):
+        return root_relative
+    return (paper_dir / raw).resolve()
 
 
 def _normalized_verdict(value: Any) -> str:

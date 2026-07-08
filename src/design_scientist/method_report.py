@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from design_scientist import artifacts as artifact_constants
 from design_scientist.framework_validation import resolve_framework_run
 from design_scientist.io import ensure_dir, read_json, read_yaml
 
@@ -181,6 +182,8 @@ def _write_v3_method_report(
     mechanism_metrics = _selected_json_artifact(root, selected_node, "mechanism_metrics", "mechanism_metrics.json")
     validation_report = _selected_json_artifact(root, selected_node, "validation_report", "validation_report.json")
     claim_gate = _v3_claim_gate_artifacts(run_dir)
+    v4_enabled = journal.get("research_harness_version") == "v4"
+    v4_harness = _v4_research_harness_artifacts(root, run_dir) if v4_enabled else {}
     selected_mechanism = _v3_selected_mechanism_name(selected_summary, mechanism_spec, mechanism_metrics)
     selected_summary_row = _v3_find_row(benchmark_summary_rows, selected_mechanism)
     failed_nodes = _failed_nodes(journal)
@@ -228,9 +231,14 @@ def _write_v3_method_report(
         )
     )
     lines.extend(_v3_claim_gate_section(root, run_dir, claim_gate))
+    if v4_enabled:
+        lines.extend(_v4_research_harness_section(root, run_dir, v4_harness))
     lines.extend(_v3_failed_nodes_section(failed_nodes))
     lines.extend(_v3_unsupported_claims_section(journal, mechanism_metrics, validation_report))
-    lines.extend(_artifact_paths_section(_v3_artifact_paths(root, run_dir, selected_node)))
+    artifact_paths = _v3_artifact_paths(root, run_dir, selected_node)
+    if v4_enabled:
+        artifact_paths.update(_v4_artifact_paths(root, run_dir))
+    lines.extend(_artifact_paths_section(artifact_paths))
 
     out = run_dir / "method_report.md"
     ensure_dir(out.parent)
@@ -613,6 +621,104 @@ def _v3_claim_gate_section(
                 "",
                 f"Paper readiness: valid={_one_line(paper_readiness.get('valid', 'n/a'))}; "
                 f"status={_one_line(paper_readiness.get('status', 'n/a'))}",
+            ]
+        )
+    lines.append("")
+    return lines
+
+
+def _v4_research_harness_section(
+    root: Path,
+    run_dir: Path,
+    artifacts: dict[str, Any],
+) -> list[str]:
+    summary = artifacts.get("summary")
+    novelty = artifacts.get("novelty_audit")
+    ladder = artifacts.get("verification_ladder")
+    claims = artifacts.get("claims") or []
+    evidence = artifacts.get("evidence") or []
+    mechanisms = artifacts.get("mechanisms") or []
+    trace = artifacts.get("literature_mine_trace")
+
+    lines = [
+        "## Research Harness V4",
+        "",
+        "Artifacts: "
+        f"`{_rel(root / artifact_constants.V4_CLAIM_LEDGER, root)}`, "
+        f"`{_rel(root / artifact_constants.V4_EVIDENCE_LEDGER, root)}`, "
+        f"`{_rel(root / artifact_constants.V4_MECHANISM_LEDGER, root)}`, "
+        f"`{_rel(root / artifact_constants.V4_RESEARCH_HARNESS_SUMMARY, root)}`, "
+        f"`{_rel(run_dir / artifact_constants.V4_NOVELTY_AUDIT, root)}`, "
+        f"`{_rel(run_dir / artifact_constants.V4_VERIFICATION_LADDER, root)}`",
+        "",
+    ]
+    if isinstance(summary, dict) and summary:
+        lines.extend(
+            [
+                f"Harness valid: {_one_line(summary.get('valid', 'n/a'))}",
+                f"Claims: {_one_line(summary.get('claim_count', len(claims)))}",
+                f"Evidence records: {_one_line(summary.get('evidence_count', len(evidence)))}",
+                f"Mechanisms: {_one_line(summary.get('mechanism_count', len(mechanisms)))}",
+            ]
+        )
+        for error in _v3_list_items(summary.get("errors")):
+            lines.append(f"- harness error: {_one_line(error)}")
+    else:
+        lines.append("Research harness summary was not loaded.")
+
+    if isinstance(novelty, dict) and novelty:
+        lines.extend(
+            [
+                "",
+                "Novelty audit:",
+                f"- verdict: {_one_line(novelty.get('verdict', 'n/a'))}",
+                f"- baseline_clone: {_one_line(novelty.get('baseline_clone', 'n/a'))}",
+                f"- weak_delta: {_one_line(novelty.get('weak_delta', 'n/a'))}",
+            ]
+        )
+        for finding in _v3_list_items(novelty.get("findings"))[:6]:
+            lines.append(f"- finding: {_one_line(finding)}")
+    else:
+        lines.extend(["", "Novelty audit was not loaded."])
+
+    if isinstance(ladder, dict) and ladder:
+        lines.extend(
+            [
+                "",
+                "Verification ladder:",
+                f"- passed: {_one_line(ladder.get('passed', 'n/a'))}",
+                f"- blocking_stage: {_one_line(ladder.get('blocking_stage', 'none'))}",
+            ]
+        )
+        stages = ladder.get("stages")
+        if isinstance(stages, list):
+            for stage in stages[:8]:
+                if isinstance(stage, dict):
+                    lines.append(
+                        f"- `{stage.get('name', 'stage')}`: {_one_line(stage.get('status'))}"
+                    )
+    else:
+        lines.extend(["", "Verification ladder was not loaded."])
+
+    if mechanisms:
+        lines.extend(["", "Mechanism ledger:"])
+        for mechanism in mechanisms[:6]:
+            if not isinstance(mechanism, dict):
+                continue
+            components = mechanism.get("components")
+            lines.append(
+                f"- `{mechanism.get('mechanism_id', 'mechanism')}`: "
+                f"components={_v3_list_text(components) or 'n/a'}; "
+                f"status={_one_line(mechanism.get('status'))}"
+            )
+
+    if isinstance(trace, dict) and trace:
+        lines.extend(
+            [
+                "",
+                "V4 literature mining:",
+                f"- status: {_one_line(trace.get('status', 'n/a'))}",
+                f"- card_count: {_one_line(trace.get('card_count', 'n/a'))}",
             ]
         )
     lines.append("")
@@ -1330,6 +1436,34 @@ def _v3_artifact_paths(root: Path, run_dir: Path, selected_node: dict[str, Any] 
         for key, value in selected_node["artifacts"].items():
             paths[f"selected_node_{key}"] = _rel(Path(str(value)), root)
     return paths
+
+
+def _v4_artifact_paths(root: Path, run_dir: Path) -> dict[str, str]:
+    return {
+        "v4_claim_ledger": _rel(root / artifact_constants.V4_CLAIM_LEDGER, root),
+        "v4_evidence_ledger": _rel(root / artifact_constants.V4_EVIDENCE_LEDGER, root),
+        "v4_mechanism_ledger": _rel(root / artifact_constants.V4_MECHANISM_LEDGER, root),
+        "v4_research_harness_summary": _rel(root / artifact_constants.V4_RESEARCH_HARNESS_SUMMARY, root),
+        "v4_mechanism_cards": _rel(root / artifact_constants.V4_MECHANISM_CARDS, root),
+        "v4_mechanism_library": _rel(root / artifact_constants.V4_MECHANISM_LIBRARY, root),
+        "v4_mechanism_gap_matrix": _rel(root / artifact_constants.V4_MECHANISM_GAP_MATRIX, root),
+        "v4_literature_mine_trace": _rel(root / artifact_constants.V4_LITERATURE_MINE_TRACE, root),
+        "v4_mechanism_graph": _rel(root / artifact_constants.V4_MECHANISM_GRAPH, root),
+        "v4_novelty_audit": _rel(run_dir / artifact_constants.V4_NOVELTY_AUDIT, root),
+        "v4_verification_ladder": _rel(run_dir / artifact_constants.V4_VERIFICATION_LADDER, root),
+    }
+
+
+def _v4_research_harness_artifacts(root: Path, run_dir: Path) -> dict[str, Any]:
+    return {
+        "claims": _read_jsonl(root / artifact_constants.V4_CLAIM_LEDGER),
+        "evidence": _read_jsonl(root / artifact_constants.V4_EVIDENCE_LEDGER),
+        "mechanisms": _read_jsonl(root / artifact_constants.V4_MECHANISM_LEDGER),
+        "summary": _load_json(root / artifact_constants.V4_RESEARCH_HARNESS_SUMMARY),
+        "literature_mine_trace": _load_json(root / artifact_constants.V4_LITERATURE_MINE_TRACE),
+        "novelty_audit": _load_json(run_dir / artifact_constants.V4_NOVELTY_AUDIT),
+        "verification_ladder": _load_json(run_dir / artifact_constants.V4_VERIFICATION_LADDER),
+    }
 
 
 def _selected_node_record(journal: Any) -> dict[str, Any] | None:

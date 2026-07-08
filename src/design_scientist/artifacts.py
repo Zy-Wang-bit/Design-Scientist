@@ -64,6 +64,18 @@ V3_MECHANISM_METRICS = "mechanism_metrics.json"
 V3_MECHANISM_VALIDATION_REPORT = "validation_report.json"
 V3_OPERATOR_TO_CODE_TRACE = "operator_to_code_trace.json"
 
+V4_CLAIM_LEDGER = "framework/claim_ledger.jsonl"
+V4_EVIDENCE_LEDGER = "framework/evidence_ledger.jsonl"
+V4_MECHANISM_LEDGER = "framework/mechanism_ledger.jsonl"
+V4_RESEARCH_HARNESS_SUMMARY = "framework/research_harness_summary.json"
+V4_MECHANISM_CARDS = "framework/mechanism_cards_v4.json"
+V4_MECHANISM_LIBRARY = "framework/mechanism_library_v4.json"
+V4_MECHANISM_GAP_MATRIX = "framework/mechanism_gap_matrix_v4.csv"
+V4_LITERATURE_MINE_TRACE = "framework/literature_mine_trace_v4.json"
+V4_MECHANISM_GRAPH = "framework/mechanism_graph_v4.json"
+V4_NOVELTY_AUDIT = "novelty_audit.json"
+V4_VERIFICATION_LADDER = "verification_ladder.json"
+
 V3_FRAMEWORK_ARTIFACTS = (
     *FRAMEWORK_BOOTSTRAP_ARTIFACTS,
     V3_LITERATURE_CORPUS,

@@ -14,6 +14,7 @@ from design_scientist.scientist_search_v3 import SCIENTIST_V3_STAGES
 
 def test_complete_v3_framework_run_validates(tmp_path: Path) -> None:
     project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
 
     write_method_report(project, run_id="v3_unit")
     report = review_framework_run(project, run_id="v3_unit")
@@ -22,13 +23,14 @@ def test_complete_v3_framework_run_validates(tmp_path: Path) -> None:
     assert report["summary"]["errors"] == 0
 
 
-def test_v3_validation_warns_when_claim_gate_artifacts_are_missing(tmp_path: Path) -> None:
+def test_v3_validation_errors_when_paper_readiness_report_is_missing(tmp_path: Path) -> None:
     project = _build_v3_framework_run(tmp_path)
 
     write_method_report(project, run_id="v3_unit")
     report = review_framework_run(project, run_id="v3_unit")
 
-    assert report["valid"]
+    assert not report["valid"]
+    assert "missing_paper_readiness_report" in _error_codes(report)
     assert {
         "missing_claim_cap",
         "missing_benchmark_saturation",
@@ -38,10 +40,7 @@ def test_v3_validation_warns_when_claim_gate_artifacts_are_missing(tmp_path: Pat
 
 def test_v3_validation_errors_on_missing_claim_gate_for_ready_paper(tmp_path: Path) -> None:
     project = _build_v3_framework_run(tmp_path)
-    _write_json(
-        project / "runs" / "v3_unit" / "paper" / "paper_readiness_report.json",
-        {"valid": True, "status": "passed", "summary": {"errors": 0}},
-    )
+    _write_ready_paper_bundle(project)
 
     write_method_report(project, run_id="v3_unit")
     report = review_framework_run(project, run_id="v3_unit")
@@ -57,10 +56,6 @@ def test_v3_validation_errors_on_missing_claim_gate_for_ready_paper(tmp_path: Pa
 def test_v3_validation_accepts_claim_gate_artifacts_and_reports_them(tmp_path: Path) -> None:
     project = _build_v3_framework_run(tmp_path)
     _write_accepted_claim_gate_artifacts(project)
-    _write_json(
-        project / "runs" / "v3_unit" / "paper" / "paper_readiness_report.json",
-        {"valid": True, "status": "passed", "summary": {"errors": 0}},
-    )
 
     write_method_report(project, run_id="v3_unit")
     report = review_framework_run(project, run_id="v3_unit")
@@ -134,6 +129,39 @@ def test_v3_method_report_contains_mechanism_spec_kernel_sections(tmp_path: Path
     assert "Ablation" in text
     assert "Mechanism Library" in text
     assert "literature_kernel" in text
+
+
+def test_v4_validation_requires_research_harness_artifacts(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    _mark_journal_v4(project)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert {
+        "missing_v4_claim_ledger",
+        "missing_v4_research_harness_summary",
+        "missing_v4_novelty_audit",
+        "missing_v4_verification_ladder",
+    } <= _error_codes(report)
+
+
+def test_v4_validation_accepts_harness_artifacts_and_reports_them(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    _mark_journal_v4(project)
+    _write_v4_research_harness_artifacts(project)
+
+    report_path = write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+    text = report_path.read_text(encoding="utf-8")
+
+    assert report["valid"]
+    assert "## Research Harness V4" in text
+    assert "claim_ledger.jsonl" in text
+    assert "novelty_audit.json" in text
 
 
 def test_v3_validation_rejects_reviewer_reject_verdict(tmp_path: Path) -> None:
@@ -327,6 +355,7 @@ def test_v3_validation_rejects_selected_node_empty_semantic_artifact_shells(tmp_
 
 def test_v3_validation_accepts_runner_shaped_mechanism_metrics(tmp_path: Path) -> None:
     project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
     workspace = _selected_workspace(project)
     _write_json(
         workspace / "mechanism_metrics.json",
@@ -349,6 +378,75 @@ def test_v3_validation_accepts_runner_shaped_mechanism_metrics(tmp_path: Path) -
 
     assert report["valid"]
     assert "selected_node_mechanism_metrics_semantic_empty" not in _error_codes(report)
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected_code"),
+    [
+        ({"valid": False}, "paper_readiness_report_invalid"),
+        ({"ready": False}, "paper_readiness_report_invalid"),
+        (
+            {
+                "valid": True,
+                "ready": True,
+                "findings": [{"severity": "error", "code": "missing_section"}],
+            },
+            "paper_readiness_report_has_error_findings",
+        ),
+        (
+            {"valid": True, "ready": True, "summary": {"errors": 1, "warnings": 0}},
+            "paper_readiness_report_has_error_findings",
+        ),
+        ({"valid": None, "ready": None}, "paper_readiness_report_invalid"),
+    ],
+)
+def test_v3_validation_rejects_readiness_report_that_is_not_ready_or_has_errors(
+    tmp_path: Path,
+    updates: dict[str, object],
+    expected_code: str,
+) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    payload = _ready_paper_payload(project)
+    payload.update(updates)
+    _write_json(project / "runs" / "v3_unit" / "paper" / "paper_readiness_report.json", payload)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert expected_code in _error_codes(report)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("outside_paper_dir", "paper_readiness_artifact_outside_paper_dir"),
+        ("empty", "empty_paper_readiness_artifact"),
+    ],
+)
+def test_v3_validation_rejects_bad_paper_readiness_artifact_paths(
+    tmp_path: Path,
+    case: str,
+    expected_code: str,
+) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    _write_accepted_claim_gate_artifacts(project)
+    payload = _ready_paper_payload(project)
+    if case == "outside_paper_dir":
+        bad_path = project / "runs" / "v3_unit" / "method_report.md"
+        bad_path.write_text("outside paper dir\n", encoding="utf-8")
+    else:
+        bad_path = project / "runs" / "v3_unit" / "paper" / "empty_artifact.md"
+        bad_path.write_text("", encoding="utf-8")
+    payload["artifacts"]["short_paper.md"] = str(bad_path)
+    _write_json(project / "runs" / "v3_unit" / "paper" / "paper_readiness_report.json", payload)
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert expected_code in _error_codes(report)
 
 
 def test_v3_validation_rejects_non_contract_stage_progress_json(tmp_path: Path) -> None:
@@ -571,6 +669,42 @@ def test_v3_validation_rejects_selected_architecture_clone(tmp_path: Path) -> No
 
     assert not report["valid"]
     assert "selected_node_architecture_clone" in _error_codes(report)
+
+
+def test_v3_validation_rejects_legacy_cmdgd_as_selected_mechanism(tmp_path: Path) -> None:
+    project = _build_v3_framework_run(tmp_path)
+    run_dir = project / "runs" / "v3_unit"
+    workspace = _selected_workspace(project)
+
+    for filename in ("mechanism_spec.json", "proposal.json", "mechanism_metrics.json"):
+        path = workspace / filename
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["mechanism"] = "cmdgd"
+        data["mechanism_id"] = "cmdgd"
+        _write_json(path, data)
+
+    journal_path = run_dir / "scientist_journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["selected_node"]["mechanism"] = "cmdgd"
+    for node in journal["nodes"]:
+        if node.get("node_id") == journal["selected_node_id"]:
+            node["mechanism"] = "cmdgd"
+    _write_json(journal_path, journal)
+
+    for filename in ("mechanism_benchmark_results.csv", "mechanism_benchmark_summary.csv"):
+        path = run_dir / filename
+        rows = _read_csv_rows(path)
+        for row in rows:
+            if row.get("mechanism") == "literature_kernel":
+                row["mechanism"] = "cmdgd"
+        _write_csv(path, rows)
+    _rewrite_summary_row(project, {"selected_eligible": "true"})
+
+    write_method_report(project, run_id="v3_unit")
+    report = review_framework_run(project, run_id="v3_unit")
+
+    assert not report["valid"]
+    assert "selected_v3_mechanism_is_legacy_cmdgd" in _error_codes(report)
 
 
 def test_v3_validation_rejects_selected_eligible_false(tmp_path: Path) -> None:
@@ -1125,6 +1259,124 @@ def _set_selected_artifact(project: Path, key: str, path: Path) -> None:
     _write_json(journal_path, journal)
 
 
+def _mark_journal_v4(project: Path) -> None:
+    journal_path = project / "runs" / "v3_unit" / "scientist_journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["research_harness_version"] = "v4"
+    journal["research_harness"] = {
+        "claim_ledger_path": str(project / "framework" / "claim_ledger.jsonl"),
+        "evidence_ledger_path": str(project / "framework" / "evidence_ledger.jsonl"),
+        "mechanism_ledger_path": str(project / "framework" / "mechanism_ledger.jsonl"),
+        "summary_path": str(project / "framework" / "research_harness_summary.json"),
+        "novelty_audit_path": str(project / "runs" / "v3_unit" / "novelty_audit.json"),
+        "verification_ladder_path": str(project / "runs" / "v3_unit" / "verification_ladder.json"),
+    }
+    _write_json(journal_path, journal)
+
+
+def _write_v4_research_harness_artifacts(project: Path) -> None:
+    framework_dir = project / "framework"
+    run_dir = project / "runs" / "v3_unit"
+    (framework_dir / "claim_ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "claim_id": "v3_unit:selected_mechanism_replay_supported",
+                "subject": "literature_kernel",
+                "claim_type": "algorithmic",
+                "text": "Selected mechanism passed replay selection gate.",
+                "support_status": "supported",
+                "evidence_ids": ["v3_unit:mechanism_benchmark_summary"],
+                "limitations": ["computational benchmark only"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (framework_dir / "evidence_ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "evidence_id": "v3_unit:mechanism_benchmark_summary",
+                "source_type": "benchmark",
+                "path": str(run_dir / "mechanism_benchmark_summary.csv"),
+                "summary": "Selected mechanism beat random_feasible and fixed_mix in replay.",
+                "strength": "moderate",
+                "metadata": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (framework_dir / "mechanism_ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "mechanism_id": "literature_kernel",
+                "name": "Literature-guided MechanismSpec",
+                "components": ["state_update", "claim_gate"],
+                "literature_refs": ["paper_active_design"],
+                "implementation_path": str(run_dir / "nodes" / "node_literature_kernel" / "mechanism.py"),
+                "status": "selected",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        framework_dir / "research_harness_summary.json",
+        {
+            "valid": True,
+            "errors": [],
+            "claim_count": 1,
+            "evidence_count": 1,
+            "mechanism_count": 1,
+            "unsupported_claim_ids": [],
+            "missing_evidence_by_claim": {},
+            "empty_component_mechanism_ids": [],
+            "selected_unsupported_claim_ids": [],
+        },
+    )
+    _write_json(
+        framework_dir / "mechanism_cards_v4.json",
+        [{"mechanism_id": "literature_kernel", "components": ["state_update"]}],
+    )
+    _write_json(
+        framework_dir / "mechanism_library_v4.json",
+        {"mechanisms": [{"mechanism_id": "literature_kernel", "components": ["state_update"]}]},
+    )
+    _write_csv(
+        framework_dir / "mechanism_gap_matrix_v4.csv",
+        [{"mechanism_id": "literature_kernel", "gap": "needs human review"}],
+    )
+    _write_json(
+        framework_dir / "literature_mine_trace_v4.json",
+        {"status": "ok", "source": "test_fixture", "card_count": 1},
+    )
+    _write_json(
+        framework_dir / "mechanism_graph_v4.json",
+        {"components": [{"component_id": "state_update"}], "gaps": [], "edges": []},
+    )
+    _write_json(
+        run_dir / "novelty_audit.json",
+        {
+            "schema_version": 1,
+            "verdict": "pass",
+            "baseline_clone": False,
+            "weak_delta": False,
+            "findings": [],
+        },
+    )
+    _write_json(
+        run_dir / "verification_ladder.json",
+        {
+            "schema_version": 1,
+            "mechanism_name": "literature_kernel",
+            "passed": True,
+            "blocking_stage": None,
+            "stages": [{"name": "contract", "status": "passed", "passed": True}],
+            "claim_findings": [],
+        },
+    )
+
+
 def _rewrite_summary_row(project: Path, updates: dict[str, str]) -> None:
     summary_path = project / "runs" / "v3_unit" / "mechanism_benchmark_summary.csv"
     rows = _read_csv_rows(summary_path)
@@ -1134,8 +1386,53 @@ def _rewrite_summary_row(project: Path, updates: dict[str, str]) -> None:
     _write_csv(summary_path, rows)
 
 
+PAPER_BUNDLE_FILENAMES = (
+    "short_paper.md",
+    "references.bib",
+    "results_summary.json",
+    "claim_evidence_map.json",
+    "reproducibility.md",
+    "data_availability.md",
+    "code_availability.md",
+)
+
+
+def _ready_paper_payload(project: Path) -> dict[str, object]:
+    run_dir = project / "runs" / "v3_unit"
+    paper_dir = run_dir / "paper"
+    artifacts = {"paper_dir": str(paper_dir)}
+    for filename in PAPER_BUNDLE_FILENAMES:
+        artifacts[filename] = str(paper_dir / filename)
+    artifacts["paper_readiness_report.json"] = str(paper_dir / "paper_readiness_report.json")
+    return {
+        "schema_version": 1,
+        "ready": True,
+        "valid": True,
+        "status": "passed",
+        "run_id": "v3_unit",
+        "project_dir": str(project),
+        "run_dir": str(run_dir),
+        "summary": {"errors": 0, "warnings": 0},
+        "findings": [],
+        "artifacts": artifacts,
+    }
+
+
+def _write_ready_paper_bundle(project: Path) -> None:
+    paper_dir = project / "runs" / "v3_unit" / "paper"
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    for filename in PAPER_BUNDLE_FILENAMES:
+        path = paper_dir / filename
+        if filename.endswith(".json"):
+            _write_json(path, {"fixture": filename})
+        else:
+            path.write_text(f"{filename} fixture\n", encoding="utf-8")
+    _write_json(paper_dir / "paper_readiness_report.json", _ready_paper_payload(project))
+
+
 def _write_accepted_claim_gate_artifacts(project: Path) -> None:
     run_dir = project / "runs" / "v3_unit"
+    _write_ready_paper_bundle(project)
     _write_json(
         run_dir / "claim_cap.json",
         {

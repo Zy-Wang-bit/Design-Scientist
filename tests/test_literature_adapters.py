@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import tomllib
 
 import httpx
 import pytest
@@ -25,6 +26,17 @@ from design_scientist.literature_sources import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "literature"
+
+
+def test_project_dependency_enables_httpx_socks_proxy_support() -> None:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    metadata = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    dependencies = metadata["project"]["dependencies"]
+
+    assert any(
+        dependency.startswith("httpx[") and "socks" in dependency.split("]", maxsplit=1)[0]
+        for dependency in dependencies
+    )
 
 
 def test_offline_default_fixture_dir_is_independent_of_cwd(
@@ -69,6 +81,64 @@ def test_offline_adapters_standardize_and_dedupe(tmp_path: Path, monkeypatch: py
     assert {card["source"] for card in unique} >= {"pubmed", "biorxiv", "arxiv"}
     assert all(card["paper_id"] and card["title"] for card in unique)
     assert sum(card["doi"] == "10.1101/2024.01.01.123456" for card in unique) == 1
+
+
+def test_pubmed_live_adapter_broadens_query_when_initial_search_is_empty(tmp_path: Path) -> None:
+    class FakeResponse:
+        def __init__(self, *, json_payload=None, text_payload: str = "") -> None:
+            self._json_payload = json_payload
+            self.text = text_payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self._json_payload
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def get(self, url: str, *, params: dict | None = None, headers: dict | None = None) -> FakeResponse:
+            self.calls.append({"url": url, "params": params, "headers": headers})
+            if "esearch.fcgi" in url and len(self.calls) == 1:
+                return FakeResponse(json_payload={"esearchresult": {"idlist": [], "count": "0"}})
+            if "esearch.fcgi" in url:
+                return FakeResponse(json_payload={"esearchresult": {"idlist": ["12345"], "count": "1"}})
+            return FakeResponse(
+                text_payload="""<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation><PMID>12345</PMID><Article>
+      <ArticleTitle>Engineering antibody pH switches</ArticleTitle>
+      <Abstract><AbstractText>Histidine scanning improves acidic pH dissociation.</AbstractText></Abstract>
+      <Journal><Title>mAbs</Title></Journal>
+      <AuthorList><Author><LastName>Smith</LastName><ForeName>Ada</ForeName></Author></AuthorList>
+      <Journal><JournalIssue><PubDate><Year>2014</Year></PubDate></JournalIssue></Journal>
+    </Article></MedlineCitation>
+    <PubmedData><ArticleIdList><ArticleId IdType="doi">10.1000/test</ArticleId></ArticleIdList></PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+            )
+
+    client = FakeClient()
+    cards = search_pubmed(
+        LiteratureContext(
+            query="pH-dependent antibody antigen binding design histidine engineering HBsAg antibody variant",
+            relevance="test",
+        ),
+        max_papers=5,
+        cache_dir=tmp_path / "cache",
+        client=client,
+    )
+
+    assert len(cards) == 1
+    assert cards[0]["source"] == "pubmed"
+    assert cards[0]["source_id"] == "12345"
+    assert len([call for call in client.calls if "esearch.fcgi" in call["url"]]) == 2
+    assert " OR " in client.calls[1]["params"]["term"]
+    assert (tmp_path / "cache" / "pubmed_esearch_broad.json").exists()
 
 
 def test_empty_and_malformed_payloads_return_empty(tmp_path: Path) -> None:
@@ -150,6 +220,177 @@ def test_arxiv_live_adapter_uses_fielded_query_headers_and_retries_rate_limit(
     assert " OR " in params["search_query"]
     assert headers["User-Agent"].startswith("Design-Scientist/")
     assert sleep_calls
+
+
+def test_arxiv_live_adapter_uses_conservative_timeout_and_multiple_retries() -> None:
+    assert literature_sources.ARXIV_TIMEOUT >= 30.0
+    assert literature_sources.ARXIV_MAX_RETRIES >= 2
+    assert literature_sources.ARXIV_RATE_LIMIT_SECONDS >= 8.0
+
+
+def test_arxiv_live_adapter_falls_back_to_official_search_when_api_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable_api(*args, **kwargs):
+        raise LiteratureSourceTemporarilyUnavailable("arxiv api timed out")
+
+    html = """
+<html>
+  <body>
+    <ol>
+      <li class="arxiv-result">
+        <p class="list-title is-inline-block">
+          <a href="https://arxiv.org/abs/2603.10811">arXiv:2603.10811</a>
+        </p>
+        <p class="title is-5 mathjax">Protein Counterfactuals via Diffusion-Guided Latent Optimization</p>
+        <p class="authors">Authors: <a>Ada Lovelace</a>, <a>Grace Hopper</a></p>
+        <p class="is-size-7">Submitted 12 March, 2026</p>
+        <span class="abstract-full">We propose counterfactual protein sequence design with diffusion-guided latent search. △ Less</span>
+      </li>
+    </ol>
+  </body>
+</html>
+"""
+
+    monkeypatch.setattr(literature_sources, "_get_arxiv_text", unavailable_api)
+    monkeypatch.setattr(literature_sources, "_get_arxiv_web_search_text", lambda *args, **kwargs: html)
+
+    cards = search_arxiv(
+        LiteratureContext(query="protein design diffusion", relevance="test"),
+        max_papers=5,
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert len(cards) == 1
+    assert cards[0]["source"] == "arxiv"
+    assert cards[0]["source_id"] == "2603.10811"
+    assert cards[0]["external_ids"]["arxiv"] == "2603.10811"
+    assert cards[0]["venue"] == "arXiv"
+    assert cards[0]["year"] == 2026
+    assert cards[0]["retrieval_mode"] == "arxiv_web_search_fallback"
+    assert (tmp_path / "cache" / "arxiv_search.html").exists()
+
+
+def test_arxiv_web_fallback_uses_allowed_search_page_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable_api(*args, **kwargs):
+        raise LiteratureSourceTemporarilyUnavailable("arxiv api timed out")
+
+    html = """
+<html><body><ol>
+  <li class="arxiv-result">
+    <p class="list-title is-inline-block"><a href="https://arxiv.org/abs/2603.10811">arXiv:2603.10811</a></p>
+    <p class="title is-5 mathjax">Protein Counterfactuals via Diffusion-Guided Latent Optimization</p>
+    <p class="authors">Authors: <a>Ada Lovelace</a></p>
+    <p class="is-size-7">Submitted 12 March, 2026</p>
+    <span class="abstract-full">Counterfactual protein sequence design.</span>
+  </li>
+</ol></body></html>
+"""
+    calls: list[dict] = []
+
+    def fake_web_search(*args, **kwargs):
+        calls.append(kwargs)
+        return html
+
+    monkeypatch.setattr(literature_sources, "_get_arxiv_text", unavailable_api)
+    monkeypatch.setattr(literature_sources, "_get_arxiv_web_search_text", fake_web_search)
+
+    search_arxiv(
+        LiteratureContext(query="protein design diffusion", relevance="test"),
+        max_papers=60,
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert calls[0]["params"]["size"] == "100"
+
+
+def test_arxiv_web_fallback_broadens_query_when_project_query_has_no_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable_api(*args, **kwargs):
+        raise LiteratureSourceTemporarilyUnavailable("arxiv api timed out")
+
+    no_results_html = """
+<html><body><p>Sorry, your query for <span>all: ph-dependent antibody hbsag</span> produced no results.</p></body></html>
+"""
+    broad_html = """
+<html><body><ol>
+  <li class="arxiv-result">
+    <p class="list-title is-inline-block"><a href="https://arxiv.org/abs/2603.10811">arXiv:2603.10811</a></p>
+    <p class="title is-5 mathjax">Protein Counterfactuals via Diffusion-Guided Latent Optimization</p>
+    <p class="authors">Authors: <a>Ada Lovelace</a></p>
+    <p class="is-size-7">Submitted 12 March, 2026</p>
+    <span class="abstract-full">Counterfactual protein sequence design.</span>
+  </li>
+</ol></body></html>
+"""
+    queries: list[str] = []
+
+    def fake_web_search(*args, **kwargs):
+        queries.append(kwargs["params"]["query"])
+        return no_results_html if len(queries) == 1 else broad_html
+
+    monkeypatch.setattr(literature_sources, "_get_arxiv_text", unavailable_api)
+    monkeypatch.setattr(literature_sources, "_get_arxiv_web_search_text", fake_web_search)
+
+    cards = search_arxiv(
+        LiteratureContext(query="pH-dependent antibody antigen binding design histidine engineering HBsAg", relevance="test"),
+        max_papers=60,
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert len(cards) == 1
+    assert queries[0] != queries[1]
+    assert queries[1] == "protein design antibody engineering"
+    assert cards[0]["source_id"] == "2603.10811"
+
+
+def test_run_literature_search_reuses_cached_arxiv_web_fallback_html(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    framework = project / "framework"
+    framework.mkdir(parents=True)
+    (framework / "literature_queries.yaml").write_text(
+        "queries:\n"
+        "- query_id: cached\n"
+        "  query: protein design\n"
+        "  sources: [arxiv]\n",
+        encoding="utf-8",
+    )
+    cache_dir = framework / "cache" / "literature_raw" / "cached" / "arxiv"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "arxiv_search.html").write_text(
+        """
+<html><body><ol>
+  <li class="arxiv-result">
+    <p class="list-title is-inline-block"><a href="https://arxiv.org/abs/2603.10811">arXiv:2603.10811</a></p>
+    <p class="title is-5 mathjax">Protein Counterfactuals via Diffusion-Guided Latent Optimization</p>
+    <p class="authors">Authors: <a>Ada Lovelace</a></p>
+    <p class="is-size-7">Submitted 12 March, 2026</p>
+    <span class="abstract-full">Counterfactual protein sequence design.</span>
+  </li>
+</ol></body></html>
+""",
+        encoding="utf-8",
+    )
+
+    def unexpected_network(*args, **kwargs):
+        raise AssertionError("cached arXiv web fallback should avoid network")
+
+    monkeypatch.setattr(literature_sources, "_get_arxiv_text", unexpected_network)
+    monkeypatch.setattr(literature_sources, "_get_arxiv_web_search_text", unexpected_network)
+
+    run_literature_search(project, max_papers=5, sources=["arxiv"])
+    trace = read_json(framework / "literature_search_trace.json")
+    cards = read_json(framework / "paper_cards.json")
+
+    assert trace["events"][0]["cache_status"] == "cache_hit"
+    assert trace["events"][0]["network_fetch"] is False
+    assert trace["events"][0]["raw_count"] == 1
+    assert cards[0]["paper_id"] == "arxiv:2603.10811"
 
 
 def test_semantic_scholar_skips_without_key_and_reads_fixture_with_key_behavior(

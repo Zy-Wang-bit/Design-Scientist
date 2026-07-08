@@ -661,7 +661,11 @@ def generate_candidates(
                 return candidates
 
         ranked_modules = _ranked_edit_modules(fitted)
-        for size in range(3, min(fitted.config.max_edits_per_candidate, 4) + 1):
+        max_recombination_size = min(
+            fitted.config.max_edits_per_candidate,
+            len(ranked_modules[:10]),
+        )
+        for size in range(3, max_recombination_size + 1):
             for modules in combinations(ranked_modules[:10], size):
                 if _has_position_conflict(list(modules)):
                     continue

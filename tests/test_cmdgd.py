@@ -241,6 +241,62 @@ def test_generate_candidates_includes_higher_order_recombinations() -> None:
     )
 
 
+def test_generate_candidates_respects_open_max_edits_per_candidate() -> None:
+    variants = [
+        {
+            "variant_id": "base",
+            "heavy_chain_seq": BASE_HEAVY,
+            "light_chain_seq": BASE_LIGHT,
+            "source_refs": [{"kind": "round", "id": "r0"}],
+        }
+    ]
+    endpoints = [
+        {
+            "variant_id": "base",
+            "ph6_binding": 0.20,
+            "ph7_binding": 0.20,
+            "expression": 0.90,
+        }
+    ]
+    for index, position in enumerate((10, 20, 30, 40, 50, 60), start=1):
+        variant_id = f"h{position}y"
+        variants.append(
+            {
+                "variant_id": variant_id,
+                "heavy_chain_seq": _mutate(BASE_HEAVY, position, "Y"),
+                "light_chain_seq": BASE_LIGHT,
+                "source_refs": [{"kind": "round", "id": f"r{index}"}],
+            }
+        )
+        endpoints.append(
+            {
+                "variant_id": variant_id,
+                "ph6_binding": 0.72 + index * 0.01,
+                "ph7_binding": 0.22,
+                "expression": 0.86,
+            }
+        )
+    state = cmdgd.fit_state(
+        BASE_HEAVY,
+        BASE_LIGHT,
+        variants,
+        endpoints,
+        config=cmdgd.CMDGDConfig(
+            max_edits_per_candidate=6,
+            enable_de_novo_site_proposal=False,
+            enable_vocabulary_expansion=False,
+        ),
+    )
+
+    candidates = cmdgd.generate_candidates(state, max_candidates=200)
+
+    assert any(
+        candidate["operator"] == "beam_recombine_modules"
+        and len(candidate["edits"]) > 4
+        for candidate in candidates
+    )
+
+
 def test_candidate_edit_vocabulary_expands_design_space_beyond_observed_edits() -> None:
     state = cmdgd.fit_state(
         BASE_HEAVY,

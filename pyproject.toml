@@ -9,9 +9,12 @@ description = "Local data-grounded design scientist framework for iterative vari
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "abnumber>=0.4.4",
+  "anarci>=2026.2.13.2",
   "beautifulsoup4>=4.14.3",
-  "httpx>=0.27",
+  "httpx[socks]>=0.27",
   "pandas>=2.0",
+  "pillow>=12.0",
   "pypdf>=6.11.0",
   "PyYAML>=6.0",
 ]

@@ -281,6 +281,30 @@ def test_project_masking_registry_runs_cmdgd_observed_pool_aliases(tmp_path: Pat
     assert {row["mechanism"] for row in summary_rows} == {"cmdgd", "cmdgd_generative"}
 
 
+def test_project_masking_default_uses_ph_switch_graph_not_cmdgd(tmp_path: Path) -> None:
+    project = write_project_fixture(tmp_path / "project")
+
+    result = run_project_masking_benchmark(
+        project,
+        run_id="ph_switch_default_masking",
+        budget=1,
+        folds="kfold_2",
+    )
+
+    rows = _rows(result["benchmark_results_path"])
+    by_mechanism = {row["mechanism"] for row in rows}
+    assert "ph_switch_graph" in by_mechanism
+    assert "cmdgd" not in by_mechanism
+    assert {
+        row["status"] for row in rows if row["mechanism"] == "ph_switch_graph"
+    } == {"completed"}
+    assert all(
+        set(json.loads(row["selected_ids"])) <= set(json.loads(row["candidate_ids"]))
+        for row in rows
+        if row["mechanism"] == "ph_switch_graph"
+    )
+
+
 def test_cmdgd_project_selector_does_not_receive_heldout_endpoint_values(
     tmp_path: Path,
     monkeypatch,

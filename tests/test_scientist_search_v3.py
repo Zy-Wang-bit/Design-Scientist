@@ -490,7 +490,10 @@ def test_cli_run_scientist_uses_v3_and_rejects_legacy_flag(
     monkeypatch.setattr("design_scientist.method_report.write_method_report", fake_report)
     monkeypatch.setattr("design_scientist.scientist_search_v3.run_scientist_v3", fake_v3)
 
-    assert main(["run-scientist", str(tmp_path / "default"), "--nodes", "4"]) == 0
+    assert (
+        main(["run-scientist", str(tmp_path / "default"), "--nodes", "4", "--skip-paper"])
+        == 0
+    )
     with pytest.raises(SystemExit) as exc:
         main(["run-scientist", str(tmp_path / "legacy"), "--legacy-v2", "--nodes", "5"])
 

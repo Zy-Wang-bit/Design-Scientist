@@ -10,6 +10,9 @@ from design_scientist import generative_benchmark
 from design_scientist.generative_benchmark import run_generative_benchmark
 
 
+PCIG_HIGH_PRIOR_DISTRACTOR_TOKENS = {"H30H", "H76H", "H77H"}
+
+
 FORBIDDEN_SELECTOR_KEYS = {
     "true_utility",
     "true_feasible",
@@ -54,7 +57,7 @@ def test_generative_benchmark_writes_required_artifacts(tmp_path: Path) -> None:
     result = run_generative_benchmark(
         tmp_path,
         mechanisms=(
-            "cmdgd",
+            "ph_switch_graph",
             "random_edit_generator",
             "observed_recombination_baseline",
             "single_edit_scan",
@@ -69,6 +72,7 @@ def test_generative_benchmark_writes_required_artifacts(tmp_path: Path) -> None:
     assert Path(result["benchmark_results_path"]) == run_dir / "generative_benchmark_results.csv"
     assert Path(result["summary_results_path"]) == run_dir / "generative_benchmark_summary.csv"
     assert Path(result["ablation_results_path"]) == run_dir / "generative_ablation_results.csv"
+    assert Path(result["weight_sensitivity_path"]) == run_dir / "generative_weight_sensitivity.csv"
     assert Path(result["design_examples_path"]) == run_dir / "generative_design_examples.csv"
     assert Path(result["statistical_summary_path"]) == run_dir / "generative_statistical_summary.csv"
     assert Path(result["pairwise_comparisons_path"]) == run_dir / "generative_pairwise_comparisons.csv"
@@ -78,6 +82,7 @@ def test_generative_benchmark_writes_required_artifacts(tmp_path: Path) -> None:
         "benchmark_results",
         "benchmark_summary",
         "ablation_results",
+        "weight_sensitivity",
         "design_examples",
         "statistical_summary",
         "pairwise_comparisons",
@@ -88,7 +93,7 @@ def test_generative_benchmark_writes_required_artifacts(tmp_path: Path) -> None:
 
     rows = _rows(result["benchmark_results_path"])
     assert {row["mechanism"] for row in rows} == {
-        "cmdgd",
+        "ph_switch_graph",
         "random_edit_generator",
         "observed_recombination_baseline",
         "single_edit_scan",
@@ -115,8 +120,109 @@ def test_generative_benchmark_writes_required_artifacts(tmp_path: Path) -> None:
     assert config["benchmark"] == "generative_design_algorithm_benchmark"
     assert config["worlds"] == ["ph_contrast"]
     assert config["seeds"] == [0]
+    assert len(config["base_sequences"]["ph_contrast"]["heavy"]) >= 100
+    assert len(config["base_sequences"]["ph_contrast"]["light"]) >= 100
+    assert config["world_metadata"]["ph_contrast"]["full_length_antibody_background"] is True
+    assert config["world_metadata"]["ph_contrast"]["base_heavy_length"] >= 100
+    assert config["world_metadata"]["ph_contrast"]["base_light_length"] >= 100
     assert config["leakage_controls"]["selector_inputs_exclude_oracle_truth"] is True
     assert config["selection_gate_report"]["selection_basis"] == "generative_candidate_space_expansion"
+    assert config["weight_sensitivity"]["artifact"] == "generative_weight_sensitivity.csv"
+    sensitivity_rows = _rows(result["weight_sensitivity_path"])
+    assert {row["ablation_type"] for row in sensitivity_rows} == {
+        "ph_switch_graph_weight_sensitivity"
+    }
+    assert {
+        "weight_field_half",
+        "weight_field_double",
+        "weight_uniform_positive",
+    } <= {row["ablation"] for row in sensitivity_rows}
+
+
+def test_ph_switch_graph_is_default_generative_mechanism_and_not_cmdgd(tmp_path: Path) -> None:
+    result = run_generative_benchmark(
+        tmp_path,
+        seeds=(0,),
+        worlds=("de_novo_site_generalization",),
+        generation_budget=48,
+    )
+
+    config = json.loads(Path(result["config_path"]).read_text(encoding="utf-8"))
+    assert config["mechanisms"][0] == "ph_switch_graph"
+    assert config["selected_mechanism"] == "ph_switch_graph"
+    assert config["selected_passes_gate"] is True
+    assert "cmdgd" not in config["mechanisms"]
+
+    rows = _rows(result["benchmark_results_path"])
+    ph_rows = [row for row in rows if row["mechanism"] == "ph_switch_graph"]
+    assert ph_rows
+    assert all(int(row["generated_new_site_count"]) > 0 for row in ph_rows)
+
+
+def test_legacy_cmdgd_is_not_selectable_when_explicitly_included(tmp_path: Path) -> None:
+    result = run_generative_benchmark(
+        tmp_path,
+        mechanisms=("cmdgd", "ph_switch_graph", "random_edit_generator"),
+        seeds=(0,),
+        worlds=("de_novo_site_generalization",),
+        generation_budget=48,
+    )
+
+    gate = json.loads(Path(result["selection_gate_report_path"]).read_text(encoding="utf-8"))
+    assert gate["selected_mechanism"] == "ph_switch_graph"
+    ranking = {row["mechanism"]: row for row in gate["comparative_utility_rankings"]}
+    assert ranking["cmdgd"]["eligible_for_generative_selection"] is False
+
+
+def test_same_pool_baselines_reuse_ph_switch_graph_pool_but_are_not_selectable(
+    tmp_path: Path,
+) -> None:
+    result = run_generative_benchmark(
+        tmp_path,
+        mechanisms=(
+            "ph_switch_graph",
+            "same_pool_random_selector",
+            "same_pool_reference_scorer",
+        ),
+        seeds=(0,),
+        worlds=("de_novo_site_generalization",),
+        generation_budget=48,
+    )
+
+    rows = _rows(result["benchmark_results_path"])
+    by_mechanism = {row["mechanism"]: row for row in rows}
+    assert int(by_mechanism["same_pool_random_selector"]["generated_new_site_count"]) > 0
+    assert by_mechanism["same_pool_random_selector"]["candidate_space_type"] == "generated_same_pool_baseline"
+    assert by_mechanism["same_pool_reference_scorer"]["candidate_space_type"] == "generated_same_pool_baseline"
+
+    gate = json.loads(Path(result["selection_gate_report_path"]).read_text(encoding="utf-8"))
+    ranking = {row["mechanism"]: row for row in gate["comparative_utility_rankings"]}
+    assert gate["selected_mechanism"] == "ph_switch_graph"
+    assert ranking["same_pool_random_selector"]["eligible_for_generative_selection"] is False
+    assert ranking["same_pool_reference_scorer"]["eligible_for_generative_selection"] is False
+
+
+def test_generative_benchmark_includes_simple_new_site_generator_baselines(
+    tmp_path: Path,
+) -> None:
+    result = run_generative_benchmark(
+        tmp_path,
+        mechanisms=("ph_switch_graph", "histidine_scan_baseline", "random_new_site_scan"),
+        seeds=(0,),
+        worlds=("anti_prior_negative_control",),
+        generation_budget=32,
+    )
+
+    rows = {row["mechanism"]: row for row in _rows(result["benchmark_results_path"])}
+    assert set(rows) == {"ph_switch_graph", "histidine_scan_baseline", "random_new_site_scan"}
+    assert rows["histidine_scan_baseline"]["generated_new_site_count"] != ""
+    assert int(rows["random_new_site_scan"]["generated_new_site_count"]) > 0
+    assert rows["random_new_site_scan"]["candidate_space_type"] == "generated"
+
+    gate = json.loads(Path(result["selection_gate_report_path"]).read_text(encoding="utf-8"))
+    ranking = {row["mechanism"]: row for row in gate["comparative_utility_rankings"]}
+    assert ranking["histidine_scan_baseline"]["eligible_for_generative_selection"] is False
+    assert ranking["random_new_site_scan"]["eligible_for_generative_selection"] is False
 
 
 def test_generative_benchmark_reports_seed_world_statistical_uncertainty(
@@ -283,7 +389,7 @@ def test_summary_selects_generative_mechanism_not_observed_reuse_baseline(
     result = run_generative_benchmark(
         tmp_path,
         mechanisms=(
-            "cmdgd",
+            "ph_switch_graph",
             "observed_recombination_baseline",
             "mccbd_pool_selector",
         ),
@@ -292,6 +398,7 @@ def test_summary_selects_generative_mechanism_not_observed_reuse_baseline(
     )
 
     assert result["selected_mechanism"]
+    assert result["selected_mechanism"] == "ph_switch_graph"
     assert result["selected_mechanism"] != "observed_recombination_baseline"
 
     summary_rows = _rows(result["summary_results_path"])
@@ -319,7 +426,7 @@ def test_vocabulary_extension_world_rewards_true_design_space_expansion(
     )
 
 
-def test_de_novo_site_world_requires_cmdgd_to_generate_unseen_mutation_site(
+def test_de_novo_site_world_requires_ph_switch_graph_to_generate_unseen_mutation_site(
     tmp_path: Path,
 ) -> None:
     world = generative_benchmark._world_by_id("de_novo_site_generalization")
@@ -349,7 +456,7 @@ def test_de_novo_site_world_requires_cmdgd_to_generate_unseen_mutation_site(
     result = run_generative_benchmark(
         tmp_path,
         mechanisms=(
-            "cmdgd",
+            "ph_switch_graph",
             "observed_recombination_baseline",
             "random_edit_generator",
             "single_edit_scan",
@@ -365,17 +472,17 @@ def test_de_novo_site_world_requires_cmdgd_to_generate_unseen_mutation_site(
         row["mechanism"]: row
         for row in _rows(result["benchmark_results_path"])
     }
-    assert set(rows["cmdgd"]) >= {
+    assert set(rows["ph_switch_graph"]) >= {
         "generated_new_site_count",
         "selected_new_site_count",
         "new_site_rate",
         "new_site_generation_capable",
     }
 
-    assert rows["cmdgd"]["new_site_generation_capable"] == "true"
-    assert int(rows["cmdgd"]["generated_new_site_count"]) > 0
-    assert int(rows["cmdgd"]["selected_new_site_count"]) >= 0
-    assert float(rows["cmdgd"]["new_site_rate"]) > 0.0
+    assert rows["ph_switch_graph"]["new_site_generation_capable"] == "true"
+    assert int(rows["ph_switch_graph"]["generated_new_site_count"]) > 0
+    assert int(rows["ph_switch_graph"]["selected_new_site_count"]) >= 0
+    assert float(rows["ph_switch_graph"]["new_site_rate"]) > 0.0
 
     for mechanism in (
         "observed_recombination_baseline",
@@ -388,6 +495,179 @@ def test_de_novo_site_world_requires_cmdgd_to_generate_unseen_mutation_site(
         assert int(rows[mechanism]["generated_new_site_count"]) == 0
         assert int(rows[mechanism]["selected_new_site_count"]) == 0
         assert float(rows[mechanism]["new_site_rate"]) == 0.0
+
+
+def test_site_shift_world_checks_counterfactual_site_search_beyond_h10q(
+    tmp_path: Path,
+) -> None:
+    world = generative_benchmark._world_by_id("site_shift_generalization")
+    records = {
+        str(record["variant_id"]): record
+        for record in generative_benchmark.generate_synthetic_sequence_world(
+            "site_shift_generalization",
+            seed=0,
+        )
+    }
+    observed = generative_benchmark._initial_observed_records(world, records, seed=0)
+    context = generative_benchmark._design_context(
+        world,
+        [generative_benchmark._observed_record(record, seed=0) for record in observed],
+        seed=0,
+        generation_budget=64,
+        ablation="full",
+    )
+
+    visible_sites = {
+        (str(edit["chain"]), int(edit["position"])) for edit in context["edit_vocabulary"]
+    }
+    assert ("H", 14) not in visible_sites
+    assert ("H", 18) not in visible_sites
+
+    result = run_generative_benchmark(
+        tmp_path,
+        mechanisms=("ph_switch_graph", "same_pool_reference_scorer", "random_feasible"),
+        seeds=(0,),
+        worlds=("site_shift_generalization",),
+        generation_budget=64,
+    )
+
+    rows = _rows(result["benchmark_results_path"])
+    ph_row = next(row for row in rows if row["mechanism"] == "ph_switch_graph")
+    assert ph_row["new_site_generation_capable"] == "true"
+    assert int(ph_row["generated_new_site_count"]) > 0
+    assert any(
+        token in " ".join(json.loads(ph_row["generated_ids"]))
+        for token in ("H76H", "H77H")
+    )
+
+
+def test_anti_prior_negative_control_world_is_not_a_fixed_heavy_q_oracle(
+    tmp_path: Path,
+) -> None:
+    assert "anti_prior_negative_control" in generative_benchmark.DEFAULT_WORLDS
+    world = generative_benchmark._world_by_id("anti_prior_negative_control")
+    assert world.control_type == "negative_control"
+    assert "anti_prior" in world.stress_tags
+    assert "no_high_prior_site_reward" in world.stress_tags
+    assert set(world.new_site_target_tokens).isdisjoint(PCIG_HIGH_PRIOR_DISTRACTOR_TOKENS)
+
+    records = {
+        str(record["variant_id"]): record
+        for record in generative_benchmark.generate_synthetic_sequence_world(
+            "anti_prior_negative_control",
+            seed=0,
+        )
+    }
+    observed_internal = generative_benchmark._initial_observed_records(
+        world,
+        records,
+        seed=0,
+    )
+    observed = [
+        generative_benchmark._observed_record(record, seed=0)
+        for record in observed_internal
+    ]
+    context = generative_benchmark._design_context(
+        world,
+        observed,
+        seed=0,
+        generation_budget=64,
+        ablation="full",
+    )
+    assert "new_site_target_tokens" not in context
+
+    rng = generative_benchmark.random.Random(0)
+    state = generative_benchmark._fit_state_for_mechanism(
+        "ph_switch_graph",
+        observed,
+        context,
+        rng,
+    )
+    raw_generated, generation_counted = generative_benchmark._generate_for_mechanism(
+        "ph_switch_graph",
+        world,
+        observed,
+        context,
+        state,
+        rng,
+        generation_budget=64,
+        ablation="full",
+    )
+    assert generation_counted is True
+    generated, truth_by_id = generative_benchmark._normalize_generated_candidates(
+        raw_generated,
+        world=world,
+        seed=0,
+        mechanism="ph_switch_graph",
+        observed_sequences={
+            generative_benchmark._sequence_key(record) for record in observed_internal
+        },
+    )
+    annotated = [candidate for candidate in generated if candidate.get("operator")]
+    assert annotated
+    assert all("design_context" in candidate for candidate in annotated)
+    assert any(candidate.get("uses_de_novo_site_proposal") is True for candidate in annotated)
+    fixed_q_truth = [
+        truth_by_id[str(candidate["candidate_id"])]
+        for candidate in generated
+        if set(candidate["edit_tokens"]) & PCIG_HIGH_PRIOR_DISTRACTOR_TOKENS
+    ]
+    assert fixed_q_truth
+    base_utility = generative_benchmark._truth_record(world, (), seed=0)["true_utility"]
+    target_utility = generative_benchmark._truth_record(
+        world,
+        world.new_site_target_tokens,
+        seed=0,
+    )["true_utility"]
+    max_fixed_q_utility = max(
+        float(record["true_utility"]) for record in fixed_q_truth
+    )
+    assert max_fixed_q_utility <= float(base_utility)
+    assert float(target_utility) > max_fixed_q_utility + 0.08
+
+    result = run_generative_benchmark(
+        tmp_path,
+        mechanisms=("ph_switch_graph", "random_feasible"),
+        seeds=(0,),
+        worlds=("anti_prior_negative_control",),
+        generation_budget=64,
+    )
+    config = json.loads(Path(result["config_path"]).read_text(encoding="utf-8"))
+    world_metadata = config["world_metadata"]["anti_prior_negative_control"]
+    assert world_metadata["control_type"] == "negative_control"
+    assert "anti_prior" in world_metadata["stress_tags"]
+    assert world_metadata["anti_prior_negative_control"] is True
+
+    summary_rows = _rows(result["summary_results_path"])
+    ph_summary = next(
+        row
+        for row in summary_rows
+        if row["mechanism"] == "ph_switch_graph"
+        and row["world_id"] == "anti_prior_negative_control"
+    )
+    assert ph_summary["world_control_type"] == "negative_control"
+    assert "anti_prior" in ph_summary["world_stress_tags"]
+
+
+def test_generative_benchmark_writes_v3_mechanism_alias_artifacts(tmp_path: Path) -> None:
+    result = run_generative_benchmark(
+        tmp_path,
+        mechanisms=("ph_switch_graph", "random_feasible", "fixed_mix"),
+        seeds=(0,),
+        worlds=("site_shift_generalization",),
+        generation_budget=48,
+    )
+
+    summary_rows = _rows(result["mechanism_benchmark_summary_path"])
+    ph_row = next(
+        row
+        for row in summary_rows
+        if row["mechanism"] == "ph_switch_graph" and row["world_id"] == "overall"
+    )
+    assert ph_row["mean_best_feasible_utility"] == ph_row["mean_best_selected_utility"]
+    assert ph_row["majority_win_vs_random_feasible"] == "true"
+    assert ph_row["majority_win_vs_fixed_mix"] == "true"
+    assert float(ph_row["key_ablation_delta"]) >= 0.0
 
 
 def test_cmdgd_ablation_results_include_de_novo_site_and_vocabulary_controls(
@@ -489,7 +769,7 @@ def test_cmdgd_component_ablations_use_cmdgd_scorer(
             assert row["fixed_pool_only"] == "true"
         else:
             assert row["ablation_type"] == "cmdgd_component"
-            assert row["cmdgd_adapter"] == "design_scientist.algorithms.cmdgd.CMDGDLifecycle"
+            assert row["mechanism_adapter"] == "design_scientist.algorithms.cmdgd.CMDGDLifecycle"
 
 
 def test_fixed_pool_reports_selected_utility_without_generated_utility(
@@ -530,7 +810,7 @@ def test_gate_report_separates_generative_selection_from_utility_ranking(
 ) -> None:
     result = run_generative_benchmark(
         tmp_path,
-        mechanisms=("cmdgd", "mccbd_pool_selector"),
+        mechanisms=("ph_switch_graph", "mccbd_pool_selector"),
         seeds=(0, 1, 2),
         worlds=("ph_contrast",),
     )
@@ -538,7 +818,7 @@ def test_gate_report_separates_generative_selection_from_utility_ranking(
     gate_report = json.loads(Path(result["selection_gate_report_path"]).read_text(encoding="utf-8"))
 
     assert gate_report["selection_basis"] == "generative_candidate_space_expansion"
-    assert gate_report["selected_mechanism"] == "cmdgd"
+    assert gate_report["selected_mechanism"] == "ph_switch_graph"
     assert gate_report["utility_rank_basis"] == "mean_best_selected_utility"
     assert gate_report["comparative_utility_rankings"]
 
@@ -547,13 +827,13 @@ def test_gate_report_separates_generative_selection_from_utility_ranking(
         for row in _rows(result["summary_results_path"])
         if row["world_id"] == "overall"
     }
-    assert summary["cmdgd"]["selected_mechanism"] == "true"
-    assert summary["cmdgd"]["comparative_utility_rank"]
+    assert summary["ph_switch_graph"]["selected_mechanism"] == "true"
+    assert summary["ph_switch_graph"]["comparative_utility_rank"]
 
     fixed_pool_beats_cmdgd = generative_benchmark._selection_gate_report(
         [
             {
-                "mechanism": "cmdgd",
+                "mechanism": "ph_switch_graph",
                 "world_id": "overall",
                 "mean_best_generated_utility": 0.70,
                 "mean_best_selected_utility": 0.70,
@@ -583,7 +863,7 @@ def test_gate_report_separates_generative_selection_from_utility_ranking(
         ]
     )
 
-    assert fixed_pool_beats_cmdgd["selected_mechanism"] == "cmdgd"
+    assert fixed_pool_beats_cmdgd["selected_mechanism"] == "ph_switch_graph"
     assert fixed_pool_beats_cmdgd["utility_winner"] == "mccbd_pool_selector"
     assert fixed_pool_beats_cmdgd["selected_utility_rank"] > 1
 

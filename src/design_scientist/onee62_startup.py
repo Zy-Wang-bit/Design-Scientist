@@ -104,6 +104,9 @@ def start_1e62_project(startup_dir: str | Path, project_dir: str | Path) -> dict
     audit = audit_1e62_startup_package(source_root)
     standardized = write_1e62_standardized_tables(source_root, target_root, audit)
     write_1e62_project_artifacts(source_root, target_root, audit)
+    from design_scientist.startup_standardization import standardize_startup_data
+
+    generic_standardization = standardize_startup_data(target_root)
     state = write_1e62_state_artifacts(target_root, audit)
 
     append_history_event(
@@ -128,6 +131,7 @@ def start_1e62_project(startup_dir: str | Path, project_dir: str | Path) -> dict
         "project_dir": target_root,
         "startup_dir": source_root,
         "standardized": standardized,
+        "generic_standardization": generic_standardization,
         "state": state,
         "validation_report": validation_report,
     }
@@ -391,7 +395,20 @@ def run_1e62_literature_stage(
             max_papers=max_papers,
             offline_fixtures=offline_fixtures,
         )
-        stage["steps"].append({"name": "literature_retrieval", "status": "completed"})
+        source_degradations = _literature_source_degradations(root)
+        if source_degradations:
+            stage["source_degradations"] = source_degradations
+            if not allow_degraded:
+                degraded_sources = ", ".join(
+                    f"{item['source']}:{item['reason']}" for item in source_degradations
+                )
+                raise RuntimeError(f"degraded literature source: {degraded_sources}")
+        stage["steps"].append(
+            {
+                "name": "literature_retrieval",
+                "status": "degraded" if source_degradations else "completed",
+            }
+        )
         stage["artifacts"]["paper_cards"] = str(paper_cards)
     except Exception as exc:
         _record_stage_exception(stage, "literature_retrieval", exc)
@@ -444,6 +461,29 @@ def run_1e62_literature_stage(
         },
     )
     return stage
+
+
+def _literature_source_degradations(root: Path) -> list[dict[str, str]]:
+    trace_path = root / "framework" / "literature_search_trace.json"
+    if not trace_path.exists():
+        return []
+    trace = read_json(trace_path)
+    events = trace.get("events", []) if isinstance(trace, dict) else []
+    degradations: list[dict[str, str]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("status") not in {"degraded", "error", "cache_error"}:
+            continue
+        degradations.append(
+            {
+                "query_id": str(event.get("query_id", "")),
+                "source": str(event.get("source", "")),
+                "status": str(event.get("status", "")),
+                "reason": str(event.get("reason", "")),
+            }
+        )
+    return degradations
 
 
 def audit_1e62_startup_package(startup_dir: str | Path) -> dict[str, Any]:
@@ -621,6 +661,49 @@ def write_1e62_project_artifacts(
             "project_family": PROJECT_FAMILY,
             "raw_access_policy": "schema_audit_only",
             "startup_source_root": str(source_root),
+            "local_root": str(source_root),
+            "allowed_sources": {
+                "base_sequences": {
+                    "evidence_tier": "reference_sequence",
+                    "allowed_as_experimental_evidence": False,
+                    "files": [
+                        "raw/base_sequences/heavy.fasta",
+                        "raw/base_sequences/light.fasta",
+                        "raw/base_sequences/original.fasta",
+                        "raw/base_sequences/antigen_genotypes.fasta",
+                    ],
+                },
+                "wet_lab_binding": {
+                    "evidence_tier": "primary_matched",
+                    "allowed_as_experimental_evidence": True,
+                    "files": [
+                        "raw/wet_lab/elisa_dilution_measurements.csv",
+                        "raw/wet_lab/elisa_summary.csv",
+                        "raw/wet_lab/ae_kd_ratio.csv",
+                    ],
+                },
+                "wet_lab_expression_qc": {
+                    "evidence_tier": "qc_observation",
+                    "allowed_as_experimental_evidence": True,
+                    "files": ["raw/wet_lab/expression.csv"],
+                },
+                "sequence_provenance": {
+                    "evidence_tier": "sequence_provenance",
+                    "allowed_as_experimental_evidence": False,
+                    "files": ["raw/wet_lab/variant_sequences.csv"],
+                },
+                "optional_structures": {
+                    "evidence_tier": "reference_structure",
+                    "allowed_as_experimental_evidence": False,
+                    "files": [
+                        "raw/base_structures_optional/ab_wt.pdb",
+                        "raw/base_structures_optional/AF3-1E62-AeS-1.pdb",
+                        "raw/base_structures_optional/AF3-1E62-BaS-1.pdb",
+                        "raw/base_structures_optional/AF3-1E62-CeS-1.pdb",
+                        "raw/base_structures_optional/AF3-1E62-D1S-1.pdb",
+                    ],
+                },
+            },
             "allowed_startup_sources": [
                 str(path) for path in _allowed_source_paths(audit["startup_contract"])
             ],
@@ -1431,16 +1514,22 @@ def _write_binding_primary(path: Path, records: list[dict[str, str]]) -> None:
     for idx, record in enumerate(records, start=2):
         for genotype in ("Ae", "B", "D1"):
             source_columns = f"{genotype}_pH6.0|{genotype}_pH7.4|{genotype}_ratio"
+            ratio_raw = record[f"{genotype}_ratio"]
+            ratio_is_missing = _is_missing_ratio_sentinel(ratio_raw)
             rows.append(
                 {
                     "variant_id": record["variant"],
                     "antigen_genotype": genotype,
                     "pH6_signal": record[f"{genotype}_pH6.0"],
                     "pH74_signal": record[f"{genotype}_pH7.4"],
-                    "pH_sensitive_ratio": record[f"{genotype}_ratio"],
-                    "summary_ratio_raw": record[f"{genotype}_ratio"],
+                    "pH_sensitive_ratio": "" if ratio_is_missing else ratio_raw,
+                    "summary_ratio_raw": ratio_raw,
                     "endpoint_source": "elisa_summary",
-                    "endpoint_semantics_status": "pending_human_confirmation",
+                    "endpoint_semantics_status": (
+                        "missing_ratio_sentinel"
+                        if ratio_is_missing
+                        else "pending_human_confirmation"
+                    ),
                     "heavy_chain_seq": record["H_chain"],
                     "light_chain_seq": record["L_chain"],
                     "mutations": record["mutations"],
@@ -1451,6 +1540,10 @@ def _write_binding_primary(path: Path, records: list[dict[str, str]]) -> None:
                 }
             )
     _write_csv(path, rows, fieldnames)
+
+
+def _is_missing_ratio_sentinel(value: Any) -> bool:
+    return str(value).strip() == "-1.0"
 
 
 def _write_ae_kd_ratio(path: Path, records: list[dict[str, str]]) -> None:
@@ -1609,6 +1702,12 @@ def _source_metadata(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _validation_summary(source_root: Path, audit: dict[str, Any]) -> dict[str, Any]:
+    ratio_missing_sentinel_count = sum(
+        1
+        for record in audit["csv_tables"]["elisa_summary"]["records"]
+        for genotype in ("Ae", "B", "D1")
+        if _is_missing_ratio_sentinel(record.get(f"{genotype}_ratio"))
+    )
     return {
         "project_id": PROJECT_ID,
         "project_family": PROJECT_FAMILY,
@@ -1623,9 +1722,11 @@ def _validation_summary(source_root: Path, audit: dict[str, Any]) -> dict[str, A
             "replicate_provenance_source": "raw/wet_lab/elisa_dilution_measurements.csv",
             "status": "pending_human_confirmation",
         },
+        "missing_ratio_sentinel_count": ratio_missing_sentinel_count,
         "warnings": [
             "endpoint semantics pending confirmation",
             "unbounded design-space exploration registered only; no untested sequence is evidence",
+            "-1.0 ELISA summary ratio sentinels were treated as missing pH-sensitive ratios",
         ],
     }
 

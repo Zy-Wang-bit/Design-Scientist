@@ -18,7 +18,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from design_scientist.io import ensure_dir, read_yaml, write_json
+from design_scientist.io import ensure_dir, read_yaml, write_json, write_yaml
 
 
 PROJECT_MASKING_RESULT = "project_masking_benchmark_results.csv"
@@ -27,10 +27,12 @@ PROJECT_MASKING_ABLATION = "project_masking_ablation_results.csv"
 PROJECT_MASKING_CONFIG = "project_masking_config.json"
 CMDGD_PROJECT_CANDIDATES = "cmdgd_project_generated_candidates.csv"
 CMDGD_PROJECT_SUMMARY = "cmdgd_project_design_summary.json"
+PH_SWITCH_GRAPH_PROJECT_CANDIDATES = "ph_switch_graph_project_generated_candidates.csv"
+PH_SWITCH_GRAPH_PROJECT_SUMMARY = "ph_switch_graph_project_design_summary.json"
 DEFAULT_MECHANISMS = (
+    "ph_switch_graph",
     "mccbd",
     "evidence_calibrated_ucb",
-    "cmdgd",
     "random_feasible",
     "fixed_mix",
     "greedy_observed",
@@ -386,6 +388,142 @@ def run_project_cmdgd_design(
     }
 
 
+def run_project_ph_switch_graph_design(
+    project_dir: str | Path,
+    run_id: str = "ph_switch_graph_project_design",
+    *,
+    budget: int = 5,
+    generation_budget: int = 160,
+    candidate_edit_vocabulary: Sequence[Mapping[str, Any]] | None = None,
+    config: Mapping[str, Any] | None = None,
+    seed: int = 1729,
+) -> dict[str, Any]:
+    """Run prospective pH-switch graph candidate generation from visible project data."""
+
+    root = Path(project_dir).expanduser().resolve()
+    try:
+        dataset = load_project_replay_dataset(root)
+    except FileNotFoundError as exc:
+        return {"status": "unavailable", "error": str(exc)}
+    if budget <= 0:
+        raise ValueError("budget must be positive")
+    if generation_budget <= 0:
+        raise ValueError("generation_budget must be positive")
+
+    from design_scientist.algorithms import pcig
+
+    observed_records = [
+        _cmdgd_training_record(_policy_record(record, reveal=True))
+        for record in dataset.variants
+        if record.heavy_chain_seq and record.light_chain_seq
+    ]
+    if not observed_records:
+        return {"status": "unavailable", "error": "No sequence-linked project variants were found."}
+
+    base_heavy, base_light, base_source = _cmdgd_project_base_sequences(root, observed_records)
+    endpoint_records = [_cmdgd_endpoint_record(record) for record in observed_records]
+    vocabulary = (
+        [dict(item) for item in candidate_edit_vocabulary]
+        if candidate_edit_vocabulary is not None
+        else _cmdgd_allowed_candidate_edit_vocabulary(root)
+    )
+    pcig_config = {"max_generated_candidates": int(generation_budget)}
+    if config:
+        pcig_config.update(dict(config))
+    observed_signatures = _cmdgd_observed_mutation_signatures(
+        observed_records,
+        base_heavy=base_heavy,
+        base_light=base_light,
+    )
+    observed_sites = [
+        {"chain": key[0], "position": int(key[1:])}
+        for key in sorted(observed_signatures["positions"])
+        if len(key) > 1 and key[0] in {"H", "L"} and key[1:].isdigit()
+    ]
+
+    state = pcig.fit_state(
+        base_heavy,
+        base_light,
+        observed_records,
+        endpoint_records,
+        candidate_edit_vocabulary=vocabulary,
+        observed_mutation_sites=observed_sites,
+        visible_mutation_sites=observed_sites,
+        config=pcig_config,
+    )
+    rng = random.Random(seed)
+    generated = pcig.generate_candidates(state, max_candidates=int(generation_budget), rng=rng)
+    scored = pcig.score_candidates(state, generated)
+    selected_ids = [
+        str(candidate_id)
+        for candidate_id in pcig.select_panel(state, scored, budget, random.Random(seed))
+    ]
+
+    observed_sequences = {
+        (
+            str(record.get("heavy_chain_seq") or ""),
+            str(record.get("light_chain_seq") or ""),
+        )
+        for record in observed_records
+    }
+    candidate_rows = _ph_switch_graph_project_candidate_rows(
+        scored,
+        selected_ids=selected_ids,
+        observed_signatures=observed_signatures,
+        observed_sequences=observed_sequences,
+    )
+
+    run_dir = ensure_dir(root / "runs" / _safe_run_id(run_id))
+    candidates_path = run_dir / PH_SWITCH_GRAPH_PROJECT_CANDIDATES
+    summary_path = run_dir / PH_SWITCH_GRAPH_PROJECT_SUMMARY
+    _write_csv(candidates_path, candidate_rows)
+    summary = _ph_switch_graph_project_design_summary(
+        dataset,
+        run_id=_safe_run_id(run_id),
+        base_heavy=base_heavy,
+        base_light=base_light,
+        base_source=base_source,
+        vocabulary=vocabulary,
+        generated=generated,
+        scored=scored,
+        candidate_rows=candidate_rows,
+        selected_ids=selected_ids,
+        state=state,
+        endpoint_count=_cmdgd_observed_endpoint_count(root, {_record_id(record) for record in observed_records}),
+    )
+    write_json(summary_path, summary)
+    _advance_project_design_stage(
+        root,
+        run_id=_safe_run_id(run_id),
+        algorithm="ph_switch_graph",
+        selected_ids=selected_ids,
+        budget=budget,
+        generation_budget=generation_budget,
+    )
+    generic_artifacts = _write_project_design_run_artifacts(
+        root,
+        run_dir,
+        run_id=_safe_run_id(run_id),
+        algorithm="ph_switch_graph",
+        candidate_rows=candidate_rows,
+        selected_ids=selected_ids,
+        summary=summary,
+        budget=budget,
+        generation_budget=generation_budget,
+    )
+    summary["generic_project_artifacts"] = generic_artifacts
+    write_json(summary_path, summary)
+
+    return {
+        "status": "completed",
+        "run_id": _safe_run_id(run_id),
+        "generated_candidates_path": str(candidates_path),
+        "design_summary_path": str(summary_path),
+        "generic_project_artifacts": generic_artifacts,
+        "summary": summary,
+    }
+
+
 def _build_variant_record(
     variant_id: str,
     observations: list[dict[str, str]],
@@ -501,6 +639,8 @@ def _resolve_mechanism(name_or_fn: str | Callable[..., list[str]]) -> Callable[.
         from design_scientist.algorithms.evidence_calibrated_ucb import select_batch
 
         return select_batch
+    if name in {"ph_switch_graph", "ph_switch_graph_observed_pool"}:
+        return _ph_switch_graph_observed_pool
     if name in {"cmdgd", "cmd_gd", "cmdgd_generative", "cmdgd_observed_pool"}:
         return _cmdgd_observed_pool
     if name == "random_feasible":
@@ -569,6 +709,60 @@ def _fixed_mix(
     return [*greedy, *random_part]
 
 
+def _ph_switch_graph_observed_pool(
+    observed: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]],
+    budget: int,
+    round_index: int,
+    rng: random.Random,
+) -> list[str]:
+    """Rank masked observed variants with the V3 pH-switch graph without endpoint leakage."""
+
+    del round_index
+    if budget <= 0 or not candidates:
+        return []
+    from design_scientist.algorithms import pcig
+
+    train_records = [
+        _cmdgd_training_record(record)
+        for record in observed
+        if _has_cmdgd_sequences(record)
+    ]
+    if not train_records:
+        return []
+    base = _cmdgd_base_record(train_records)
+    base_heavy = str(base["heavy_chain_seq"])
+    base_light = str(base["light_chain_seq"])
+    endpoint_records = [_cmdgd_endpoint_record(record) for record in train_records]
+    observed_signatures = _cmdgd_observed_mutation_signatures(
+        train_records,
+        base_heavy=base_heavy,
+        base_light=base_light,
+    )
+    observed_sites = [
+        {"chain": key[0], "position": int(key[1:])}
+        for key in sorted(observed_signatures["positions"])
+        if len(key) > 1 and key[0] in {"H", "L"} and key[1:].isdigit()
+    ]
+    state = pcig.fit_state(
+        base_heavy,
+        base_light,
+        train_records,
+        endpoint_records,
+        observed_mutation_sites=observed_sites,
+        visible_mutation_sites=observed_sites,
+    )
+    hidden_candidates = [
+        _ph_switch_graph_hidden_candidate(record, base_heavy=base_heavy, base_light=base_light)
+        for record in candidates
+        if _has_cmdgd_sequences(record)
+    ]
+    if not hidden_candidates:
+        return []
+    scored = pcig.score_candidates(state, hidden_candidates)
+    return pcig.select_panel(state, scored, budget, rng)
+
+
 def _cmdgd_observed_pool(
     observed: Sequence[Mapping[str, Any]],
     candidates: Sequence[Mapping[str, Any]],
@@ -609,6 +803,24 @@ def _cmdgd_observed_pool(
         return []
     scored = cmdgd.score_candidates(state, hidden_candidates)
     return cmdgd.select_panel(state, scored, budget, rng)
+
+
+def _ph_switch_graph_hidden_candidate(
+    record: Mapping[str, Any],
+    *,
+    base_heavy: str,
+    base_light: str,
+) -> dict[str, Any]:
+    candidate = _cmdgd_hidden_candidate(record, base_heavy=base_heavy, base_light=base_light)
+    candidate["design_context"] = {
+        "algorithm": "ph_switch_graph",
+        "benchmark_boundary": "retrospective_observed_pool_masking",
+        "heldout_endpoint_values_visible": False,
+        "legacy_rejected_method_reused": False,
+    }
+    return candidate
+
+
 
 
 def _cmdgd_training_record(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -923,6 +1135,67 @@ def _cmdgd_project_candidate_rows(
     return rows
 
 
+def _ph_switch_graph_project_candidate_rows(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    selected_ids: Sequence[str],
+    observed_signatures: Mapping[str, set[str]],
+    observed_sequences: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    selected_set = {str(item) for item in selected_ids}
+    rows: list[dict[str, Any]] = []
+    for rank, candidate in enumerate(candidates, start=1):
+        candidate_id = str(candidate.get("candidate_id") or candidate.get("variant_id") or f"rank_{rank}")
+        edits = _cmdgd_candidate_edit_dicts(candidate)
+        edit_ids = [str(edit.get("id") or "") for edit in edits if str(edit.get("id") or "")]
+        positions = [position for edit in edits if (position := _cmdgd_position_key(edit))]
+        new_sites = sorted(set(edit_ids) - set(observed_signatures.get("edit_ids", set())))
+        new_positions = sorted(set(positions) - set(observed_signatures.get("positions", set())))
+        observed_duplicate = (
+            candidate_id in set(observed_signatures.get("variant_ids", set()))
+            or (
+                str(candidate.get("heavy_chain_seq") or ""),
+                str(candidate.get("light_chain_seq") or ""),
+            )
+            in observed_sequences
+        )
+        score_components = (
+            candidate.get("score_components")
+            if isinstance(candidate.get("score_components"), Mapping)
+            else {}
+        )
+        trace = candidate.get("pcig_trace") if isinstance(candidate.get("pcig_trace"), Mapping) else {}
+        row = {
+            "rank": rank,
+            "candidate_id": candidate_id,
+            "selected": _bool_text(candidate_id in selected_set),
+            "score": _cmdgd_metric(candidate, "score"),
+            "posterior_mean": _cmdgd_metric(candidate, "posterior_mean"),
+            "posterior_std": _cmdgd_metric(candidate, "posterior_std"),
+            "pcig_evidence_effect": _cmdgd_metric(score_components, "pcig_evidence_effect"),
+            "counterfactual_site_field": _cmdgd_metric(score_components, "counterfactual_site_field"),
+            "pair_program_bonus": _cmdgd_metric(score_components, "pair_program_bonus"),
+            "feasibility_prior": _cmdgd_metric(score_components, "feasibility_prior"),
+            "operator": str(candidate.get("operator") or ""),
+            "parent_ids": json.dumps(_as_list(candidate.get("parent_ids"))),
+            "modules": json.dumps(_as_list(candidate.get("modules")) or edit_ids),
+            "heavy_chain_seq": str(candidate.get("heavy_chain_seq") or ""),
+            "light_chain_seq": str(candidate.get("light_chain_seq") or ""),
+            "observed_duplicate": _bool_text(observed_duplicate),
+            "uses_new_mutation_site": _bool_text(bool(new_sites)),
+            "new_mutation_site_count": len(new_sites),
+            "new_mutation_sites": json.dumps(new_sites),
+            "uses_new_position": _bool_text(bool(new_positions)),
+            "new_position_count": len(new_positions),
+            "new_positions": json.dumps(new_positions),
+            "feasibility_status": str(candidate.get("feasibility_status") or "review"),
+            "cost": _cmdgd_metric(candidate, "cost"),
+            "ph_switch_graph_trace": json.dumps(_json_safe(trace), sort_keys=True),
+        }
+        rows.append(row)
+    return rows
+
+
 def _cmdgd_candidate_edit_dicts(candidate: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw_edits = candidate.get("edits")
     edits: list[dict[str, Any]] = []
@@ -1064,6 +1337,410 @@ def _cmdgd_project_design_summary(
         "unique_score_count": len({str(row.get("score")) for row in candidate_rows if row.get("score") != ""}),
         "component_trace": _json_safe(component_trace),
     }
+
+
+def _ph_switch_graph_project_design_summary(
+    dataset: ProjectReplayDataset,
+    *,
+    run_id: str,
+    base_heavy: str,
+    base_light: str,
+    base_source: str,
+    vocabulary: Sequence[Mapping[str, Any]],
+    generated: Sequence[Mapping[str, Any]],
+    scored: Sequence[Mapping[str, Any]],
+    candidate_rows: Sequence[Mapping[str, Any]],
+    selected_ids: Sequence[str],
+    state: Any,
+    endpoint_count: int,
+) -> dict[str, Any]:
+    selected_set = {str(item) for item in selected_ids}
+    selected_rows = [row for row in candidate_rows if str(row.get("candidate_id")) in selected_set]
+    component_trace = getattr(state, "component_trace", {})
+    if isinstance(state, Mapping):
+        component_trace = state.get("component_trace", component_trace)
+    return {
+        "schema_version": 1,
+        "algorithm": "ph_switch_graph",
+        "run_id": run_id,
+        "design_mode": "project_ph_switch_graph_sequence_generation",
+        "evidence_boundary": (
+            "computational candidate generation from startup observations and literature-derived "
+            "mechanism priors; generated candidates have no measured project truth"
+        ),
+        "legacy_rejected_method_reused": False,
+        "retrospective_masking_semantics": {
+            "generated_candidates_are_not_heldout_truth": True,
+            "hidden_measured_variants_not_reused_as_prospective_truth": True,
+        },
+        "observed_variant_count": len(dataset.variants),
+        "observed_endpoint_count": int(endpoint_count),
+        "base_heavy_length": len(base_heavy),
+        "base_light_length": len(base_light),
+        "base_sequence_source": base_source,
+        "candidate_edit_vocabulary_count": len(vocabulary),
+        "generated_candidate_count": len(generated),
+        "scored_candidate_count": len(scored),
+        "selected_count": len(selected_ids),
+        "selected_candidate_ids": list(selected_ids),
+        "generated_new_mutation_site_count": _row_flag_count(candidate_rows, "uses_new_mutation_site"),
+        "generated_new_position_count": _row_flag_count(candidate_rows, "uses_new_position"),
+        "selected_new_mutation_site_count": _row_flag_count(selected_rows, "uses_new_mutation_site"),
+        "selected_new_position_count": _row_flag_count(selected_rows, "uses_new_position"),
+        "observed_duplicate_selected_count": _row_flag_count(selected_rows, "observed_duplicate"),
+        "selected_operator_modes": sorted({str(row.get("operator") or "") for row in selected_rows}),
+        "unique_score_count": len({str(row.get("score")) for row in candidate_rows if row.get("score") != ""}),
+        "component_trace": _json_safe(component_trace),
+    }
+
+
+def _write_project_design_run_artifacts(
+    root: Path,
+    run_dir: Path,
+    *,
+    run_id: str,
+    algorithm: str,
+    candidate_rows: Sequence[Mapping[str, Any]],
+    selected_ids: Sequence[str],
+    summary: Mapping[str, Any],
+    budget: int,
+    generation_budget: int,
+) -> dict[str, str]:
+    """Write the generic project-run artifacts expected by project validation."""
+
+    candidate_pool_rows = [
+        _generic_project_candidate_row(row, algorithm=algorithm)
+        for row in candidate_rows
+    ]
+    selected_set = {str(candidate_id) for candidate_id in selected_ids}
+    panel_rows = [
+        _generic_project_panel_row(row, algorithm=algorithm)
+        for row in candidate_rows
+        if str(row.get("candidate_id") or "") in selected_set
+    ]
+    policy_comparison_rows = _project_design_policy_comparison_rows(
+        algorithm=algorithm,
+        summary=summary,
+        panel_rows=panel_rows,
+    )
+    policy_metrics = _project_design_policy_metrics(
+        algorithm=algorithm,
+        summary=summary,
+        panel_rows=panel_rows,
+        budget=budget,
+        generation_budget=generation_budget,
+    )
+
+    candidate_pool_path = run_dir / "candidate_pool.csv"
+    panel_path = run_dir / "panel_recommendation.csv"
+    policy_comparison_path = run_dir / "policy_comparison.csv"
+    policy_metrics_path = run_dir / "policy_metrics.json"
+    validation_path = run_dir / "validation_report.json"
+    decision_report_path = run_dir / "decision_report.md"
+
+    _write_csv(candidate_pool_path, candidate_pool_rows)
+    _write_csv(panel_path, panel_rows)
+    _write_csv(policy_comparison_path, policy_comparison_rows)
+    write_json(policy_metrics_path, policy_metrics)
+    write_json(
+        validation_path,
+        {
+            "project_id": _project_id(root),
+            "run_id": run_id,
+            "valid": False,
+            "findings": [
+                {
+                    "severity": "warning",
+                    "code": "validation_pending",
+                    "message": "Initial placeholder overwritten by project validation.",
+                    "artifact": str(validation_path),
+                }
+            ],
+        },
+    )
+    _write_project_design_decision_report(
+        decision_report_path,
+        run_id=run_id,
+        algorithm=algorithm,
+        summary=summary,
+        panel_rows=panel_rows,
+        budget=budget,
+        generation_budget=generation_budget,
+    )
+
+    from design_scientist.reporting import write_human_review_packet
+    from design_scientist.validators import validate_project
+
+    write_human_review_packet(root, run_id=run_id)
+    validation_report = validate_project(root, run_id=run_id, write_report=True)
+    human_review_path = write_human_review_packet(
+        root,
+        run_id=run_id,
+        validation_report=validation_report,
+    )
+    return {
+        "candidate_pool": str(candidate_pool_path),
+        "panel_recommendation": str(panel_path),
+        "policy_comparison": str(policy_comparison_path),
+        "policy_metrics": str(policy_metrics_path),
+        "validation_report": str(validation_path),
+        "decision_report": str(decision_report_path),
+        "human_review_packet": str(human_review_path),
+    }
+
+
+def _generic_project_candidate_row(
+    row: Mapping[str, Any],
+    *,
+    algorithm: str,
+) -> dict[str, Any]:
+    return {
+        **dict(row),
+        "category": _project_candidate_category(row),
+        "target_system": "1E62",
+        "background": "1E62_base_sequence",
+        "design_algorithm": algorithm,
+        "source_refs": json.dumps(
+            [
+                {"kind": "computational_project_design", "algorithm": algorithm},
+                {"kind": "startup_observation_state", "id": "standardized/observations_long.csv"},
+            ],
+            sort_keys=True,
+        ),
+        "required_endpoints": json.dumps(
+            ["pH7.4_binding_retention", "pH6.0_release", "expression_qc"],
+            sort_keys=True,
+        ),
+        "risk_flags": json.dumps(_project_candidate_risk_flags(row), sort_keys=True),
+    }
+
+
+def _generic_project_panel_row(
+    row: Mapping[str, Any],
+    *,
+    algorithm: str,
+) -> dict[str, Any]:
+    generic = _generic_project_candidate_row(row, algorithm=algorithm)
+    generic["selection_rationale"] = _project_selection_rationale(row)
+    return generic
+
+
+def _project_candidate_category(row: Mapping[str, Any]) -> str:
+    if str(row.get("uses_new_mutation_site") or "").lower() == "true":
+        return "de_novo_candidate"
+    operator = str(row.get("operator") or "")
+    if operator.startswith("evidence_guardrail"):
+        return "evidence_guardrail_candidate"
+    return "generated_candidate"
+
+
+def _project_candidate_risk_flags(row: Mapping[str, Any]) -> list[str]:
+    flags: list[str] = []
+    if str(row.get("feasibility_status") or "").lower() not in {"feasible", "review", "needs_review"}:
+        flags.append("feasibility_status_not_feasible")
+    if str(row.get("uses_new_mutation_site") or "").lower() == "true":
+        flags.append("new_mutation_site_requires_wet_lab_validation")
+    if str(row.get("observed_duplicate") or "").lower() == "true":
+        flags.append("observed_duplicate")
+    return flags
+
+
+def _project_selection_rationale(row: Mapping[str, Any]) -> str:
+    operator = str(row.get("operator") or "generated_candidate")
+    score = row.get("score", "")
+    new_sites = row.get("new_mutation_sites", "[]")
+    return (
+        f"{operator}; score={score}; new_mutation_sites={new_sites}; "
+        "computational recommendation requiring human review before wet-lab submission"
+    )
+
+
+def _project_design_policy_comparison_rows(
+    *,
+    algorithm: str,
+    summary: Mapping[str, Any],
+    panel_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    selected_count = len(panel_rows)
+    total_cost = sum((_to_float(row.get("cost")) or 0.0) for row in panel_rows)
+    return [
+        {
+            "policy": algorithm,
+            "role": "selected_project_design_policy",
+            "selected_count": selected_count,
+            "selected_new_mutation_site_count": summary.get("selected_new_mutation_site_count", 0),
+            "observed_duplicate_selected_count": summary.get("observed_duplicate_selected_count", 0),
+            "total_cost": _round(total_cost),
+            "comparison_note": "Selected by project pH-switch graph candidate generation.",
+        },
+        {
+            "policy": "project_masking_benchmark",
+            "role": "retrospective_real_pool_check",
+            "selected_count": "",
+            "selected_new_mutation_site_count": "",
+            "observed_duplicate_selected_count": "",
+            "total_cost": "",
+            "comparison_note": "Use runs/formal_project_masking for observed-pool masking; small measured pool can make methods tied.",
+        },
+        {
+            "policy": "generative_benchmark",
+            "role": "synthetic_and_stress_check",
+            "selected_count": "",
+            "selected_new_mutation_site_count": "",
+            "observed_duplicate_selected_count": "",
+            "total_cost": "",
+            "comparison_note": "Use runs/formal_generative_ph_switch for mechanism-level generation gate and ablations.",
+        },
+    ]
+
+
+def _project_design_policy_metrics(
+    *,
+    algorithm: str,
+    summary: Mapping[str, Any],
+    panel_rows: Sequence[Mapping[str, Any]],
+    budget: int,
+    generation_budget: int,
+) -> dict[str, Any]:
+    total_cost = sum((_to_float(row.get("cost")) or 0.0) for row in panel_rows)
+    return {
+        "schema_version": 1,
+        "algorithm": algorithm,
+        "budget_mode": "cost_budget",
+        "budget": int(budget),
+        "generation_budget": int(generation_budget),
+        "selected_count": len(panel_rows),
+        "selected_candidate_ids": [str(row.get("candidate_id") or "") for row in panel_rows],
+        "selected_total_cost": _round(total_cost),
+        "generated_candidate_count": summary.get("generated_candidate_count", 0),
+        "generated_new_mutation_site_count": summary.get("generated_new_mutation_site_count", 0),
+        "selected_new_mutation_site_count": summary.get("selected_new_mutation_site_count", 0),
+        "observed_duplicate_selected_count": summary.get("observed_duplicate_selected_count", 0),
+        "baseline_comparison": [
+            "Retrospective project masking is stored separately in runs/formal_project_masking.",
+            "Generative benchmark and ablations are stored separately in runs/formal_generative_ph_switch.",
+            "External antibody and pH-switch checks are stored in runs/formal_external_antibody and runs/formal_external_ph_switch.",
+        ],
+        "unsupported_claims": [
+            "Generated candidates are computational designs, not wet-lab validated antibodies.",
+            "Current 1E62 combo data do not prove mutation-level causality for selected edits.",
+            "External and synthetic benchmarks support algorithm stress testing but do not replace prospective pH 6.0/7.4 assays.",
+            "A selected de novo mutation site requires sequence, expression, binding, and developability review before synthesis.",
+        ],
+    }
+
+
+def _write_project_design_decision_report(
+    path: Path,
+    *,
+    run_id: str,
+    algorithm: str,
+    summary: Mapping[str, Any],
+    panel_rows: Sequence[Mapping[str, Any]],
+    budget: int,
+    generation_budget: int,
+) -> None:
+    selected_ids = [str(row.get("candidate_id") or "") for row in panel_rows]
+    lines = [
+        f"# Project Design Decision Report: {run_id}",
+        "",
+        f"Algorithm: `{algorithm}`",
+        f"Budget mode: `cost_budget`; budget={budget}; generation_budget={generation_budget}",
+        f"Generated candidates: {summary.get('generated_candidate_count', 0)}",
+        f"Selected candidates: {len(panel_rows)}",
+        f"Selected candidates with new mutation sites: {summary.get('selected_new_mutation_site_count', 0)}",
+        "",
+        "## Selected Candidates",
+    ]
+    for row in panel_rows:
+        lines.append(
+            "- "
+            f"{row.get('candidate_id')} | modules={row.get('modules')} | "
+            f"score={row.get('score')} | cost={row.get('cost')} | "
+            f"category={row.get('category')}"
+        )
+    if not selected_ids:
+        lines.append("- No candidates selected.")
+    lines.extend(
+        [
+            "",
+            "## Evidence Boundary",
+            "This is a computational design recommendation from startup observations and literature-derived mechanism priors. It is not wet-lab validation.",
+            "",
+            "## Required Human Review",
+            "- Check sequence liabilities and synthesis feasibility.",
+            "- Decide whether assay controls/repeats should be added before wet-lab submission.",
+            "- Treat pH 6.0 release and pH 7.4 retention as matched endpoints in the next experiment.",
+        ]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _project_id(root: Path) -> str:
+    data = _safe_read_yaml(root / "project.yaml")
+    return str(data.get("project_id") or data.get("name") or root.name)
+
+
+def _advance_project_design_stage(
+    root: Path,
+    *,
+    run_id: str,
+    algorithm: str,
+    selected_ids: Sequence[str],
+    budget: int,
+    generation_budget: int,
+) -> None:
+    project_path = root / "project.yaml"
+    project = _safe_read_yaml(project_path)
+    if project:
+        project["stage"] = "project_design_execution"
+        project.setdefault("constraints", {})["no_panel_recommendation_in_startup_stage"] = False
+        project.setdefault("constraints", {})["wet_lab_submission_requires_human_review"] = True
+        write_yaml(project_path, project)
+
+    state_path = root / "state" / "design_state.json"
+    state = _read_json_if_exists(state_path)
+    if isinstance(state, Mapping):
+        state = dict(state)
+    else:
+        state = {}
+    state["panel_stage"] = {
+        "status": "computational_project_design_ready_for_human_review",
+        "run_id": run_id,
+        "algorithm": algorithm,
+        "selected_candidate_ids": list(selected_ids),
+        "budget_mode": "cost_budget",
+        "budget": int(budget),
+        "generation_budget": int(generation_budget),
+        "untested_sequences_evidence_tier": "model_derived",
+        "wet_lab_submission_requires_human_review": True,
+    }
+    state.setdefault("policy_history", []).append(
+        {
+            "event_type": "project_design_run",
+            "run_id": run_id,
+            "algorithm": algorithm,
+            "selected_count": len(selected_ids),
+            "budget": int(budget),
+            "generation_budget": int(generation_budget),
+        }
+    )
+    write_json(state_path, state)
+
+    from design_scientist.project_history import append_history_event
+
+    append_history_event(
+        root,
+        {
+            "event_type": "project_design_run",
+            "status": "completed",
+            "run_id": run_id,
+            "algorithm": algorithm,
+            "selected_count": len(selected_ids),
+            "budget": int(budget),
+            "generation_budget": int(generation_budget),
+        },
+    )
 
 
 def _cmdgd_observed_endpoint_count(root: Path, observed_ids: set[str]) -> int:
@@ -1394,6 +2071,8 @@ def _natural_sort_key(value: str) -> tuple[str, int]:
 __all__ = [
     "CMDGD_PROJECT_CANDIDATES",
     "CMDGD_PROJECT_SUMMARY",
+    "PH_SWITCH_GRAPH_PROJECT_CANDIDATES",
+    "PH_SWITCH_GRAPH_PROJECT_SUMMARY",
     "PROJECT_MASKING_ABLATION",
     "PROJECT_MASKING_CONFIG",
     "PROJECT_MASKING_RESULT",
@@ -1403,5 +2082,6 @@ __all__ = [
     "dataset_is_available",
     "load_project_replay_dataset",
     "run_project_cmdgd_design",
+    "run_project_ph_switch_graph_design",
     "run_project_masking_benchmark",
 ]

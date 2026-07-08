@@ -182,7 +182,11 @@ class _MechanismNodeSubprocessResult:
     timed_out: bool = False
 
 
-def load_mechanism_node(node_workspace: str | Path) -> MechanismNode:
+def load_mechanism_node(
+    node_workspace: str | Path,
+    *,
+    require_run: bool = True,
+) -> MechanismNode:
     """Load V3 mechanism-node metadata without importing ``mechanism.py``."""
 
     workspace = _resolve_workspace(node_workspace)
@@ -193,7 +197,7 @@ def load_mechanism_node(node_workspace: str | Path) -> MechanismNode:
     if not mechanism_path.is_file():
         raise MechanismNodeContractError("Missing required artifact: mechanism.py")
 
-    static_errors = _lifecycle_static_errors(mechanism_path)
+    static_errors = _lifecycle_static_errors(mechanism_path, require_run=require_run)
     if static_errors:
         raise MechanismNodeContractError("; ".join(static_errors))
 
@@ -228,7 +232,12 @@ def validate_mechanism_node(
     if mechanism_path.exists() and not mechanism_path.is_file():
         errors.append("mechanism.py must be a file")
     elif mechanism_path.is_file():
-        errors.extend(_lifecycle_static_errors(mechanism_path))
+        errors.extend(
+            _lifecycle_static_errors(
+                mechanism_path,
+                require_run=require_generated_artifacts,
+            )
+        )
 
     for artifact in V3_MECHANISM_NODE_JSON_ARTIFACTS:
         path = workspace / artifact
@@ -272,6 +281,7 @@ def execute_mechanism_node(
     guard_roots: Iterable[str | Path] | None = None,
     timeout_seconds: float | None = DEFAULT_EXECUTION_TIMEOUT_SECONDS,
     operator_specs: Iterable[Any] | Mapping[str, Any] | None = None,
+    require_generated_artifacts: bool = True,
 ) -> MechanismNodeExecutionResult:
     """Execute a V3 mechanism node in a subprocess and validate generated artifacts.
 
@@ -307,7 +317,7 @@ def execute_mechanism_node(
                 *preflight.errors,
             ]
             raise MechanismNodeContractError("; ".join(preflight_errors))
-        load_mechanism_node(workspace)
+        load_mechanism_node(workspace, require_run=require_generated_artifacts)
     except MechanismNodeContractError as exc:
         contract_failed = True
         errors.append(str(exc))
@@ -315,7 +325,7 @@ def execute_mechanism_node(
         contract_failed = True
         errors.append(f"Preflight failed: {exc}")
 
-    if not errors:
+    if not errors and require_generated_artifacts:
         subprocess_result = _execute_mechanism_subprocess(
             workspace,
             timeout_seconds=timeout_seconds,
@@ -343,10 +353,16 @@ def execute_mechanism_node(
             *_subprocess_path_guard_violations(subprocess_result),
         ]
     )
-    validation = validate_mechanism_node(workspace, operator_specs=operator_spec_records)
+    validation = validate_mechanism_node(
+        workspace,
+        require_generated_artifacts=require_generated_artifacts,
+        operator_specs=operator_spec_records,
+    )
     parent_stale_artifacts = (
         _stale_generated_artifacts(before, after, workspace)
-        if not validation.missing_artifacts and not validation.malformed_json
+        if require_generated_artifacts
+        and not validation.missing_artifacts
+        and not validation.malformed_json
         else []
     )
     stale_artifacts = _merge_unique_strings(
@@ -366,7 +382,7 @@ def execute_mechanism_node(
         )
 
     preliminary_valid = (
-        executed
+        (executed or not require_generated_artifacts)
         and exception is None
         and validation.valid
         and not out_of_bounds_writes
@@ -376,7 +392,10 @@ def execute_mechanism_node(
     if preliminary_valid:
         parent_import_before = _snapshot_mechanism_guard(snapshot_roots)
         try:
-            exported_callables = load_mechanism_node_callables(workspace)
+            exported_callables = load_mechanism_node_callables(
+                workspace,
+                require_run=require_generated_artifacts,
+            )
         except MechanismNodeContractError as exc:
             callable_import_failed = True
             errors.append(str(exc))
@@ -442,16 +461,20 @@ def execute_mechanism_node(
     )
 
 
-def load_mechanism_node_callables(node_workspace: str | Path | MechanismNode) -> dict[str, Any]:
+def load_mechanism_node_callables(
+    node_workspace: str | Path | MechanismNode,
+    *,
+    require_run: bool = True,
+) -> dict[str, Any]:
     """Import ``mechanism.py`` and return V3 lifecycle callables without calling them."""
 
     node = (
         node_workspace
         if isinstance(node_workspace, MechanismNode)
-        else load_mechanism_node(node_workspace)
+        else load_mechanism_node(node_workspace, require_run=require_run)
     )
     module = _load_mechanism_module(node)
-    runtime_errors = _lifecycle_runtime_errors(module)
+    runtime_errors = _lifecycle_runtime_errors(module, require_run=require_run)
     if runtime_errors:
         raise MechanismNodeContractError("; ".join(runtime_errors))
     return {
@@ -544,7 +567,7 @@ def _load_mechanism_module(node: MechanismNode) -> Any:
         sys.modules.pop(module_name, None)
 
 
-def _lifecycle_static_errors(mechanism_path: Path) -> list[str]:
+def _lifecycle_static_errors(mechanism_path: Path, *, require_run: bool = True) -> list[str]:
     try:
         tree = ast.parse(mechanism_path.read_text(encoding="utf-8"), filename=os.fspath(mechanism_path))
     except SyntaxError as exc:
@@ -575,7 +598,7 @@ def _lifecycle_static_errors(mechanism_path: Path) -> list[str]:
             "mechanism.py missing lifecycle callables: "
             + ", ".join(missing)
         )
-    if "run" not in defined_functions:
+    if require_run and "run" not in defined_functions:
         errors.append("mechanism.py must define callable run(workspace)")
     errors.extend(_baseline_wrapper_static_errors(function_defs))
     return errors
@@ -950,7 +973,7 @@ def _removed_operator_ids(ablation: Mapping[str, Any]) -> list[str]:
     return _merge_unique_strings(refs)
 
 
-def _lifecycle_runtime_errors(module: Any) -> list[str]:
+def _lifecycle_runtime_errors(module: Any, *, require_run: bool = True) -> list[str]:
     errors: list[str] = []
     missing_or_not_callable = [
         name
@@ -972,10 +995,11 @@ def _lifecycle_runtime_errors(module: Any) -> list[str]:
         )
 
     entrypoint = getattr(module, "run", None)
-    if not callable(entrypoint):
-        errors.append("mechanism.py must define callable run(workspace)")
-    else:
-        errors.extend(_run_entrypoint_signature_errors(entrypoint))
+    if require_run:
+        if not callable(entrypoint):
+            errors.append("mechanism.py must define callable run(workspace)")
+        else:
+            errors.extend(_run_entrypoint_signature_errors(entrypoint))
     return errors
 
 

@@ -44,7 +44,9 @@ design-scientist review-framework <project_dir>
 
 If working directly from an uninstalled checkout, run with `PYTHONPATH=src` or
 install the package editable first. The validation step must pass before
-presenting a framework run as complete.
+presenting a framework run as complete. `run-scientist` now writes the
+reviewable paper bundle by default; `--skip-paper` is only for debug runs and
+must not be treated as a completed scientist workflow.
 
 1. State the computational research question and method hypothesis.
 2. Run a literature-discovery pass before inventing the method.

@@ -6,6 +6,7 @@ from pathlib import Path
 from design_scientist.framework import init_framework
 from design_scientist.framework_validation import main as validation_main
 from design_scientist.framework_validation import review_framework_run
+from design_scientist.manuscript import generate_short_paper
 from design_scientist.method_report import main as method_report_main
 from design_scientist.reference_audit import audit_references
 from design_scientist.scientist_search_v3 import run_scientist_v3
@@ -43,6 +44,9 @@ def test_offline_framework_rd_flow_generates_report_and_validates_via_module_cli
     assert method_report_main([str(project), "--run-id", run_id]) == 0
     out = capsys.readouterr().out
     assert "Wrote method report:" in out
+
+    paper = generate_short_paper(project, run_id=run_id)
+    assert paper["readiness"]["valid"]
 
     assert validation_main([str(project), "--run-id", run_id]) == 0
     out = capsys.readouterr().out

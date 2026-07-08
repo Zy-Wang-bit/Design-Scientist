@@ -232,7 +232,10 @@ def _run_dir(project_dir: Path, run_id: str | None) -> Path | None:
     runs_dir = project_dir / "runs"
     if not runs_dir.exists():
         return None
-    run_dirs = sorted([p for p in runs_dir.iterdir() if p.is_dir()])
+    run_dirs = sorted(
+        [p for p in runs_dir.iterdir() if p.is_dir()],
+        key=lambda path: (path.stat().st_mtime, path.name),
+    )
     return run_dirs[-1] if run_dirs else None
 
 

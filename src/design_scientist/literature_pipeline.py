@@ -518,8 +518,7 @@ def _source_cache_status(source: str, source_cache_dir: Path, cache_files: list[
     if source_name == "biorxiv":
         return "cache_hit" if _read_cache_json(source_cache_dir / "biorxiv.json") is not None else "cache_miss"
     if source_name == "arxiv":
-        path = source_cache_dir / "arxiv.xml"
-        if path.exists():
+        if (source_cache_dir / "arxiv.xml").exists() or (source_cache_dir / "arxiv_search.html").exists():
             return "cache_hit"
         return "cache_miss"
     if source_name == "semantic_scholar":
@@ -546,10 +545,14 @@ def _source_cache_error(source: str, source_cache_dir: Path) -> LiteratureCacheE
         return LiteratureCacheError(reason) if reason else None
     if source_name == "arxiv":
         path = source_cache_dir / "arxiv.xml"
-        if not path.exists():
+        web_path = source_cache_dir / "arxiv_search.html"
+        if not path.exists() and not web_path.exists():
             return None
-        reason = _arxiv_xml_cache_error(path)
-        return LiteratureCacheError(f"Malformed arXiv XML cache {path}: {reason}") if reason else None
+        if path.exists():
+            reason = _arxiv_xml_cache_error(path)
+            return LiteratureCacheError(f"Malformed arXiv XML cache {path}: {reason}") if reason else None
+        reason = _arxiv_web_cache_error(web_path)
+        return LiteratureCacheError(f"Malformed arXiv search cache {web_path}: {reason}") if reason else None
     if source_name == "semantic_scholar":
         reason = _json_cache_error(source_cache_dir / "semantic_scholar.json")
         return LiteratureCacheError(reason) if reason else None
@@ -594,6 +597,9 @@ def _raw_count_for_source(source: str, source_cache_dir: Path, *, fallback: int)
         arxiv_count = _count_arxiv_entries(source_cache_dir / "arxiv.xml")
         if arxiv_count is not None:
             return arxiv_count
+        arxiv_search_count = _count_arxiv_search_results(source_cache_dir / "arxiv_search.html")
+        if arxiv_search_count is not None:
+            return arxiv_search_count
     if source_name == "semantic_scholar":
         raw = _read_cache_json(source_cache_dir / "semantic_scholar.json")
         records = raw.get("data") if isinstance(raw, dict) else None
@@ -643,6 +649,14 @@ def _count_arxiv_entries(path: Path) -> int | None:
     return len(root.findall("{http://www.w3.org/2005/Atom}entry"))
 
 
+def _count_arxiv_search_results(path: Path) -> int | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return len(re.findall(r'class=["\'][^"\']*\barxiv-result\b', text))
+
+
 def _arxiv_xml_cache_error(path: Path) -> str | None:
     try:
         root = ET.fromstring(path.read_text(encoding="utf-8"))
@@ -650,6 +664,19 @@ def _arxiv_xml_cache_error(path: Path) -> str | None:
         return str(exc)
     if root.tag != "{http://www.w3.org/2005/Atom}feed":
         return f"expected Atom feed root, got {_local_xml_name(root.tag)}"
+    return None
+
+
+def _arxiv_web_cache_error(path: Path) -> str | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return str(exc)
+    if (
+        not re.search(r'class=["\'][^"\']*\barxiv-result\b', text)
+        and not re.search(r"produced\s+no\s+results", text, flags=re.I)
+    ):
+        return "no arXiv result rows found"
     return None
 
 

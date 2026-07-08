@@ -17,14 +17,18 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import httpx
+from bs4 import BeautifulSoup
 
 from design_scientist.io import ensure_dir
 
 
 DEFAULT_TIMEOUT = 30.0
-ARXIV_TIMEOUT = 10.0
-ARXIV_RATE_LIMIT_SECONDS = 5.0
-ARXIV_MAX_RETRIES = 1
+ARXIV_TIMEOUT = 45.0
+ARXIV_WEB_SEARCH_TIMEOUT = 45.0
+ARXIV_WEB_SEARCH_SIZE = 25
+ARXIV_WEB_ALLOWED_SIZES = (25, 50, 100, 200)
+ARXIV_RATE_LIMIT_SECONDS = 10.0
+ARXIV_MAX_RETRIES = 2
 ARXIV_RETRY_STATUS_CODES = {429, 503}
 ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 _LAST_ARXIV_REQUEST_AT = 0.0
@@ -62,6 +66,7 @@ def search_pubmed(
 ) -> list[dict[str, Any]]:
     cache = ensure_dir(cache_dir)
     esearch_path = cache / "pubmed_esearch.json"
+    broad_esearch_path = cache / "pubmed_esearch_broad.json"
     efetch_path = cache / "pubmed_efetch.xml"
     if offline_fixtures:
         raw = _read_fixture_json(fixture_dir, "pubmed_esearch.json")
@@ -97,6 +102,26 @@ def search_pubmed(
             )
             _write_cache_json(esearch_path, raw)
         ids = _extract_pubmed_ids(raw)[:max_papers]
+        if not ids:
+            broad_raw = _read_cached_json(broad_esearch_path)
+            if broad_raw is _CACHE_MISS:
+                broad_params = _pubmed_common_params()
+                broad_params.update(
+                    {
+                        "db": "pubmed",
+                        "term": _pubmed_broad_query(context.query),
+                        "retmode": "json",
+                        "retmax": str(max_papers),
+                        "sort": "relevance",
+                    }
+                )
+                broad_raw = _get_json(
+                    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                    params=broad_params,
+                    client=client,
+                )
+                _write_cache_json(broad_esearch_path, broad_raw)
+            ids = _extract_pubmed_ids(broad_raw)[:max_papers]
         if not ids:
             return []
         fetch_params = _pubmed_common_params()
@@ -176,6 +201,7 @@ def search_arxiv(
 ) -> list[dict[str, Any]]:
     cache = ensure_dir(cache_dir)
     cache_path = cache / "arxiv.xml"
+    web_cache_path = cache / "arxiv_search.html"
     if offline_fixtures:
         xml_text = _read_fixture_text(fixture_dir, "arxiv.xml")
         _write_cache_text(cache_path, xml_text)
@@ -189,20 +215,40 @@ def search_arxiv(
                 source_label=f"arXiv XML cache {cache_path}",
                 error_cls=LiteratureCacheError,
             )[:max_papers]
+        cached_html = _read_cached_text(web_cache_path)
+        if cached_html is not None:
+            return _parse_arxiv_search_html(
+                cached_html,
+                context,
+                strict=True,
+                source_label=f"arXiv search cache {web_cache_path}",
+                error_cls=LiteratureCacheError,
+            )[:max_papers]
         else:
-            xml_text = _get_arxiv_text(
-                "https://export.arxiv.org/api/query",
-                params={
-                    "search_query": _arxiv_search_query(context.query),
-                    "start": "0",
-                    "max_results": str(max_papers),
-                    "sortBy": "relevance",
-                    "sortOrder": "descending",
-                },
-                headers=_arxiv_headers(),
-                client=client,
-            )
-            _write_cache_text(cache_path, xml_text)
+            try:
+                xml_text = _get_arxiv_text(
+                    "https://export.arxiv.org/api/query",
+                    params={
+                        "search_query": _arxiv_search_query(context.query),
+                        "start": "0",
+                        "max_results": str(max_papers),
+                        "sortBy": "relevance",
+                        "sortOrder": "descending",
+                    },
+                    headers=_arxiv_headers(),
+                    client=client,
+                )
+                _write_cache_text(cache_path, xml_text)
+            except LiteratureSourceTemporarilyUnavailable:
+                html_text = _fetch_arxiv_web_search_html(context.query, max_papers=max_papers, client=client)
+                _write_cache_text(web_cache_path, html_text)
+                return _parse_arxiv_search_html(
+                    html_text,
+                    context,
+                    strict=True,
+                    source_label="arXiv search response",
+                    error_cls=LiteratureSourceFormatError,
+                )[:max_papers]
     return _parse_arxiv_xml(
         xml_text,
         context,
@@ -443,6 +489,53 @@ def _parse_arxiv_xml(
     return [card for card in cards if card]
 
 
+def _parse_arxiv_search_html(
+    html_text: str,
+    context: LiteratureContext,
+    *,
+    strict: bool = False,
+    source_label: str = "arXiv search HTML",
+    error_cls: type[Exception] = LiteratureSourceFormatError,
+) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    result_nodes = soup.select("li.arxiv-result")
+    if not result_nodes and _arxiv_search_page_has_no_results(html_text):
+        return []
+    if not result_nodes and strict:
+        raise error_cls(f"Malformed {source_label}: no arXiv result rows found")
+    cards = []
+    for node in result_nodes:
+        id_link = node.select_one("p.list-title a[href*='/abs/']")
+        arxiv_id = _arxiv_id_from_link(id_link.get("href") if id_link else None) or _arxiv_id_from_text(
+            id_link.get_text(" ", strip=True) if id_link else None
+        )
+        title_node = node.select_one("p.title")
+        abstract_node = node.select_one("span.abstract-full") or node.select_one("span.abstract-short")
+        date_node = node.select_one("p.is-size-7")
+        authors = [author.get_text(" ", strip=True) for author in node.select("p.authors a")]
+        link = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else None
+        card = _paper_card(
+            source="arxiv",
+            source_id=arxiv_id,
+            title=title_node.get_text(" ", strip=True) if title_node else None,
+            abstract=_clean_arxiv_search_abstract(
+                abstract_node.get_text(" ", strip=True) if abstract_node else None
+            ),
+            authors=authors,
+            published=date_node.get_text(" ", strip=True) if date_node else None,
+            year=_year_from_text(date_node.get_text(" ", strip=True) if date_node else None),
+            doi=None,
+            venue="arXiv",
+            url=link,
+            context=context,
+            external_ids={"arxiv": arxiv_id} if arxiv_id else {},
+        )
+        if card:
+            card["retrieval_mode"] = "arxiv_web_search_fallback"
+            cards.append(card)
+    return cards
+
+
 def _semantic_scholar_related_papers(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -543,6 +636,21 @@ def _query_terms(query: str) -> list[str]:
     return [term.lower() for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9-]{2,}", query)]
 
 
+def _pubmed_broad_query(query: str) -> str:
+    terms = set(_query_terms(query.replace("_", " ")))
+    if {"antibody", "antibodies", "antigen", "hbsag", "histidine"} & terms:
+        return (
+            '"pH"[All Fields] OR "acidic"[All Fields] OR "histidine"[All Fields] '
+            'OR "antibody engineering"[All Fields] OR "antigen binding"[All Fields]'
+        )
+    if {"active", "learning", "bayesian", "optimization", "experimental"} & terms:
+        return (
+            '"active learning"[All Fields] OR "Bayesian optimization"[All Fields] '
+            'OR "experimental design"[All Fields] OR "protein engineering"[All Fields]'
+        )
+    return '"protein engineering"[All Fields] OR "protein design"[All Fields] OR "antibody"[All Fields]'
+
+
 def _arxiv_search_query(query: str) -> str:
     """Convert a free-text project query into arXiv's fielded query syntax."""
     if re.search(r"\b(?:ti|au|abs|co|jr|cat|rn|all):", query):
@@ -573,8 +681,55 @@ def _arxiv_search_query(query: str) -> str:
     return " OR ".join(f"all:{term}" for term in terms)
 
 
+def _arxiv_web_search_query(query: str) -> str:
+    """Convert project query text into the official arxiv.org search form syntax."""
+    text = re.sub(r"\b(?:ti|au|abs|co|jr|cat|rn|all):", " ", query)
+    terms = _query_terms(text.replace("_", " "))
+    if terms:
+        return " ".join(terms[:10])
+    return _clean_str(query) or "active learning protein design"
+
+
+def _arxiv_web_search_size(max_papers: int) -> int:
+    requested = max(max_papers, ARXIV_WEB_SEARCH_SIZE)
+    for allowed in ARXIV_WEB_ALLOWED_SIZES:
+        if requested <= allowed:
+            return allowed
+    return ARXIV_WEB_ALLOWED_SIZES[-1]
+
+
 def _arxiv_headers() -> dict[str, str]:
     return {"User-Agent": os.getenv("DESIGN_SCIENTIST_ARXIV_USER_AGENT", "Design-Scientist/0.1")}
+
+
+def _fetch_arxiv_web_search_html(
+    query: str,
+    *,
+    max_papers: int,
+    client: httpx.Client | None = None,
+) -> str:
+    primary = _arxiv_web_search_query(query)
+    candidates = [primary]
+    broad = _arxiv_web_broad_search_query(query)
+    if broad not in candidates:
+        candidates.append(broad)
+    last_html = ""
+    for candidate_query in candidates:
+        last_html = _get_arxiv_web_search_text(
+            "https://arxiv.org/search/",
+            params={
+                "query": candidate_query,
+                "searchtype": "all",
+                "abstracts": "show",
+                "order": "-announced_date_first",
+                "size": str(_arxiv_web_search_size(max_papers)),
+            },
+            headers=_arxiv_headers(),
+            client=client,
+        )
+        if _parse_arxiv_search_html(last_html, LiteratureContext(query=query, relevance="probe")):
+            return last_html
+    return last_html
 
 
 def _get_arxiv_text(
@@ -611,6 +766,66 @@ def _get_arxiv_text(
     if last_error is not None:  # pragma: no cover - defensive guard
         raise last_error
     raise RuntimeError("arXiv request failed before any attempt was made")  # pragma: no cover
+
+
+def _get_arxiv_web_search_text(
+    url: str,
+    *,
+    params: dict[str, str],
+    headers: dict[str, str],
+    client: httpx.Client | None = None,
+) -> str:
+    _respect_arxiv_rate_limit()
+    try:
+        return _get_text(
+            url,
+            params=params,
+            headers=headers,
+            client=client,
+            timeout=ARXIV_WEB_SEARCH_TIMEOUT,
+        )
+    except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
+        raise LiteratureSourceTemporarilyUnavailable(f"arXiv web search unavailable: {exc}") from exc
+
+
+def _arxiv_web_broad_search_query(query: str) -> str:
+    terms = set(_query_terms(query.replace("_", " ")))
+    broad_terms = ["protein", "design"]
+    if {"antibody", "antibodies", "antigen", "hbsag"} & terms:
+        broad_terms.extend(["antibody", "engineering"])
+    elif {"active", "learning", "bayesian", "optimization", "experimental"} & terms:
+        broad_terms.extend(["active", "learning"])
+    else:
+        broad_terms.append("engineering")
+    return " ".join(dict.fromkeys(broad_terms))
+
+
+def _arxiv_search_page_has_no_results(html_text: str) -> bool:
+    return bool(re.search(r"produced\s+no\s+results", html_text, flags=re.I))
+
+
+def _arxiv_id_from_link(value: Any) -> str | None:
+    text = _clean_str(value)
+    if not text:
+        return None
+    return _arxiv_id_from_text(text.rstrip("/").split("/")[-1])
+
+
+def _arxiv_id_from_text(value: Any) -> str | None:
+    text = _clean_str(value)
+    if not text:
+        return None
+    match = re.search(r"(?:arXiv:)?([0-9]{4}\.[0-9]{4,5}(?:v[0-9]+)?|[a-z-]+(?:\.[A-Z]{2})?/[0-9]{7}(?:v[0-9]+)?)", text)
+    return match.group(1) if match else None
+
+
+def _clean_arxiv_search_abstract(value: Any) -> str | None:
+    text = _clean_str(value)
+    if not text:
+        return None
+    text = re.sub(r"^\s*Abstract\s*:\s*", "", text, flags=re.I)
+    text = re.sub(r"\s*[△▽]\s*(?:Less|More)\s*$", "", text, flags=re.I)
+    return _clean_str(text)
 
 
 def _respect_arxiv_rate_limit() -> None:

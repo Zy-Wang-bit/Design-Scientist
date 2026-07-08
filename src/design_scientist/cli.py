@@ -26,11 +26,15 @@ def build_parser() -> argparse.ArgumentParser:
         "literature-search",
         "read-literature",
         "extract-mechanisms",
+        "mine-literature",
         "compile-operators",
         "run-scientist",
         "run-algorithm-benchmark",
         "run-generative-benchmark",
+        "run-external-antibody-benchmark",
+        "run-external-ph-switch-benchmark",
         "run-project-benchmark",
+        "run-project-ph-switch-design",
         "review-framework",
         "generate-short-paper",
         "generate-algorithm-paper",
@@ -132,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract_mechanisms.add_argument("root")
 
+    mine_literature = subparsers.add_parser(
+        "mine-literature", help="debug/development: mine V4 mechanism cards from the corpus"
+    )
+    mine_literature.add_argument("root")
+
     compile_operators = subparsers.add_parser(
         "compile-operators",
         help="debug/development: compile operator artifacts from mechanism cards only",
@@ -139,7 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     compile_operators.add_argument("root")
 
     run_scientist = subparsers.add_parser(
-        "run-scientist", help="recommended full-chain V3 mechanism scientist loop"
+        "run-scientist",
+        help="recommended full-chain V3 mechanism scientist loop with V4 research harness",
     )
     run_scientist.add_argument("root")
     run_scientist.add_argument("--max-papers", type=int, default=60)
@@ -148,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_scientist.add_argument("--use-codex", action="store_true")
     run_scientist.add_argument("--offline-fixtures", action="store_true")
     run_scientist.add_argument("--sources", nargs="*")
+    run_scientist.add_argument(
+        "--skip-paper",
+        action="store_true",
+        help="Skip automatic paper bundle generation for debug runs",
+    )
     run_scientist.add_argument(
         "--allow-degraded-literature",
         action="store_true",
@@ -168,15 +183,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     generative_benchmark = subparsers.add_parser(
         "run-generative-benchmark",
-        help="Run CMD-GD generative sequence-design benchmark",
+        help="Run generative sequence-design benchmark",
     )
     generative_benchmark.add_argument("root")
-    generative_benchmark.add_argument("--run-id", default="cmdgd_generative")
+    generative_benchmark.add_argument("--run-id", default="ph_switch_graph_generative")
     generative_benchmark.add_argument("--seeds", nargs="*", type=int)
     generative_benchmark.add_argument("--budget", type=int, default=5)
     generative_benchmark.add_argument("--generation-budget", type=int, default=32)
+    generative_benchmark.add_argument("--max-edits-per-candidate", type=int)
     generative_benchmark.add_argument("--mechanisms", nargs="*")
     generative_benchmark.add_argument("--worlds", nargs="*")
+
+    external_antibody_benchmark = subparsers.add_parser(
+        "run-external-antibody-benchmark",
+        help="Run external FLAb-style antibody held-out replay benchmark",
+    )
+    external_antibody_benchmark.add_argument("root")
+    external_antibody_benchmark.add_argument("--run-id", default="external_antibody_replay")
+    external_antibody_benchmark.add_argument("--seeds", nargs="*", type=int)
+    external_antibody_benchmark.add_argument("--budget", type=int, default=5)
+    external_antibody_benchmark.add_argument("--offline-fixtures", action="store_true")
+    external_antibody_benchmark.add_argument("--refresh", action="store_true")
+
+    external_ph_switch_benchmark = subparsers.add_parser(
+        "run-external-ph-switch-benchmark",
+        help="Run curated public pH-switch antibody literature-table sanity benchmark",
+    )
+    external_ph_switch_benchmark.add_argument("root")
+    external_ph_switch_benchmark.add_argument("--run-id", default="external_ph_switch_replay")
+    external_ph_switch_benchmark.add_argument("--budget", type=int, default=2)
 
     project_benchmark = subparsers.add_parser(
         "run-project-benchmark",
@@ -190,13 +225,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_cmdgd_design = subparsers.add_parser(
         "run-project-cmdgd-design",
-        help="Run prospective CMD-GD candidate generation from visible project data",
+        help="Legacy/debug only: run rejected CMD-GD candidate generation",
     )
     project_cmdgd_design.add_argument("root")
     project_cmdgd_design.add_argument("--run-id", default="cmdgd_project_design")
     project_cmdgd_design.add_argument("--budget", type=int, default=5)
     project_cmdgd_design.add_argument("--generation-budget", type=int, default=160)
+    project_cmdgd_design.add_argument("--max-edits-per-candidate", type=int)
     project_cmdgd_design.add_argument("--seed", type=int, default=1729)
+    project_cmdgd_design.add_argument(
+        "--allow-legacy-cmdgd",
+        action="store_true",
+        help="Required to run the legacy CMD-GD debug path; never used by V3 defaults",
+    )
+
+    project_ph_switch_design = subparsers.add_parser(
+        "run-project-ph-switch-design",
+        help="Run prospective pH-switch graph candidate generation from visible project data",
+    )
+    project_ph_switch_design.add_argument("root")
+    project_ph_switch_design.add_argument("--run-id", default="ph_switch_graph_project_design")
+    project_ph_switch_design.add_argument("--budget", type=int, default=5)
+    project_ph_switch_design.add_argument("--generation-budget", type=int, default=160)
+    project_ph_switch_design.add_argument("--max-edits-per-candidate", type=int)
+    project_ph_switch_design.add_argument("--seed", type=int, default=1729)
 
     review_framework = subparsers.add_parser(
         "review-framework", help="Validate framework run artifacts"
@@ -380,6 +432,14 @@ def main(argv: list[str] | None = None) -> int:
         if result is not None:
             print(f"Extracted mechanisms: {result}")
         return 0
+    if args.command == "mine-literature":
+        from design_scientist.literature_engine_v4 import mine_mechanisms_from_corpus
+
+        result = mine_mechanisms_from_corpus(args.root)
+        print(f"V4 literature mining {result.get('status', 'unknown')}")
+        if result.get("artifacts"):
+            print(f"Wrote mechanism graph: {result['artifacts'].get('mechanism_graph')}")
+        return 0 if result.get("status") == "ok" else 1
     if args.command == "compile-operators":
         from design_scientist.operator_specs import write_operator_spec_artifacts
 
@@ -428,7 +488,27 @@ def main(argv: list[str] | None = None) -> int:
         if not result.get("selected_node"):
             print("No valid selected mechanism node was produced.")
             return 1
-        return 0
+        if args.skip_paper:
+            return 0
+        from design_scientist.manuscript import generate_short_paper
+
+        try:
+            paper_result = generate_short_paper(args.root, run_id=result["run_id"])
+        except (FileNotFoundError, ValueError) as exc:
+            parser.error(str(exc))
+        readiness = paper_result["readiness"]
+        summary = readiness["summary"]
+        print(f"Wrote paper bundle: {paper_result['paper_dir']}")
+        print(f"Wrote short paper: {paper_result['artifacts']['short_paper.md']}")
+        print(
+            f"Wrote paper readiness report: "
+            f"{paper_result['artifacts']['paper_readiness_report.json']}"
+        )
+        print(
+            f"Paper readiness {readiness['status']}: "
+            f"{summary['errors']} errors, {summary['warnings']} warnings"
+        )
+        return 0 if readiness["valid"] else 1
     if args.command == "run-algorithm-benchmark":
         from design_scientist.algorithm_benchmark import run_mccbd_benchmark
 
@@ -463,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
                 seeds=args.seeds if args.seeds is not None else range(10),
                 budget=args.budget,
                 generation_budget=args.generation_budget,
+                max_edits_per_candidate=args.max_edits_per_candidate,
                 mechanisms=args.mechanisms,
                 worlds=args.worlds,
             )
@@ -477,6 +558,39 @@ def main(argv: list[str] | None = None) -> int:
             f"selected={result['selected_mechanism']} "
             f"passes={result['selected_passes_gate']}"
         )
+        return 0 if result.get("status") == "completed" else 1
+    if args.command == "run-external-antibody-benchmark":
+        from design_scientist.external_antibody_benchmark import run_external_antibody_benchmark
+
+        try:
+            result = run_external_antibody_benchmark(
+                args.root,
+                run_id=args.run_id,
+                seeds=args.seeds if args.seeds is not None else range(5),
+                budget=args.budget,
+                offline_fixtures=args.offline_fixtures,
+                refresh=args.refresh,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(f"Wrote external antibody benchmark: {result['benchmark_results_path']}")
+        print(f"Wrote external antibody summary: {result['summary_results_path']}")
+        print(f"Wrote external antibody source trace: {result['source_trace_path']}")
+        return 0 if result.get("status") == "completed" else 1
+    if args.command == "run-external-ph-switch-benchmark":
+        from design_scientist.external_antibody_benchmark import run_external_ph_switch_benchmark
+
+        try:
+            result = run_external_ph_switch_benchmark(
+                args.root,
+                run_id=args.run_id,
+                budget=args.budget,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(f"Wrote external pH-switch benchmark: {result['benchmark_results_path']}")
+        print(f"Wrote external pH-switch summary: {result['summary_results_path']}")
+        print(f"Wrote external pH-switch source trace: {result['source_trace_path']}")
         return 0 if result.get("status") == "completed" else 1
     if args.command == "run-project-benchmark":
         from design_scientist.project_replay import run_project_masking_benchmark
@@ -502,12 +616,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run-project-cmdgd-design":
         from design_scientist.project_replay import run_project_cmdgd_design
 
+        if not args.allow_legacy_cmdgd:
+            parser.error(
+                "run-project-cmdgd-design is a legacy/debug command. "
+                "Use run-project-ph-switch-design for the V3 route, or pass "
+                "--allow-legacy-cmdgd only when intentionally reproducing the rejected legacy path."
+            )
         try:
             result = run_project_cmdgd_design(
                 args.root,
                 run_id=args.run_id,
                 budget=args.budget,
                 generation_budget=args.generation_budget,
+                cmdgd_config=(
+                    {"max_edits_per_candidate": args.max_edits_per_candidate}
+                    if args.max_edits_per_candidate is not None
+                    else None
+                ),
                 seed=args.seed,
             )
         except ValueError as exc:
@@ -517,6 +642,30 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"Wrote CMD-GD project candidates: {result['generated_candidates_path']}")
         print(f"Wrote CMD-GD project summary: {result['design_summary_path']}")
+        return 0
+    if args.command == "run-project-ph-switch-design":
+        from design_scientist.project_replay import run_project_ph_switch_graph_design
+
+        try:
+            result = run_project_ph_switch_graph_design(
+                args.root,
+                run_id=args.run_id,
+                budget=args.budget,
+                generation_budget=args.generation_budget,
+                config=(
+                    {"max_edits_per_candidate": args.max_edits_per_candidate}
+                    if args.max_edits_per_candidate is not None
+                    else None
+                ),
+                seed=args.seed,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if result.get("status") != "completed":
+            print(f"pH-switch graph project design unavailable: {result.get('error', 'unknown error')}")
+            return 1
+        print(f"Wrote pH-switch graph project candidates: {result['generated_candidates_path']}")
+        print(f"Wrote pH-switch graph project summary: {result['design_summary_path']}")
         return 0
     if args.command == "review-framework":
         from design_scientist.framework_validation import review_framework_run

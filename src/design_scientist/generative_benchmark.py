@@ -30,10 +30,20 @@ DEFAULT_WORLDS = (
     "escape_risk",
     "vocabulary_extension",
     "de_novo_site_generalization",
+    "site_shift_generalization",
+    "anti_prior_negative_control",
 )
 DEFAULT_MECHANISMS = (
-    "cmdgd",
+    "ph_switch_graph",
+    "same_pool_random_selector",
+    "same_pool_reference_scorer",
+    "same_pool_physicochemical_scorer",
     "random_edit_generator",
+    "histidine_scan_baseline",
+    "protonatable_scan_baseline",
+    "charge_swap_scan_baseline",
+    "random_new_site_scan",
+    "combinatorial_library_baseline",
     "observed_recombination_baseline",
     "single_edit_scan",
     "mccbd_pool_selector",
@@ -46,7 +56,25 @@ OPTIONAL_BASELINE_MECHANISMS = (
 DEFAULT_BUDGET = 5
 DEFAULT_GENERATION_BUDGET = 28
 CI95_Z = 1.96
-DEFAULT_HIDDEN_DE_NOVO_EDIT_TOKENS = frozenset({"H10Q"})
+DEFAULT_HIDDEN_DE_NOVO_EDIT_TOKENS = frozenset({"H30H", "H76H", "H77H", "H73H"})
+FULL_LENGTH_HIGH_PRIOR_DISTRACTOR_TOKENS = frozenset({"H30H", "H76H", "H77H"})
+PROTONATABLE_SCAN_RESIDUES = frozenset({"D", "E", "H", "K", "Q", "R"})
+CHARGE_SWAP_RESIDUES = frozenset({"D", "E", "H", "K", "R"})
+ACIDIC_RESIDUES = frozenset({"D", "E"})
+BASIC_RESIDUES = frozenset({"H", "K", "R"})
+RESIDUE_CHARGE = {
+    "D": -1.0,
+    "E": -1.0,
+    "H": 0.45,
+    "K": 1.0,
+    "R": 1.0,
+}
+FULL_LENGTH_1E62_HEAVY_SEQUENCE = (
+    "EMQLVESGGGLVQPGGSLRLSCAASGFTFSDYWMNWVRQAPGQGYTWHHHVKLKSNNYATHYAPSVAGRFTISRDDSKNSVYLQMNSLKTEDTAVYYCASGFDYWGQGTLVTVSS"
+)
+FULL_LENGTH_1E62_LIGHT_SEQUENCE = (
+    "DIVMSQSPDSLAVSLGERATITCKSSQSLLYSSDQNNYLAWSQQKPGQPPKLLIYWASIRDSGVPDRFSGSGSGTDFTLTISSLQAEDVAVYYCHQYYTYPFTFGQGTKLEIK"
+)
 CMDGD_ABLATIONS = (
     "full",
     "no_contrastive_objective",
@@ -92,13 +120,75 @@ FIXED_POOL_ONLY = {
     "evidence_calibrated_ucb",
 }
 BASELINE_MECHANISMS = {
+    "same_pool_random_selector",
+    "same_pool_reference_scorer",
+    "same_pool_physicochemical_scorer",
     "random_edit_generator",
+    "histidine_scan_baseline",
+    "protonatable_scan_baseline",
+    "charge_swap_scan_baseline",
+    "random_new_site_scan",
+    "combinatorial_library_baseline",
     "observed_recombination_baseline",
     "single_edit_scan",
     "mccbd_pool_selector",
     *OPTIONAL_BASELINE_MECHANISMS,
 }
-SUPPORTED_MECHANISMS = {*DEFAULT_MECHANISMS, *OPTIONAL_BASELINE_MECHANISMS}
+LEGACY_NONSELECTABLE_MECHANISMS = {"cmdgd"}
+PH_SWITCH_GRAPH_SAME_POOL_BASELINES = {
+    "same_pool_random_selector",
+    "same_pool_reference_scorer",
+    "same_pool_physicochemical_scorer",
+}
+SUPPORTED_MECHANISMS = {*DEFAULT_MECHANISMS, *OPTIONAL_BASELINE_MECHANISMS, "cmdgd"}
+PH_SWITCH_GRAPH_ABLATIONS = (
+    "full",
+    "no_counterfactual_site_map",
+    "no_pair_programs",
+    "no_uncertainty",
+    "no_literature_transition_calibration",
+    "no_feasibility_gate",
+    "no_new_site_reserve",
+    "anchor_only_panel",
+    "new_site_only_panel",
+)
+PH_SWITCH_GRAPH_ABLATION_COMPONENTS = {
+    "full": "full_site_graph_search",
+    "no_counterfactual_site_map": "counterfactual_site_map",
+    "no_pair_programs": "pair_program_generator",
+    "no_uncertainty": "posterior_uncertainty_term",
+    "no_literature_transition_calibration": "literature_transition_calibration",
+    "no_feasibility_gate": "retention_feasibility_gate",
+    "no_new_site_reserve": "counterfactual_probe_selection_reserve",
+    "anchor_only_panel": "anchor_only_selection_boundary",
+    "new_site_only_panel": "new_site_only_selection_boundary",
+}
+PH_SWITCH_GRAPH_WEIGHT_SENSITIVITY_ABLATIONS = (
+    "full",
+    "weight_field_half",
+    "weight_field_double",
+    "weight_pair_half",
+    "weight_pair_double",
+    "weight_uncertainty_half",
+    "weight_uncertainty_double",
+    "weight_literature_transition_half",
+    "weight_literature_transition_double",
+    "weight_cost_double",
+    "weight_uniform_positive",
+)
+PH_SWITCH_GRAPH_WEIGHT_SENSITIVITY_COMPONENTS = {
+    "full": "reported_acquisition_weights",
+    "weight_field_half": "protonation_field_weight_x0.5",
+    "weight_field_double": "protonation_field_weight_x2",
+    "weight_pair_half": "pair_program_weight_x0.5",
+    "weight_pair_double": "pair_program_weight_x2",
+    "weight_uncertainty_half": "posterior_uncertainty_weight_x0.5",
+    "weight_uncertainty_double": "posterior_uncertainty_weight_x2",
+    "weight_literature_transition_half": "literature_transition_weight_x0.5",
+    "weight_literature_transition_double": "literature_transition_weight_x2",
+    "weight_cost_double": "cost_penalty_weight_x2",
+    "weight_uniform_positive": "uniform_positive_acquisition_weights",
+}
 STATISTICAL_METRICS = (
     "generated_novel_count",
     "generated_new_site_count",
@@ -120,7 +210,7 @@ BENCHMARK_COLUMNS = (
     "seed",
     "world_id",
     "mechanism",
-    "cmdgd_adapter",
+    "mechanism_adapter",
     "budget",
     "generation_budget",
     "observed_count",
@@ -153,6 +243,8 @@ BENCHMARK_COLUMNS = (
 SUMMARY_COLUMNS = (
     "mechanism",
     "world_id",
+    "world_control_type",
+    "world_stress_tags",
     "replicate_count",
     "mean_generated_novel_count",
     "mean_best_generated_utility",
@@ -205,7 +297,7 @@ ABLATION_COLUMNS = (
     "seed",
     "world_id",
     "mechanism",
-    "cmdgd_adapter",
+    "mechanism_adapter",
     "ablation",
     "ablation_type",
     "ablation_component",
@@ -234,6 +326,20 @@ ABLATION_COLUMNS = (
     "new_site_rate",
     "new_site_generation_required",
     "new_site_generation_capable",
+)
+MECHANISM_ALIAS_RESULT_COLUMNS = (*BENCHMARK_COLUMNS, "best_feasible_utility")
+MECHANISM_ALIAS_SUMMARY_COLUMNS = (
+    *SUMMARY_COLUMNS,
+    "mean_best_feasible_utility",
+    "majority_win_vs_random_feasible",
+    "majority_win_vs_fixed_mix",
+    "key_ablation_delta",
+    "architecture_clone",
+)
+MECHANISM_ALIAS_ABLATION_COLUMNS = (
+    *ABLATION_COLUMNS,
+    "best_feasible_utility",
+    "delta_from_full_best_feasible_utility",
 )
 EXAMPLE_COLUMNS = (
     "seed",
@@ -270,6 +376,26 @@ CANDIDATE_VISIBLE_FIELDS = (
     "numeric_features",
     "risk_flags",
     "mechanism_tags",
+    "operator",
+    "parent_ids",
+    "source_refs",
+    "uses_de_novo_site_proposal",
+    "de_novo_site_edit_ids",
+    "design_context",
+    "pcig_trace",
+)
+CANDIDATE_MECHANISM_ANNOTATION_FIELDS = frozenset(
+    {
+        "operator",
+        "parent_ids",
+        "source_refs",
+        "uses_de_novo_site_proposal",
+        "de_novo_site_edit_ids",
+        "design_context",
+        "required_endpoints",
+        "target_background",
+        "design_space",
+    }
 )
 CANDIDATE_FORBIDDEN_KEYS = frozenset(
     {
@@ -318,6 +444,8 @@ class SequenceWorldSpec:
     max_edits: int = 3
     visible_edit_tokens: tuple[str, ...] = ()
     new_site_target_tokens: tuple[str, ...] = ()
+    control_type: str = "benchmark_world"
+    stress_tags: tuple[str, ...] = ()
 
 
 def run_generative_benchmark(
@@ -328,6 +456,7 @@ def run_generative_benchmark(
     worlds: Iterable[str] | str | None = None,
     budget: int = DEFAULT_BUDGET,
     generation_budget: int = DEFAULT_GENERATION_BUDGET,
+    max_edits_per_candidate: int | None = None,
 ) -> dict[str, Any]:
     """Run a deterministic benchmark for algorithms that generate new sequences."""
 
@@ -335,6 +464,8 @@ def run_generative_benchmark(
         raise ValueError("budget must be positive")
     if generation_budget <= 0:
         raise ValueError("generation_budget must be positive")
+    if max_edits_per_candidate is not None and max_edits_per_candidate <= 0:
+        raise ValueError("max_edits_per_candidate must be positive when provided")
     seed_values = [int(seed) for seed in seeds]
     if not seed_values:
         raise ValueError("seeds must contain at least one seed")
@@ -347,7 +478,7 @@ def run_generative_benchmark(
 
     benchmark_rows: list[dict[str, Any]] = []
     example_rows: list[dict[str, Any]] = []
-    trial_cache: dict[tuple[str, int, str, str], dict[str, Any]] = {}
+    trial_cache: dict[tuple[str, int, str, str, str], dict[str, Any]] = {}
 
     for world in world_specs:
         for seed in seed_values:
@@ -359,22 +490,26 @@ def run_generative_benchmark(
                     mechanism=mechanism,
                     budget=budget,
                     generation_budget=generation_budget,
+                    max_edits_per_candidate=max_edits_per_candidate,
                     ablation="full",
                 )
                 benchmark_rows.append(_project_row(result, BENCHMARK_COLUMNS))
                 example_rows.extend(
                     _example_rows_from_trial(
                         result,
-                        max_examples=4 if mechanism == "cmdgd" else 2,
+                        max_examples=4 if mechanism in {"cmdgd", "ph_switch_graph"} else 2,
                     )
                 )
 
     summary_rows = _summary_rows(benchmark_rows)
-    statistical_summary_rows = _statistical_summary_rows(benchmark_rows)
-    pairwise_comparison_rows = _pairwise_comparison_rows(benchmark_rows)
     selection_gate_report = _selection_gate_report(summary_rows)
     selected_mechanism = str(selection_gate_report["selected_mechanism"])
     selected_passes_gate = bool(selection_gate_report["selected_passes_gate"])
+    statistical_summary_rows = _statistical_summary_rows(benchmark_rows)
+    pairwise_comparison_rows = _pairwise_comparison_rows(
+        benchmark_rows,
+        mechanism=selected_mechanism or _default_pairwise_mechanism(mechanism_names),
+    )
     summary_rows = _annotate_summary_selection(summary_rows, selection_gate_report)
     ablation_rows = _ablation_rows(
         trial_cache,
@@ -382,12 +517,24 @@ def run_generative_benchmark(
         seeds=seed_values,
         budget=budget,
         generation_budget=generation_budget,
+        max_edits_per_candidate=max_edits_per_candidate,
         include_cmdgd="cmdgd" in mechanism_names,
+        include_ph_switch_graph="ph_switch_graph" in mechanism_names,
+    )
+    weight_sensitivity_rows = _weight_sensitivity_rows(
+        trial_cache,
+        world_specs=world_specs,
+        seeds=seed_values,
+        budget=budget,
+        generation_budget=generation_budget,
+        max_edits_per_candidate=max_edits_per_candidate,
+        include_ph_switch_graph="ph_switch_graph" in mechanism_names,
     )
 
     benchmark_path = run_dir / "generative_benchmark_results.csv"
     summary_path = run_dir / "generative_benchmark_summary.csv"
     ablation_path = run_dir / "generative_ablation_results.csv"
+    weight_sensitivity_path = run_dir / "generative_weight_sensitivity.csv"
     examples_path = run_dir / "generative_design_examples.csv"
     statistical_summary_path = run_dir / "generative_statistical_summary.csv"
     pairwise_comparison_path = run_dir / "generative_pairwise_comparisons.csv"
@@ -403,6 +550,11 @@ def run_generative_benchmark(
         "mechanisms": mechanism_names,
         "budget": int(budget),
         "generation_budget": int(generation_budget),
+        "max_edits_per_candidate": (
+            int(max_edits_per_candidate)
+            if max_edits_per_candidate is not None
+            else None
+        ),
         "base_sequences": {
             world.world_id: {
                 "heavy": world.base_heavy_sequence,
@@ -410,14 +562,42 @@ def run_generative_benchmark(
             }
             for world in world_specs
         },
+        "world_metadata": {
+            world.world_id: _world_config_metadata(world) for world in world_specs
+        },
         "metrics": [
             *STATISTICAL_METRICS,
         ],
         "statistical_artifacts": {
             "summary": "generative_statistical_summary.csv",
             "pairwise_comparisons": "generative_pairwise_comparisons.csv",
+            "weight_sensitivity": "generative_weight_sensitivity.csv",
             "ci_method": "normal_approximation_1.96_times_sem",
-            "paired_delta_direction": "cmdgd_minus_baseline",
+            "paired_delta_direction": f"{selected_mechanism or 'selected_mechanism'}_minus_baseline",
+        },
+        "weight_sensitivity": {
+            "purpose": (
+                "Tests whether the selected pH-Switch Graph conclusions are robust "
+                "to acquisition-weight perturbations rather than a single hand-set "
+                "weight vector."
+            ),
+            "scenarios": list(PH_SWITCH_GRAPH_WEIGHT_SENSITIVITY_ABLATIONS),
+            "artifact": "generative_weight_sensitivity.csv",
+        },
+        "strong_simple_baselines": {
+            "purpose": (
+                "Truth-blind reviewer stress baselines covering systematic "
+                "protonatable scans, charge-swap scans, same generated pool "
+                "physicochemical scoring, and combinatorial library enumeration."
+            ),
+            "mechanisms": [
+                "histidine_scan_baseline",
+                "protonatable_scan_baseline",
+                "charge_swap_scan_baseline",
+                "same_pool_physicochemical_scorer",
+                "combinatorial_library_baseline",
+            ],
+            "selector_inputs_exclude_oracle_truth": True,
         },
         "new_site_generation": {
             "definition": (
@@ -456,16 +636,24 @@ def run_generative_benchmark(
     _write_csv(benchmark_path, benchmark_rows, BENCHMARK_COLUMNS)
     _write_csv(summary_path, summary_rows, SUMMARY_COLUMNS)
     _write_csv(ablation_path, ablation_rows, ABLATION_COLUMNS)
+    _write_csv(weight_sensitivity_path, weight_sensitivity_rows, ABLATION_COLUMNS)
     _write_csv(examples_path, example_rows, EXAMPLE_COLUMNS)
     _write_csv(statistical_summary_path, statistical_summary_rows, STATISTICAL_SUMMARY_COLUMNS)
     _write_csv(pairwise_comparison_path, pairwise_comparison_rows, PAIRWISE_COMPARISON_COLUMNS)
     _write_json(config_path, config)
     _write_json(gate_report_path, selection_gate_report)
+    mechanism_alias_paths = _write_v3_mechanism_alias_artifacts(
+        run_dir,
+        benchmark_rows=benchmark_rows,
+        summary_rows=summary_rows,
+        ablation_rows=ablation_rows,
+    )
 
     artifact_paths = {
         "benchmark_results": str(benchmark_path),
         "benchmark_summary": str(summary_path),
         "ablation_results": str(ablation_path),
+        "weight_sensitivity": str(weight_sensitivity_path),
         "design_examples": str(examples_path),
         "statistical_summary": str(statistical_summary_path),
         "pairwise_comparisons": str(pairwise_comparison_path),
@@ -479,6 +667,7 @@ def run_generative_benchmark(
         "benchmark_results_path": str(benchmark_path),
         "summary_results_path": str(summary_path),
         "ablation_results_path": str(ablation_path),
+        "weight_sensitivity_path": str(weight_sensitivity_path),
         "design_examples_path": str(examples_path),
         "statistical_summary_path": str(statistical_summary_path),
         "pairwise_comparisons_path": str(pairwise_comparison_path),
@@ -487,11 +676,15 @@ def run_generative_benchmark(
         "generative_benchmark_results_path": str(benchmark_path),
         "generative_benchmark_summary_path": str(summary_path),
         "generative_ablation_results_path": str(ablation_path),
+        "generative_weight_sensitivity_path": str(weight_sensitivity_path),
         "generative_design_examples_path": str(examples_path),
         "generative_statistical_summary_path": str(statistical_summary_path),
         "generative_pairwise_comparisons_path": str(pairwise_comparison_path),
         "generative_benchmark_config_path": str(config_path),
         "generative_selection_gate_report_path": str(gate_report_path),
+        "mechanism_benchmark_results_path": mechanism_alias_paths["mechanism_benchmark_results"],
+        "mechanism_benchmark_summary_path": mechanism_alias_paths["mechanism_benchmark_summary"],
+        "mechanism_ablation_results_path": mechanism_alias_paths["mechanism_ablation_results"],
         "selected_mechanism": selected_mechanism,
         "selected_passes_gate": selected_passes_gate,
         "selection_gate_report": selection_gate_report,
@@ -501,6 +694,185 @@ def run_generative_benchmark(
             "pairwise_comparisons": pairwise_comparison_rows,
             "selection_gate_report": selection_gate_report,
         },
+    }
+
+
+def _write_v3_mechanism_alias_artifacts(
+    run_dir: Path,
+    *,
+    benchmark_rows: Sequence[Mapping[str, Any]],
+    summary_rows: Sequence[Mapping[str, Any]],
+    ablation_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Write V3-compatible aliases for generative mechanism benchmark artifacts."""
+
+    result_path = run_dir / "mechanism_benchmark_results.csv"
+    summary_path = run_dir / "mechanism_benchmark_summary.csv"
+    ablation_path = run_dir / "mechanism_ablation_results.csv"
+    result_rows = [_mechanism_alias_result_row(row) for row in benchmark_rows]
+    alias_summary_rows = _mechanism_alias_summary_rows(summary_rows, ablation_rows)
+    alias_ablation_rows = [_mechanism_alias_ablation_row(row) for row in ablation_rows]
+    _write_csv(result_path, result_rows, MECHANISM_ALIAS_RESULT_COLUMNS)
+    _write_csv(summary_path, alias_summary_rows, MECHANISM_ALIAS_SUMMARY_COLUMNS)
+    _write_csv(ablation_path, alias_ablation_rows, MECHANISM_ALIAS_ABLATION_COLUMNS)
+    return {
+        "mechanism_benchmark_results": str(result_path),
+        "mechanism_benchmark_summary": str(summary_path),
+        "mechanism_ablation_results": str(ablation_path),
+    }
+
+
+def _mechanism_alias_result_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    out = _project_row(row, BENCHMARK_COLUMNS)
+    out["best_feasible_utility"] = out.get("best_selected_utility", "")
+    return out
+
+
+def _mechanism_alias_ablation_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    out = _project_row(row, ABLATION_COLUMNS)
+    out["best_feasible_utility"] = out.get("best_selected_utility", "")
+    out["delta_from_full_best_feasible_utility"] = out.get(
+        "delta_from_full_best_selected_utility",
+        "",
+    )
+    return out
+
+
+def _mechanism_alias_summary_rows(
+    summary_rows: Sequence[Mapping[str, Any]],
+    ablation_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    by_key = {
+        (str(row.get("mechanism")), str(row.get("world_id"))): row
+        for row in summary_rows
+    }
+    world_ids = sorted(
+        {
+            str(row.get("world_id"))
+            for row in summary_rows
+            if row.get("world_id") not in (None, "", "overall")
+        }
+    )
+    out: list[dict[str, Any]] = []
+    for row in summary_rows:
+        mechanism = str(row.get("mechanism", ""))
+        world_id = str(row.get("world_id", ""))
+        alias = _project_row(row, SUMMARY_COLUMNS)
+        alias["mean_best_feasible_utility"] = alias.get("mean_best_selected_utility", "")
+        alias["architecture_clone"] = "false"
+        if world_id == "overall":
+            alias["majority_win_vs_random_feasible"] = _bool_text(
+                _majority_world_win(by_key, world_ids, mechanism, "random_feasible")
+            )
+            alias["majority_win_vs_fixed_mix"] = _bool_text(
+                _majority_world_win(by_key, world_ids, mechanism, "fixed_mix")
+            )
+            alias["key_ablation_delta"] = _round_metric(
+                _generative_key_ablation_delta(ablation_rows, mechanism)
+            )
+        else:
+            alias["majority_win_vs_random_feasible"] = ""
+            alias["majority_win_vs_fixed_mix"] = ""
+            alias["key_ablation_delta"] = ""
+        out.append(alias)
+    return out
+
+
+def _majority_world_win(
+    rows_by_key: Mapping[tuple[str, str], Mapping[str, Any]],
+    world_ids: Sequence[str],
+    mechanism: str,
+    baseline: str,
+) -> bool:
+    comparisons = 0
+    wins = 0
+    for world_id in world_ids:
+        row = rows_by_key.get((mechanism, world_id))
+        baseline_row = rows_by_key.get((baseline, world_id))
+        if row is None or baseline_row is None:
+            continue
+        comparisons += 1
+        if _to_float(row.get("mean_best_selected_utility"), 0.0) > _to_float(
+            baseline_row.get("mean_best_selected_utility"),
+            0.0,
+        ):
+            wins += 1
+    return bool(comparisons and wins > comparisons / 2)
+
+
+def _generative_key_ablation_delta(
+    ablation_rows: Sequence[Mapping[str, Any]],
+    mechanism: str,
+) -> float:
+    full_values: list[float] = []
+    ablated_values: list[float] = []
+    full_new_site_counts: list[float] = []
+    ablated_new_site_counts_by_ablation: dict[str, list[float]] = {}
+    for row in ablation_rows:
+        if str(row.get("mechanism")) != mechanism:
+            continue
+        value = _optional_float(row.get("best_selected_utility"))
+        if str(row.get("ablation")) == "full":
+            if value is not None:
+                full_values.append(value)
+            new_site_count = _optional_float(row.get("generated_new_site_count"))
+            if new_site_count is not None:
+                full_new_site_counts.append(new_site_count)
+        else:
+            if value is not None:
+                ablated_values.append(value)
+            ablation = str(row.get("ablation") or "")
+            new_site_count = _optional_float(row.get("generated_new_site_count"))
+            if ablation and new_site_count is not None:
+                ablated_new_site_counts_by_ablation.setdefault(ablation, []).append(new_site_count)
+    utility_delta = max(0.0, mean(full_values) - min(ablated_values)) if full_values and ablated_values else 0.0
+    candidate_space_delta = 0.0
+    if full_new_site_counts and ablated_new_site_counts_by_ablation:
+        full_new_site_mean = mean(full_new_site_counts)
+        min_ablated_new_site_mean = min(mean(values) for values in ablated_new_site_counts_by_ablation.values())
+        if full_new_site_mean > 0:
+            candidate_space_delta = max(0.0, (full_new_site_mean - min_ablated_new_site_mean) / full_new_site_mean)
+    return max(utility_delta, candidate_space_delta)
+
+
+def _bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _world_config_metadata(world: SequenceWorldSpec) -> dict[str, Any]:
+    tags = tuple(str(tag) for tag in world.stress_tags)
+    return {
+        "description": world.description,
+        "control_type": str(world.control_type),
+        "stress_tags": list(tags),
+        "base_heavy_length": len(world.base_heavy_sequence),
+        "base_light_length": len(world.base_light_sequence),
+        "full_length_antibody_background": (
+            len(world.base_heavy_sequence) >= 100 and len(world.base_light_sequence) >= 100
+        ),
+        "anti_prior_negative_control": (
+            str(world.control_type) == "negative_control" and "anti_prior" in tags
+        ),
+        "new_site_generation_required": bool(world.new_site_target_tokens),
+    }
+
+
+def _world_summary_fields(world_id: str) -> dict[str, Any]:
+    if world_id == "overall":
+        return {
+            "world_control_type": "mixed",
+            "world_stress_tags": [],
+        }
+    try:
+        metadata = _world_config_metadata(_world_by_id(world_id))
+    except ValueError:
+        return {
+            "world_control_type": "",
+            "world_stress_tags": [],
+        }
+    return {
+        "world_control_type": metadata["control_type"],
+        "world_stress_tags": metadata["stress_tags"],
     }
 
 
@@ -515,16 +887,23 @@ def generate_synthetic_sequence_world(
 
 
 def _run_cached_trial(
-    cache: dict[tuple[str, int, str, str], dict[str, Any]],
+    cache: dict[tuple[str, int, str, str, str], dict[str, Any]],
     *,
     world: SequenceWorldSpec,
     seed: int,
     mechanism: str,
     budget: int,
     generation_budget: int,
+    max_edits_per_candidate: int | None,
     ablation: str,
 ) -> dict[str, Any]:
-    key = (world.world_id, int(seed), mechanism, ablation)
+    key = (
+        world.world_id,
+        int(seed),
+        mechanism,
+        ablation,
+        str(max_edits_per_candidate or ""),
+    )
     if key not in cache:
         cache[key] = _run_trial(
             world=world,
@@ -532,6 +911,7 @@ def _run_cached_trial(
             mechanism=mechanism,
             budget=budget,
             generation_budget=generation_budget,
+            max_edits_per_candidate=max_edits_per_candidate,
             ablation=ablation,
         )
     return cache[key]
@@ -544,6 +924,7 @@ def _run_trial(
     mechanism: str,
     budget: int,
     generation_budget: int,
+    max_edits_per_candidate: int | None,
     ablation: str,
 ) -> dict[str, Any]:
     records = _all_world_records(world, seed)
@@ -564,9 +945,20 @@ def _run_trial(
 
     try:
         rng = random.Random(_stable_seed(seed, world.world_id, mechanism, ablation))
-        context = _design_context(world, observed, seed, generation_budget, ablation)
+        context = _design_context(
+            world,
+            observed,
+            seed,
+            generation_budget,
+            ablation,
+            max_edits_per_candidate=max_edits_per_candidate,
+        )
         state = _fit_state_for_mechanism(mechanism, observed, context, rng)
-        adapter = str(state.get("cmdgd_adapter", "local")) if isinstance(state, Mapping) else "local"
+        adapter = (
+            str(state.get("mechanism_adapter") or state.get("cmdgd_adapter") or "local")
+            if isinstance(state, Mapping)
+            else "local"
+        )
         raw_generated, generation_counted = _generate_for_mechanism(
             mechanism,
             world,
@@ -655,7 +1047,7 @@ def _run_trial(
         "seed": int(seed),
         "world_id": world.world_id,
         "mechanism": mechanism,
-        "cmdgd_adapter": adapter if mechanism == "cmdgd" else "",
+        "mechanism_adapter": adapter,
         "budget": int(budget),
         "generation_budget": int(generation_budget),
         "observed_count": len(observed),
@@ -692,6 +1084,56 @@ def _fit_state_for_mechanism(
     rng: random.Random,
 ) -> dict[str, Any]:
     reference_state = _fit_reference_state(observed, context)
+    if mechanism == "ph_switch_graph" or mechanism in PH_SWITCH_GRAPH_SAME_POOL_BASELINES:
+        module = _load_pcig_module()
+        if module is None:
+            raise RuntimeError("design_scientist.algorithms.pcig is not importable")
+        lifecycle = _pcig_lifecycle(module)
+        if lifecycle is not None and callable(getattr(lifecycle, "fit_state", None)):
+            lifecycle_state = _try_call(
+                getattr(lifecycle, "fit_state"),
+                ((dict(context),),),
+                {"context": dict(context), "state": dict(context)},
+            )
+            if lifecycle_state is not None:
+                return {
+                    "reference_state": reference_state,
+                    "external_state": lifecycle_state,
+                    "external_lifecycle": lifecycle,
+                    "external_module": module,
+                    "observed_records": list(observed),
+                    "cmdgd_adapter": "",
+                    "mechanism_adapter": (
+                        "design_scientist.algorithms.pcig.PCIGLifecycle"
+                        if mechanism == "ph_switch_graph"
+                        else f"same_pool_baseline:{mechanism}:design_scientist.algorithms.pcig.PCIGLifecycle"
+                    ),
+                }
+        fit_state = getattr(module, "fit_state", None)
+        if callable(fit_state):
+            external_state = fit_state(
+                base_heavy_chain_seq=str(context["base_heavy_chain_seq"]),
+                base_light_chain_seq=str(context["base_light_chain_seq"]),
+                observed_variants=list(observed),
+                observed_endpoints=[],
+                candidate_edit_vocabulary=list(context.get("edit_vocabulary", [])),
+                observed_mutation_sites=list(context.get("observed_mutation_sites", [])),
+                visible_mutation_sites=list(context.get("visible_mutation_sites", [])),
+                config=context.get("config", {}),
+            )
+            return {
+                "reference_state": reference_state,
+                "external_state": {"algorithm_state": external_state, **dict(context)},
+                "external_module": module,
+                "observed_records": list(observed),
+                "cmdgd_adapter": "",
+                "mechanism_adapter": (
+                    "design_scientist.algorithms.pcig.fit_state"
+                    if mechanism == "ph_switch_graph"
+                    else f"same_pool_baseline:{mechanism}:design_scientist.algorithms.pcig.fit_state"
+                ),
+            }
+        raise RuntimeError("ph_switch_graph does not expose a V3 lifecycle or fit_state")
     if mechanism != "cmdgd":
         return {
             "reference_state": reference_state,
@@ -792,6 +1234,34 @@ def _generate_for_mechanism(
 ) -> tuple[list[Mapping[str, Any]], bool]:
     if ablation in CMDGD_BENCHMARK_BOUNDARY_ABLATIONS:
         return _fixed_pool_candidates(world, observed, "cmdgd_benchmark_no_generation_boundary"), False
+    if mechanism == "ph_switch_graph" or mechanism in PH_SWITCH_GRAPH_SAME_POOL_BASELINES:
+        lifecycle = state.get("external_lifecycle")
+        module = state.get("external_module")
+        external_state = state.get("external_state")
+        if lifecycle is not None and callable(getattr(lifecycle, "generate_candidates", None)):
+            generated = _try_call(
+                getattr(lifecycle, "generate_candidates"),
+                ((external_state,),),
+                {"state": external_state},
+            )
+            if generated is not None:
+                return list(generated)[:generation_budget], True
+        if module is not None and callable(getattr(module, "generate_candidates", None)):
+            generated = _try_call(
+                getattr(module, "generate_candidates"),
+                (
+                    (external_state, generation_budget),
+                    (external_state,),
+                ),
+                {
+                    "state": external_state,
+                    "max_candidates": generation_budget,
+                    "rng": rng,
+                },
+            )
+            if generated is not None:
+                return list(generated)[:generation_budget], True
+        raise RuntimeError("ph_switch_graph did not generate candidates")
     if mechanism == "cmdgd":
         lifecycle = state.get("external_lifecycle")
         module = state.get("external_module")
@@ -824,6 +1294,16 @@ def _generate_for_mechanism(
         return _reference_cmdgd_generate(world, observed, state, generation_budget, ablation), True
     if mechanism == "random_edit_generator":
         return _random_edit_generate(world, observed, rng, generation_budget), True
+    if mechanism == "histidine_scan_baseline":
+        return _histidine_scan_generate(world, observed, generation_budget), True
+    if mechanism == "protonatable_scan_baseline":
+        return _protonatable_scan_generate(world, observed, generation_budget), True
+    if mechanism == "charge_swap_scan_baseline":
+        return _charge_swap_scan_generate(world, observed, generation_budget), True
+    if mechanism == "random_new_site_scan":
+        return _random_new_site_scan_generate(world, observed, rng, generation_budget), True
+    if mechanism == "combinatorial_library_baseline":
+        return _combinatorial_library_generate(world, observed, generation_budget), True
     if mechanism == "observed_recombination_baseline":
         return _observed_recombination_generate(world, observed, generation_budget), True
     if mechanism == "single_edit_scan":
@@ -842,7 +1322,72 @@ def _score_candidates_for_mechanism(
     state: Mapping[str, Any],
     ablation: str,
 ) -> list[dict[str, Any]]:
-    del budget, rng
+    del budget
+    if mechanism == "ph_switch_graph":
+        lifecycle = state.get("external_lifecycle")
+        module = state.get("external_module")
+        external_state = state.get("external_state")
+        if lifecycle is not None and callable(getattr(lifecycle, "score_candidates", None)):
+            scored = _try_call(
+                getattr(lifecycle, "score_candidates"),
+                ((external_state, list(candidates)),),
+                {
+                    "state": external_state,
+                    "candidates": list(candidates),
+                    "candidate_records": list(candidates),
+                },
+            )
+            if scored is not None:
+                return _coerce_scored_candidates(scored, candidates)
+        if module is not None and callable(getattr(module, "score_candidates", None)):
+            scored = _try_call(
+                getattr(module, "score_candidates"),
+                ((external_state, list(candidates)),),
+                {
+                    "state": external_state,
+                    "candidates": list(candidates),
+                    "candidate_records": list(candidates),
+                },
+            )
+            if scored is not None:
+                return _coerce_scored_candidates(scored, candidates)
+        return _reference_score_candidates(candidates, state, ablation)
+    if mechanism == "same_pool_random_selector":
+        rows = [dict(candidate) for candidate in candidates]
+        for row in rows:
+            row["score"] = _round_metric(rng.random())
+            row["score_components"] = {
+                "same_pool_baseline": "random_selector",
+                "pcig_candidate_pool_reused": True,
+                "oracle_truth_visible": False,
+            }
+        return rows
+    if mechanism == "same_pool_reference_scorer":
+        rows = _reference_score_candidates(candidates, state, ablation)
+        for row in rows:
+            components = row.get("score_components")
+            if not isinstance(components, dict):
+                components = {}
+            row["score_components"] = {
+                **components,
+                "same_pool_baseline": "reference_scorer",
+                "pcig_candidate_pool_reused": True,
+                "oracle_truth_visible": False,
+            }
+        return rows
+    if mechanism == "same_pool_physicochemical_scorer":
+        rows = _score_physicochemical_candidates(candidates, mechanism=mechanism)
+        for row in rows:
+            components = row.get("score_components")
+            if not isinstance(components, dict):
+                components = {}
+            row["score_components"] = {
+                **components,
+                "same_pool_baseline": "physicochemical_scorer",
+                "pcig_candidate_pool_reused": True,
+                "oracle_truth_visible": False,
+            }
+        return rows
     if mechanism == "cmdgd":
         lifecycle = state.get("external_lifecycle")
         module = state.get("external_module")
@@ -883,6 +1428,12 @@ def _score_candidates_for_mechanism(
         return _score_mccbd_pool(observed, candidates)
     if mechanism == "evidence_calibrated_ucb":
         return _score_evidence_calibrated_ucb(observed, candidates)
+    if mechanism in {
+        "protonatable_scan_baseline",
+        "charge_swap_scan_baseline",
+        "combinatorial_library_baseline",
+    }:
+        return _score_physicochemical_candidates(candidates, mechanism=mechanism)
     if mechanism == "random_edit_generator":
         return [dict(candidate) for candidate in candidates]
     return _reference_score_candidates(candidates, state, ablation)
@@ -902,6 +1453,57 @@ def _select_panel_for_mechanism(
         return []
     state_mapping = state if isinstance(state, Mapping) else {}
     observed_records = list(state_mapping.get("observed_records", observed))
+    if mechanism == "ph_switch_graph":
+        lifecycle = state_mapping.get("external_lifecycle")
+        module = state_mapping.get("external_module")
+        external_state = state_mapping.get("external_state")
+        if lifecycle is not None and callable(getattr(lifecycle, "select_panel", None)):
+            selected = _try_call(
+                getattr(lifecycle, "select_panel"),
+                (
+                    (external_state, list(candidates), budget, rng),
+                    (external_state, list(candidates), budget),
+                ),
+                {
+                    "state": external_state,
+                    "observed": observed_records,
+                    "observed_records": observed_records,
+                    "candidates": list(candidates),
+                    "scored_candidates": list(candidates),
+                    "budget": budget,
+                    "rng": rng,
+                },
+            )
+            if selected is not None:
+                return [str(item) if not isinstance(item, Mapping) else str(item.get("candidate_id") or item.get("variant_id")) for item in selected]
+        if module is not None and callable(getattr(module, "select_panel", None)):
+            selected = _try_call(
+                getattr(module, "select_panel"),
+                (
+                    (external_state, list(candidates), budget, rng),
+                    (list(candidates), budget, rng),
+                ),
+                {
+                    "state": external_state,
+                    "observed": observed_records,
+                    "observed_records": observed_records,
+                    "candidates": list(candidates),
+                    "scored_candidates": list(candidates),
+                    "budget": budget,
+                    "rng": rng,
+                },
+            )
+            if selected is not None:
+                return [str(item) if not isinstance(item, Mapping) else str(item.get("candidate_id") or item.get("variant_id")) for item in selected]
+        return _greedy_score_select(candidates, budget, diversity=True)
+    if mechanism == "same_pool_random_selector":
+        shuffled = list(candidates)
+        rng.shuffle(shuffled)
+        return _resolve_selected(shuffled, shuffled, budget)
+    if mechanism == "same_pool_reference_scorer":
+        return _greedy_score_select(candidates, budget, diversity=True)
+    if mechanism == "same_pool_physicochemical_scorer":
+        return _greedy_score_select(candidates, budget, diversity=True)
     if mechanism == "cmdgd":
         lifecycle = state_mapping.get("external_lifecycle")
         module = state_mapping.get("external_module")
@@ -950,6 +1552,18 @@ def _select_panel_for_mechanism(
         shuffled = list(candidates)
         rng.shuffle(shuffled)
         return _resolve_selected(shuffled, shuffled, budget)
+    if mechanism == "random_new_site_scan":
+        shuffled = list(candidates)
+        rng.shuffle(shuffled)
+        return _resolve_selected(shuffled, shuffled, budget)
+    if mechanism == "histidine_scan_baseline":
+        return _greedy_score_select(candidates, budget, diversity=True)
+    if mechanism in {
+        "protonatable_scan_baseline",
+        "charge_swap_scan_baseline",
+        "combinatorial_library_baseline",
+    }:
+        return _greedy_score_select(candidates, budget, diversity=True)
     if mechanism == "random_feasible":
         return _policy_select("random_feasible", observed_records, candidates, budget, rng) or _random_feasible_select(
             candidates,
@@ -1036,7 +1650,11 @@ def _normalize_raw_candidate(
     candidate["heavy_sequence"] = heavy
     candidate["light_sequence"] = light
     candidate["sequence_hash"] = _sequence_hash(heavy, light)
+    for key in CANDIDATE_MECHANISM_ANNOTATION_FIELDS:
+        if key in raw:
+            candidate[key] = _copy_jsonable(raw[key])
     truth["variant_id"] = candidate_id
+    _assert_candidate_record_blind(candidate)
     return candidate, truth
 
 
@@ -1186,6 +1804,7 @@ def _summary_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             selected_eligible = (
                 world_id == "overall"
                 and mechanism not in BASELINE_MECHANISMS
+                and mechanism not in LEGACY_NONSELECTABLE_MECHANISMS
                 and not any(_to_bool(row.get("observed_reuse_only")) for row in mechanism_rows)
                 and not any(_to_bool(row.get("fixed_pool_only")) for row in mechanism_rows)
                 and _mean_metric(mechanism_rows, "generated_novel_count") > 0
@@ -1199,6 +1818,7 @@ def _summary_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 {
                     "mechanism": mechanism,
                     "world_id": world_id,
+                    **_world_summary_fields(world_id),
                     "replicate_count": len(mechanism_rows),
                     "mean_generated_novel_count": _mean_metric(mechanism_rows, "generated_novel_count"),
                     "mean_generated_new_site_count": _mean_metric(
@@ -1439,7 +2059,7 @@ def _select_winner(summary_rows: Sequence[Mapping[str, Any]]) -> tuple[str, bool
         reverse=True,
     )
     selected = str(ranked[0]["mechanism"])
-    return selected, selected == "cmdgd"
+    return selected, bool(selected)
 
 
 def _selection_gate_report(summary_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1514,7 +2134,8 @@ def _selection_gate_report(summary_rows: Sequence[Mapping[str, Any]]) -> dict[st
         "eligibility_rule": (
             "mean generated novel count and novel sequence rate must be positive; "
             "worlds requiring de novo site generation must have positive generated new-site count; "
-            "fixed-pool, observed-reuse-only, and benchmark baseline mechanisms are ineligible"
+            "fixed-pool, observed-reuse-only, benchmark baseline, and legacy rejected "
+            "mechanisms are ineligible"
         ),
         "utility_rank_basis": "mean_best_selected_utility",
         "utility_winner": utility_winner,
@@ -1556,17 +2177,34 @@ def _annotate_summary_selection(
 
 
 def _ablation_rows(
-    cache: dict[tuple[str, int, str, str], dict[str, Any]],
+    cache: dict[tuple[str, int, str, str, str], dict[str, Any]],
     *,
     world_specs: Sequence[SequenceWorldSpec],
     seeds: Sequence[int],
     budget: int,
     generation_budget: int,
+    max_edits_per_candidate: int | None,
     include_cmdgd: bool,
+    include_ph_switch_graph: bool,
 ) -> list[dict[str, Any]]:
-    if not include_cmdgd:
-        return []
     rows: list[dict[str, Any]] = []
+    if include_ph_switch_graph:
+        rows.extend(
+            _mechanism_ablation_rows(
+                cache,
+                world_specs=world_specs,
+                seeds=seeds,
+                budget=budget,
+                generation_budget=generation_budget,
+                max_edits_per_candidate=max_edits_per_candidate,
+                mechanism="ph_switch_graph",
+                ablations=PH_SWITCH_GRAPH_ABLATIONS,
+                components=PH_SWITCH_GRAPH_ABLATION_COMPONENTS,
+                ablation_type="ph_switch_graph_component",
+            )
+        )
+    if not include_cmdgd:
+        return rows
     for world in world_specs:
         for seed in seeds:
             full = _run_cached_trial(
@@ -1576,6 +2214,7 @@ def _ablation_rows(
                 mechanism="cmdgd",
                 budget=budget,
                 generation_budget=generation_budget,
+                max_edits_per_candidate=max_edits_per_candidate,
                 ablation="full",
             )
             full_best_generated = _optional_float(full.get("best_generated_utility"))
@@ -1588,6 +2227,7 @@ def _ablation_rows(
                     mechanism="cmdgd",
                     budget=budget,
                     generation_budget=generation_budget,
+                    max_edits_per_candidate=max_edits_per_candidate,
                     ablation=ablation,
                 )
                 result_best_generated = _optional_float(result.get("best_generated_utility"))
@@ -1598,6 +2238,94 @@ def _ablation_rows(
                     "ablation": ablation,
                     "ablation_type": _cmdgd_ablation_type(ablation),
                     "ablation_component": CMDGD_ABLATION_COMPONENTS.get(ablation, ablation),
+                    "delta_from_full_best_generated_utility": (
+                        _round_metric(full_best_generated - result_best_generated)
+                        if full_best_generated is not None and result_best_generated is not None
+                        else None
+                    ),
+                    "delta_from_full_best_selected_utility": (
+                        _round_metric(full_best_selected - result_best_selected)
+                        if full_best_selected is not None and result_best_selected is not None
+                        else None
+                    ),
+                }
+                rows.append(_project_row(row, ABLATION_COLUMNS))
+    return rows
+
+
+def _weight_sensitivity_rows(
+    cache: dict[tuple[str, int, str, str, str], dict[str, Any]],
+    *,
+    world_specs: Sequence[SequenceWorldSpec],
+    seeds: Sequence[int],
+    budget: int,
+    generation_budget: int,
+    max_edits_per_candidate: int | None,
+    include_ph_switch_graph: bool,
+) -> list[dict[str, Any]]:
+    if not include_ph_switch_graph:
+        return []
+    return _mechanism_ablation_rows(
+        cache,
+        world_specs=world_specs,
+        seeds=seeds,
+        budget=budget,
+        generation_budget=generation_budget,
+        max_edits_per_candidate=max_edits_per_candidate,
+        mechanism="ph_switch_graph",
+        ablations=PH_SWITCH_GRAPH_WEIGHT_SENSITIVITY_ABLATIONS,
+        components=PH_SWITCH_GRAPH_WEIGHT_SENSITIVITY_COMPONENTS,
+        ablation_type="ph_switch_graph_weight_sensitivity",
+    )
+
+
+def _mechanism_ablation_rows(
+    cache: dict[tuple[str, int, str, str, str], dict[str, Any]],
+    *,
+    world_specs: Sequence[SequenceWorldSpec],
+    seeds: Sequence[int],
+    budget: int,
+    generation_budget: int,
+    max_edits_per_candidate: int | None,
+    mechanism: str,
+    ablations: Sequence[str],
+    components: Mapping[str, str],
+    ablation_type: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for world in world_specs:
+        for seed in seeds:
+            full = _run_cached_trial(
+                cache,
+                world=world,
+                seed=seed,
+                mechanism=mechanism,
+                budget=budget,
+                generation_budget=generation_budget,
+                max_edits_per_candidate=max_edits_per_candidate,
+                ablation="full",
+            )
+            full_best_generated = _optional_float(full.get("best_generated_utility"))
+            full_best_selected = _optional_float(full.get("best_selected_utility"))
+            for ablation in ablations:
+                result = _run_cached_trial(
+                    cache,
+                    world=world,
+                    seed=seed,
+                    mechanism=mechanism,
+                    budget=budget,
+                    generation_budget=generation_budget,
+                    max_edits_per_candidate=max_edits_per_candidate,
+                    ablation=ablation,
+                )
+                result_best_generated = _optional_float(result.get("best_generated_utility"))
+                result_best_selected = _optional_float(result.get("best_selected_utility"))
+                row = {
+                    **result,
+                    "mechanism": mechanism,
+                    "ablation": ablation,
+                    "ablation_type": ablation_type,
+                    "ablation_component": components.get(ablation, ablation),
                     "delta_from_full_best_generated_utility": (
                         _round_metric(full_best_generated - result_best_generated)
                         if full_best_generated is not None and result_best_generated is not None
@@ -1673,6 +2401,40 @@ def _examples_payload(
     return sorted(rows, key=lambda row: (not bool(row["selected"]), str(row["candidate_id"])))
 
 
+def _raw_candidate_from_edit_set(
+    world: SequenceWorldSpec,
+    edit_tokens: Sequence[str],
+    generation_source: str,
+    **annotations: Any,
+) -> dict[str, Any]:
+    heavy, light = _apply_generation_edits(world, edit_tokens)
+    return {
+        "edit_tokens": list(edit_tokens),
+        "generation_source": generation_source,
+        "heavy_sequence": heavy,
+        "light_sequence": light,
+        **{key: _copy_jsonable(value) for key, value in annotations.items()},
+    }
+
+
+def _apply_generation_edits(
+    world: SequenceWorldSpec,
+    edit_tokens: Sequence[str],
+) -> tuple[str, str]:
+    heavy = list(world.base_heavy_sequence)
+    light = list(world.base_light_sequence)
+    for token in edit_tokens:
+        fields = _edit_fields_from_token(str(token))
+        if fields is None:
+            continue
+        chain, position, residue = fields
+        target = heavy if chain == "H" else light
+        index = int(position) - 1
+        if 0 <= index < len(target) and residue:
+            target[index] = residue[0]
+    return "".join(heavy), "".join(light)
+
+
 def _reference_cmdgd_generate(
     world: SequenceWorldSpec,
     observed: Sequence[Mapping[str, Any]],
@@ -1720,7 +2482,7 @@ def _reference_cmdgd_generate(
                 continue
             if len(set(edit_set) & set(world.risky_edits)) >= 2:
                 continue
-            candidates.append({"edit_tokens": list(edit_set), "generation_source": "cmdgd"})
+            candidates.append(_raw_candidate_from_edit_set(world, edit_set, "cmdgd"))
             if len(candidates) >= generation_budget:
                 return candidates
     return candidates[:generation_budget]
@@ -1744,8 +2506,161 @@ def _random_edit_generate(
             continue
         if len(edit_set) > world.max_edits:
             continue
-        candidates.append({"edit_tokens": list(edit_set), "generation_source": "random_edit"})
+        candidates.append(_raw_candidate_from_edit_set(world, edit_set, "random_edit"))
     return candidates
+
+
+def _histidine_scan_generate(
+    world: SequenceWorldSpec,
+    observed: Sequence[Mapping[str, Any]],
+    generation_budget: int,
+) -> list[dict[str, Any]]:
+    observed_sets = {tuple(sorted(_edit_tokens(row))) for row in observed}
+    histidine_tokens = [
+        edit.token
+        for edit in _edit_vocabulary()
+        if edit.residue == "H"
+        and (edit.token in _world_visible_edit_tokens(world) or edit.token in DEFAULT_HIDDEN_DE_NOVO_EDIT_TOKENS)
+    ]
+    histidine_tokens.extend(
+        token
+        for token in sorted(DEFAULT_HIDDEN_DE_NOVO_EDIT_TOKENS)
+        if _target_residue(token) == "H"
+    )
+    candidates = []
+    for token in sorted(dict.fromkeys(histidine_tokens)):
+        edit_set = (token,)
+        if edit_set in observed_sets:
+            continue
+        candidates.append(_raw_candidate_from_edit_set(world, edit_set, "histidine_scan"))
+        if len(candidates) >= generation_budget:
+            break
+    return candidates
+
+
+def _protonatable_scan_generate(
+    world: SequenceWorldSpec,
+    observed: Sequence[Mapping[str, Any]],
+    generation_budget: int,
+) -> list[dict[str, Any]]:
+    observed_sets = {tuple(sorted(_edit_tokens(row))) for row in observed}
+    tokens = _ranked_scan_tokens(
+        world,
+        allowed_residues=PROTONATABLE_SCAN_RESIDUES,
+        include_hidden_de_novo=True,
+    )
+    return _scan_candidate_library(
+        world,
+        observed_sets,
+        tokens,
+        generation_budget,
+        generation_source="protonatable_scan",
+        widths=(1, 2),
+    )
+
+
+def _charge_swap_scan_generate(
+    world: SequenceWorldSpec,
+    observed: Sequence[Mapping[str, Any]],
+    generation_budget: int,
+) -> list[dict[str, Any]]:
+    observed_sets = {tuple(sorted(_edit_tokens(row))) for row in observed}
+    tokens = _ranked_scan_tokens(
+        world,
+        allowed_residues=CHARGE_SWAP_RESIDUES,
+        include_hidden_de_novo=True,
+    )
+    acidic = [token for token in tokens if _target_residue(token) in ACIDIC_RESIDUES]
+    basic = [token for token in tokens if _target_residue(token) in BASIC_RESIDUES]
+    charge_pairs = [
+        tuple(sorted((left, right)))
+        for left in acidic
+        for right in basic
+        if left != right
+    ]
+    ordered_sets = [(token,) for token in tokens]
+    ordered_sets.extend(_dedupe_edit_sets(charge_pairs))
+    ordered_sets.extend(
+        tuple(sorted(combo))
+        for combo in combinations(tokens[:8], 2)
+        if tuple(sorted(combo)) not in charge_pairs
+    )
+    return _candidate_rows_from_ordered_sets(
+        world,
+        observed_sets,
+        ordered_sets,
+        generation_budget,
+        generation_source="charge_swap_scan",
+    )
+
+
+def _random_new_site_scan_generate(
+    world: SequenceWorldSpec,
+    observed: Sequence[Mapping[str, Any]],
+    rng: random.Random,
+    generation_budget: int,
+) -> list[dict[str, Any]]:
+    observed_sets = {tuple(sorted(_edit_tokens(row))) for row in observed}
+    hidden_new_site_tokens = sorted(DEFAULT_HIDDEN_DE_NOVO_EDIT_TOKENS)
+    visible_anchor_tokens = [
+        edit.token
+        for edit in _visible_edit_specs(world)
+        if edit.annotation in {"contrast", "specificity", "stability"}
+        and edit.token not in set(world.risky_edits)
+    ]
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    attempts = 0
+    while len(candidates) < generation_budget and attempts < generation_budget * 30:
+        attempts += 1
+        new_token = rng.choice(hidden_new_site_tokens)
+        size = rng.choice([1, 2, 2, 3])
+        anchors = rng.sample(visible_anchor_tokens, min(max(size - 1, 0), len(visible_anchor_tokens)))
+        edit_set = tuple(sorted([new_token, *anchors]))
+        if edit_set in seen or edit_set in observed_sets or _has_conflicting_edits(edit_set):
+            continue
+        if len(edit_set) > world.max_edits:
+            continue
+        seen.add(edit_set)
+        candidates.append(_raw_candidate_from_edit_set(world, edit_set, "random_new_site_scan"))
+    return candidates
+
+
+def _combinatorial_library_generate(
+    world: SequenceWorldSpec,
+    observed: Sequence[Mapping[str, Any]],
+    generation_budget: int,
+) -> list[dict[str, Any]]:
+    observed_sets = {tuple(sorted(_edit_tokens(row))) for row in observed}
+    tokens = _ranked_scan_tokens(
+        world,
+        allowed_residues=PROTONATABLE_SCAN_RESIDUES | {"N", "S", "T", "Y"},
+        include_hidden_de_novo=True,
+    )
+    scored_sets: list[tuple[float, tuple[str, ...]]] = []
+    for width in (2, 3, 1):
+        for combo in combinations(tokens[:12], width):
+            edit_set = tuple(sorted(combo))
+            if edit_set in observed_sets or _has_conflicting_edits(edit_set):
+                continue
+            if len(edit_set) > world.max_edits:
+                continue
+            scored_sets.append((_physicochemical_edit_set_score(edit_set), edit_set))
+    ordered_sets = [
+        edit_set
+        for _score, edit_set in sorted(
+            scored_sets,
+            key=lambda item: (item[0], -len(item[1]), item[1]),
+            reverse=True,
+        )
+    ]
+    return _candidate_rows_from_ordered_sets(
+        world,
+        observed_sets,
+        ordered_sets,
+        generation_budget,
+        generation_source="combinatorial_library",
+    )
 
 
 def _observed_recombination_generate(
@@ -1763,7 +2678,9 @@ def _observed_recombination_generate(
                 continue
             if len(edit_set) > world.max_edits:
                 continue
-            candidates.append({"edit_tokens": list(edit_set), "generation_source": "observed_recombination"})
+            candidates.append(
+                _raw_candidate_from_edit_set(world, edit_set, "observed_recombination")
+            )
             if len(candidates) >= generation_budget:
                 return candidates
     return candidates
@@ -1780,7 +2697,7 @@ def _single_edit_scan_generate(
         edit_set = (edit.token,)
         if edit_set in observed_sets:
             continue
-        candidates.append({"edit_tokens": [edit.token], "generation_source": "single_edit_scan"})
+        candidates.append(_raw_candidate_from_edit_set(world, edit_set, "single_edit_scan"))
     return candidates[:generation_budget]
 
 
@@ -1797,8 +2714,190 @@ def _fixed_pool_candidates(
             edit_set = tuple(sorted(combo))
             if edit_set in observed_sets or _has_conflicting_edits(edit_set):
                 continue
-            candidates.append({"edit_tokens": list(edit_set), "generation_source": source})
+            candidates.append(_raw_candidate_from_edit_set(world, edit_set, source))
     return candidates
+
+
+def _ranked_scan_tokens(
+    world: SequenceWorldSpec,
+    *,
+    allowed_residues: frozenset[str],
+    include_hidden_de_novo: bool,
+) -> list[str]:
+    tokens = [
+        edit.token
+        for edit in _edit_vocabulary()
+        if edit.token in _world_visible_edit_tokens(world)
+        and _target_residue(edit.token) in allowed_residues
+    ]
+    if include_hidden_de_novo:
+        tokens.extend(
+            token
+            for token in sorted(DEFAULT_HIDDEN_DE_NOVO_EDIT_TOKENS)
+            if _target_residue(token) in allowed_residues
+        )
+    return sorted(
+        _dedupe(tokens),
+        key=lambda token: (
+            _physicochemical_token_score(token),
+            _target_residue(token) == "H",
+            token,
+        ),
+        reverse=True,
+    )
+
+
+def _scan_candidate_library(
+    world: SequenceWorldSpec,
+    observed_sets: set[tuple[str, ...]],
+    tokens: Sequence[str],
+    generation_budget: int,
+    *,
+    generation_source: str,
+    widths: Sequence[int],
+) -> list[dict[str, Any]]:
+    scored_sets: list[tuple[float, tuple[str, ...]]] = []
+    for width in widths:
+        for combo in combinations(tokens, width):
+            edit_set = tuple(sorted(combo))
+            if edit_set in observed_sets or _has_conflicting_edits(edit_set):
+                continue
+            if len(edit_set) > world.max_edits:
+                continue
+            scored_sets.append((_physicochemical_edit_set_score(edit_set), edit_set))
+    ordered_sets = [
+        edit_set
+        for _score, edit_set in sorted(
+            scored_sets,
+            key=lambda item: (item[0], -len(item[1]), item[1]),
+            reverse=True,
+        )
+    ]
+    return _candidate_rows_from_ordered_sets(
+        world,
+        observed_sets,
+        ordered_sets,
+        generation_budget,
+        generation_source=generation_source,
+    )
+
+
+def _candidate_rows_from_ordered_sets(
+    world: SequenceWorldSpec,
+    observed_sets: set[tuple[str, ...]],
+    ordered_sets: Iterable[Sequence[str]],
+    generation_budget: int,
+    *,
+    generation_source: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for edit_tokens in ordered_sets:
+        edit_set = tuple(sorted(dict.fromkeys(str(token) for token in edit_tokens)))
+        if not edit_set or edit_set in seen or edit_set in observed_sets:
+            continue
+        if _has_conflicting_edits(edit_set) or len(edit_set) > world.max_edits:
+            continue
+        seen.add(edit_set)
+        candidates.append(_raw_candidate_from_edit_set(world, edit_set, generation_source))
+        if len(candidates) >= generation_budget:
+            break
+    return candidates
+
+
+def _dedupe_edit_sets(edit_sets: Iterable[Sequence[str]]) -> list[tuple[str, ...]]:
+    out: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    for edit_tokens in edit_sets:
+        edit_set = tuple(sorted(dict.fromkeys(str(token) for token in edit_tokens)))
+        if edit_set in seen:
+            continue
+        seen.add(edit_set)
+        out.append(edit_set)
+    return out
+
+
+def _score_physicochemical_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    mechanism: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        row = dict(candidate)
+        tokens = _edit_tokens(row)
+        score = _physicochemical_edit_set_score(tokens)
+        score += 0.20 * _to_float(row.get("predicted_pH_contrast"), 0.0)
+        score += 0.10 * _to_float(row.get("prior_utility"), 0.0)
+        if _to_bool(row.get("predicted_feasible")):
+            score += 0.12
+        else:
+            score -= 0.35
+        score -= 0.05 * max(_cost(row) - 1.0, 0.0)
+        row["score"] = _round_metric(score)
+        row["score_components"] = {
+            "physicochemical_score": _round_metric(score),
+            "protonatable_token_count": sum(_is_protonatable_token(token) for token in tokens),
+            "histidine_token_count": sum(_target_residue(token) == "H" for token in tokens),
+            "charge_balance": _round_metric(sum(_target_charge(token) for token in tokens)),
+            "charge_swap_pair": _has_charge_swap_pair(tokens),
+            "predicted_pH_contrast": _to_float(row.get("predicted_pH_contrast"), 0.0),
+            "predicted_feasible": 1.0 if _to_bool(row.get("predicted_feasible")) else 0.0,
+            "truth_blind_baseline": mechanism,
+            "oracle_truth_visible": False,
+        }
+        rows.append(row)
+    _assert_candidate_list_blind(rows)
+    return sorted(
+        rows,
+        key=lambda item: (_to_float(item.get("score"), 0.0), str(item["candidate_id"])),
+        reverse=True,
+    )
+
+
+def _physicochemical_edit_set_score(edit_tokens: Sequence[str]) -> float:
+    tokens = tuple(str(token) for token in edit_tokens)
+    if not tokens:
+        return 0.0
+    protonatable_count = sum(_is_protonatable_token(token) for token in tokens)
+    histidine_count = sum(_target_residue(token) == "H" for token in tokens)
+    charge_balance = abs(sum(_target_charge(token) for token in tokens))
+    value = 0.28 * protonatable_count + 0.18 * histidine_count
+    value += 0.22 if _has_charge_swap_pair(tokens) else 0.0
+    value += 0.10 * _complementarity_bonus(tokens)
+    value += sum(0.06 * max(_annotation_priority(token), 0.0) for token in tokens)
+    value -= 0.09 * charge_balance
+    value -= 0.16 * sum(token in _risky_edit_set() for token in tokens)
+    value -= 0.05 * max(len(tokens) - 2, 0)
+    return _round_metric(value)
+
+
+def _physicochemical_token_score(token: str) -> float:
+    residue = _target_residue(token)
+    value = 0.0
+    if residue == "H":
+        value += 1.0
+    elif residue in {"D", "E", "K", "R", "Q"}:
+        value += 0.70
+    elif residue in {"N", "S", "T", "Y"}:
+        value += 0.35
+    value += 0.25 * max(_annotation_priority(token), 0.0)
+    if token in _risky_edit_set():
+        value -= 1.0
+    return _round_metric(value)
+
+
+def _is_protonatable_token(token: str) -> bool:
+    return _target_residue(token) in PROTONATABLE_SCAN_RESIDUES
+
+
+def _target_charge(token: str) -> float:
+    return float(RESIDUE_CHARGE.get(_target_residue(token), 0.0))
+
+
+def _has_charge_swap_pair(edit_tokens: Sequence[str]) -> bool:
+    residues = {_target_residue(token) for token in edit_tokens}
+    return bool((residues & ACIDIC_RESIDUES) and (residues & BASIC_RESIDUES))
 
 
 def _fit_reference_state(
@@ -2159,6 +3258,25 @@ def _oracle_endpoints(
         if {"H13D", "L9R"}.issubset(set(edit_tokens)):
             endpoints["acidic_binding"] -= 0.05
             endpoints["specificity"] += 0.04
+    if world.world_id == "site_shift_generalization":
+        if "H30H" in set(edit_tokens):
+            endpoints["neutral_binding"] -= 0.08
+            endpoints["acidic_binding"] += 0.04
+        if {"H76H", "L4E"}.issubset(set(edit_tokens)):
+            endpoints["neutral_binding"] += 0.14
+            endpoints["acidic_binding"] -= 0.18
+            endpoints["expression"] += 0.03
+            endpoints["specificity"] += 0.03
+        if {"H77H", "H13D"}.issubset(set(edit_tokens)):
+            endpoints["neutral_binding"] += 0.10
+            endpoints["acidic_binding"] -= 0.13
+            endpoints["specificity"] += 0.04
+    if world.world_id == "anti_prior_negative_control":
+        for token in set(edit_tokens):
+            if token in FULL_LENGTH_HIGH_PRIOR_DISTRACTOR_TOKENS:
+                endpoints["neutral_binding"] -= 0.28
+                endpoints["acidic_binding"] += 0.24
+                endpoints["specificity"] -= 0.05
     return {key: _clip(value) for key, value in endpoints.items()}
 
 
@@ -2203,8 +3321,14 @@ def _design_context(
     seed: int,
     generation_budget: int,
     ablation: str,
+    *,
+    max_edits_per_candidate: int | None = None,
 ) -> dict[str, Any]:
-    cmdgd_config = _cmdgd_config_for_ablation(generation_budget, ablation)
+    cmdgd_config = _cmdgd_config_for_ablation(
+        generation_budget,
+        ablation,
+        max_edits_per_candidate=max_edits_per_candidate,
+    )
     return {
         "world_id": world.world_id,
         "description": world.description,
@@ -2231,6 +3355,8 @@ def _design_context(
 def _candidate_space_type(mechanism: str, ablation: str, generation_counted: bool) -> str:
     if ablation in CMDGD_BENCHMARK_BOUNDARY_ABLATIONS:
         return "fixed_pool_boundary"
+    if mechanism in PH_SWITCH_GRAPH_SAME_POOL_BASELINES:
+        return "generated_same_pool_baseline"
     if mechanism in FIXED_POOL_ONLY:
         return "fixed_pool"
     if mechanism in OBSERVED_REUSE_ONLY:
@@ -2240,10 +3366,17 @@ def _candidate_space_type(mechanism: str, ablation: str, generation_counted: boo
     return "not_generated"
 
 
-def _cmdgd_config_for_ablation(generation_budget: int, ablation: str) -> dict[str, Any]:
+def _cmdgd_config_for_ablation(
+    generation_budget: int,
+    ablation: str,
+    *,
+    max_edits_per_candidate: int | None = None,
+) -> dict[str, Any]:
     config: dict[str, Any] = {
         "max_generated_candidates": int(generation_budget),
-        "max_edits_per_candidate": 3,
+        "max_edits_per_candidate": int(max_edits_per_candidate)
+        if max_edits_per_candidate is not None
+        else 3,
     }
     config.update(CMDGD_COMPONENT_ABLATION_CONFIGS.get(str(ablation), {}))
     return config
@@ -2281,8 +3414,8 @@ def _visible_edit_specs(world: SequenceWorldSpec | None = None) -> tuple[EditSpe
 
 
 def _world_suite() -> tuple[SequenceWorldSpec, ...]:
-    base_heavy = "EVQLVESGGGLVQPGGSL"
-    base_light = "DIQMTQSPSSLSASVGDR"
+    base_heavy = FULL_LENGTH_1E62_HEAVY_SEQUENCE
+    base_light = FULL_LENGTH_1E62_LIGHT_SEQUENCE
     return (
         SequenceWorldSpec(
             world_id="ph_contrast",
@@ -2383,7 +3516,92 @@ def _world_suite() -> tuple[SequenceWorldSpec, ...]:
                 "L6N",
                 "L18K",
             ),
-            new_site_target_tokens=("H10Q",),
+            new_site_target_tokens=("H30H",),
+        ),
+        SequenceWorldSpec(
+            world_id="site_shift_generalization",
+            description=(
+                "The hidden optimum shifts to different heavy-chain counterfactual "
+                "positions, testing whether the generator learned a site-search "
+                "mechanism rather than a single high-prior CDR-like proposal."
+            ),
+            base_heavy_sequence=base_heavy,
+            base_light_sequence=base_light,
+            initial_edit_sets=(
+                (),
+                ("H4F",),
+                ("L4E",),
+                ("H13D",),
+                ("L9R",),
+                ("H7Y",),
+                ("L16P",),
+                ("H4F", "L4E"),
+            ),
+            forbidden_pairs=(("H8W", "L6N"), ("H8W", "H15K")),
+            risky_edits=("H8W", "L6N"),
+            expression_threshold=0.50,
+            specificity_threshold=0.50,
+            acidic_binding_max=0.61,
+            visible_edit_tokens=(
+                "H4F",
+                "H7Y",
+                "H13D",
+                "H15K",
+                "H8W",
+                "L4E",
+                "L9R",
+                "L13S",
+                "L16P",
+                "L6N",
+                "L18K",
+            ),
+            new_site_target_tokens=("H76H", "H77H"),
+        ),
+        SequenceWorldSpec(
+            world_id="anti_prior_negative_control",
+            description=(
+                "Negative-control anti-prior world: the highest-prior full-length "
+                "counterfactual sites are oracle distractors, and the hidden pH switch is a "
+                "non-Q counterfactual site outside the observed and visible vocabulary."
+            ),
+            base_heavy_sequence=base_heavy,
+            base_light_sequence=base_light,
+            initial_edit_sets=(
+                (),
+                ("H4F",),
+                ("L4E",),
+                ("H13D",),
+                ("L9R",),
+                ("H7Y",),
+                ("L16P",),
+                ("H4F", "L4E"),
+            ),
+            forbidden_pairs=(("H8W", "L6N"), ("H8W", "H15K")),
+            risky_edits=("H8W", "L6N"),
+            expression_threshold=0.50,
+            specificity_threshold=0.50,
+            acidic_binding_max=0.62,
+            visible_edit_tokens=(
+                "H4F",
+                "H7Y",
+                "H13D",
+                "H15K",
+                "H8W",
+                "L4E",
+                "L9R",
+                "L13S",
+                "L16P",
+                "L6N",
+                "L18K",
+            ),
+            new_site_target_tokens=("H73H", "L4E"),
+            control_type="negative_control",
+            stress_tags=(
+                "negative_control",
+                "anti_prior",
+                "blind_hidden_site",
+                "no_high_prior_site_reward",
+            ),
         ),
     )
 
@@ -2394,7 +3612,10 @@ def _edit_vocabulary() -> tuple[EditSpec, ...]:
         EditSpec("H7Y", "H", 7, "Y", "binder", 0.12, 0.02, 0.02, 0.00),
         EditSpec("H10Q", "H", 10, "Q", "contrast", 0.18, -0.15, 0.03, 0.02),
         EditSpec("H13D", "H", 13, "D", "contrast", 0.05, -0.11, -0.01, 0.04),
+        EditSpec("H14Q", "H", 14, "Q", "contrast", 0.15, -0.13, 0.03, 0.02),
         EditSpec("H15K", "H", 15, "K", "specificity", 0.02, -0.03, 0.01, 0.10),
+        EditSpec("H16H", "H", 16, "H", "contrast", 0.08, -0.07, 0.01, 0.02),
+        EditSpec("H18Q", "H", 18, "Q", "contrast", 0.14, -0.12, 0.02, 0.02),
         EditSpec("H8W", "H", 8, "W", "liability", 0.25, 0.21, -0.18, -0.22),
         EditSpec("L4E", "L", 4, "E", "contrast", 0.10, -0.08, 0.03, 0.02),
         EditSpec("L9R", "L", 9, "R", "contrast", 0.08, -0.04, 0.06, 0.02),
@@ -2466,15 +3687,64 @@ def _interaction_effects(world_id: str) -> dict[tuple[str, str] | tuple[str, str
             "acidic_binding": -0.01,
             "expression": 0.00,
         }
-        base[("H10Q", "L4E")] = {
+        base[("H30H", "L4E")] = {
             "neutral_binding": 0.13,
             "acidic_binding": -0.17,
             "expression": 0.03,
             "specificity": 0.03,
         }
-        base[("H10Q", "H13D")] = {
+        base[("H30H", "H13D")] = {
             "neutral_binding": 0.07,
             "acidic_binding": -0.10,
+            "specificity": 0.04,
+        }
+    if world_id == "site_shift_generalization":
+        base[("H30H", "L4E")] = {
+            "neutral_binding": -0.08,
+            "acidic_binding": 0.05,
+            "specificity": -0.02,
+        }
+        base[("H76H", "L4E")] = {
+            "neutral_binding": 0.15,
+            "acidic_binding": -0.18,
+            "expression": 0.04,
+            "specificity": 0.03,
+        }
+        base[("H77H", "H13D")] = {
+            "neutral_binding": 0.11,
+            "acidic_binding": -0.14,
+            "specificity": 0.05,
+        }
+    if world_id == "anti_prior_negative_control":
+        base[("H4F", "H13D", "L4E")] = {
+            "neutral_binding": 0.00,
+            "acidic_binding": -0.01,
+            "expression": 0.00,
+        }
+        base[("H30H", "L4E")] = {
+            "neutral_binding": -0.10,
+            "acidic_binding": 0.10,
+            "specificity": -0.04,
+        }
+        base[("H76H", "L4E")] = {
+            "neutral_binding": -0.10,
+            "acidic_binding": 0.10,
+            "specificity": -0.04,
+        }
+        base[("H77H", "H13D")] = {
+            "neutral_binding": -0.08,
+            "acidic_binding": 0.09,
+            "specificity": -0.03,
+        }
+        base[("H73H", "L4E")] = {
+            "neutral_binding": 0.18,
+            "acidic_binding": -0.19,
+            "expression": 0.04,
+            "specificity": 0.04,
+        }
+        base[("H73H", "H13D")] = {
+            "neutral_binding": 0.10,
+            "acidic_binding": -0.12,
             "specificity": 0.04,
         }
     return base
@@ -2697,17 +3967,43 @@ def _sequence_mutation_sites(
 
 
 def _mutation_site_from_token(token: str) -> tuple[str, int] | None:
-    edit = _edit_by_token().get(str(token))
-    if edit is not None:
-        return edit.chain, int(edit.position)
-    match = re.fullmatch(r"([HL])(\d+)[A-Za-z*]+", str(token).strip())
-    if not match:
+    fields = _edit_fields_from_token(str(token))
+    if fields is None:
         return None
-    chain, position = match.groups()
+    chain, position, _residue = fields
     return chain, int(position)
 
 
+def _edit_fields_from_token(token: str) -> tuple[str, int, str] | None:
+    edit = _edit_by_token().get(str(token))
+    if edit is not None:
+        return edit.chain, int(edit.position), edit.residue
+    match = re.fullmatch(r"([HL])(\d+)([A-Za-z*]+)", str(token).strip())
+    if not match:
+        return None
+    chain, position, residue = match.groups()
+    residue = residue.upper()
+    if not residue or residue == "*":
+        return None
+    return chain.upper(), int(position), residue
+
+
+def _target_residue(token: str) -> str:
+    fields = _edit_fields_from_token(str(token))
+    return fields[2] if fields is not None else ""
+
+
 def _new_site_generation_capable(mechanism: str, ablation: str) -> bool:
+    if mechanism == "ph_switch_graph" or mechanism in PH_SWITCH_GRAPH_SAME_POOL_BASELINES:
+        return ablation != "no_counterfactual_site_map"
+    if mechanism in {
+        "histidine_scan_baseline",
+        "protonatable_scan_baseline",
+        "charge_swap_scan_baseline",
+        "random_new_site_scan",
+        "combinatorial_library_baseline",
+    }:
+        return True
     return (
         mechanism == "cmdgd"
         and ablation not in CMDGD_BENCHMARK_BOUNDARY_ABLATIONS
@@ -2784,6 +4080,23 @@ def _candidate_leakage_paths(value: Any, path: str = "") -> set[str]:
     return set()
 
 
+def _load_pcig_module() -> Any | None:
+    try:
+        return importlib.import_module("design_scientist.algorithms.pcig")
+    except ImportError:
+        return None
+
+
+def _pcig_lifecycle(module: Any) -> Any | None:
+    factory = getattr(module, "mechanism_lifecycle", None)
+    if callable(factory):
+        return factory()
+    lifecycle_type = getattr(module, "PCIGLifecycle", None)
+    if callable(lifecycle_type):
+        return lifecycle_type()
+    return None
+
+
 def _load_cmdgd_module() -> Any | None:
     try:
         return importlib.import_module("design_scientist.algorithms.cmdgd")
@@ -2829,6 +4142,13 @@ def _normalize_mechanisms(mechanisms: Iterable[str] | str | None) -> list[str]:
     if unknown:
         raise ValueError(f"Unknown generative benchmark mechanisms: {', '.join(unknown)}")
     return _dedupe(names)
+
+
+def _default_pairwise_mechanism(mechanism_names: Sequence[str]) -> str:
+    for name in mechanism_names:
+        if name not in BASELINE_MECHANISMS and name not in LEGACY_NONSELECTABLE_MECHANISMS:
+            return name
+    return mechanism_names[0] if mechanism_names else ""
 
 
 def _select_worlds(worlds: Iterable[str] | str | None) -> list[SequenceWorldSpec]:
@@ -2886,10 +4206,11 @@ def _mechanism_tags(edit_tokens: Sequence[str]) -> list[str]:
 def _has_conflicting_edits(edit_tokens: Sequence[str]) -> bool:
     positions: set[tuple[str, int]] = set()
     for token in edit_tokens:
-        edit = _edit_by_token().get(token)
-        if edit is None:
+        fields = _edit_fields_from_token(str(token))
+        if fields is None:
             continue
-        key = (edit.chain, edit.position)
+        chain, position, _residue = fields
+        key = (chain, position)
         if key in positions:
             return True
         positions.add(key)

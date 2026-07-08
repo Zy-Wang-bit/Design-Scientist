@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from design_scientist.onee62_startup import (
     run_1e62_literature_stage,
     start_1e62_project,
 )
+from design_scientist.startup_standardization import standardize_startup_data
 from design_scientist.validators import validate_project
 
 
@@ -35,6 +37,17 @@ def test_start_1e62_project_creates_standardized_state_without_panel(tmp_path: P
     assert _csv_row_count(project / "standardized" / "ae_kd_ratio.csv") == 52
     assert _csv_row_count(project / "standardized" / "expression_qc.csv") == 20
     assert _csv_row_count(project / "standardized" / "variant_sequence_provenance.csv") == 20
+    binding_primary = _read_csv(project / "standardized" / "binding_primary.csv")
+    sentinel_rows = [
+        row
+        for row in binding_primary
+        if row["summary_ratio_raw"] == "-1.0"
+    ]
+    assert sentinel_rows
+    assert all(row["pH_sensitive_ratio"] == "" for row in sentinel_rows)
+    assert all(row["endpoint_semantics_status"] == "missing_ratio_sentinel" for row in sentinel_rows)
+    validation_summary = read_json(project / "standardized" / "validation_summary.json")
+    assert validation_summary["missing_ratio_sentinel_count"] == len(sentinel_rows)
 
     state = read_json(project / "state" / "design_state.json")
     assert state["project_family"] == "1e62_startup"
@@ -46,6 +59,21 @@ def test_start_1e62_project_creates_standardized_state_without_panel(tmp_path: P
 
     evidence = read_json(project / "state" / "evidence_cards.json")
     assert any(card["evidence_id"] == "onee62_ae_kd_ratio_single_point_evidence" for card in evidence)
+
+
+def test_start_1e62_project_can_emit_generic_v3_project_context(tmp_path: Path) -> None:
+    startup = _write_startup_fixture(tmp_path / "startup")
+    project = tmp_path / "projects" / "1e62_ph_design"
+    start_1e62_project(startup, project)
+
+    result = standardize_startup_data(project)
+
+    assert result["status"] == "ok"
+    assert _csv_row_count(project / "standardized" / "observations_long.csv") > 0
+    assert _csv_row_count(project / "standardized" / "variant_sequences.csv") == 20
+    context = read_json(project / "standardized" / "project_context.json")
+    assert context["project_id"] == "1E62_pH_sensitive_design"
+    assert "wet_lab_binding" in context["allowed_sources"]
 
 
 def test_1e62_startup_audit_rejects_empty_headers(tmp_path: Path) -> None:
@@ -212,6 +240,55 @@ def test_literature_1e62_stage_writes_v3_artifacts_before_panel(tmp_path: Path) 
     assert not list((project / "runs").glob("*/panel_recommendation.csv"))
 
 
+def test_literature_1e62_strict_mode_rejects_degraded_source_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    startup = _write_startup_fixture(tmp_path / "startup")
+    project = tmp_path / "projects" / "1e62_ph_design"
+    start_1e62_project(startup, project)
+
+    def degraded_literature_search(root: str | Path, *, max_papers: int, offline_fixtures: bool):
+        framework = Path(root) / "framework"
+        framework.mkdir(parents=True, exist_ok=True)
+        (framework / "paper_cards.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "paper_id": "arxiv:test",
+                        "source": "arxiv",
+                        "title": "Test",
+                        "abstract_or_summary": "Test",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (framework / "literature_search_trace.json").write_text(
+            json.dumps(
+                {
+                    "events": [
+                        {
+                            "event": "source_skip",
+                            "status": "degraded",
+                            "source": "arxiv",
+                            "reason": "timeout",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return framework / "paper_cards.json"
+
+    monkeypatch.setattr(
+        "design_scientist.literature_pipeline.run_literature_search",
+        degraded_literature_search,
+    )
+
+    with pytest.raises(RuntimeError, match="degraded literature source"):
+        run_1e62_literature_stage(project, max_papers=5, allow_degraded=False)
+
+
 def test_literature_1e62_cli_runs_stage(tmp_path: Path) -> None:
     startup = _write_startup_fixture(tmp_path / "startup")
     project = tmp_path / "projects" / "1e62_ph_design"
@@ -348,7 +425,7 @@ def _write_startup_fixture(root: Path) -> Path:
                 "B_pH7.4": "0.02",
                 "D1_pH6.0": "0.01",
                 "D1_pH7.4": "0.02",
-                "Ae_ratio": "0.5",
+                "Ae_ratio": "-1.0" if variant == "com1" else "0.5",
                 "B_ratio": "0.5",
                 "D1_ratio": "0.5",
                 "H_chain": "AAAA",
@@ -438,3 +515,8 @@ def _rewrite_first_header(path: Path, value: str) -> None:
 def _csv_row_count(path: Path) -> int:
     with path.open("r", encoding="utf-8", newline="") as handle:
         return max(sum(1 for _ in handle) - 1, 0)
+
+
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))

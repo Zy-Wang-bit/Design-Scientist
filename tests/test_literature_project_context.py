@@ -249,7 +249,19 @@ def test_cli_run_scientist_sources_are_scoped_for_v3_literature_chain(
         lambda root, run_id: Path(root) / "runs" / run_id / "method_report.md",
     )
 
-    assert main(["run-scientist", str(project), "--sources", "pubmed", "arxiv"]) == 0
+    assert (
+        main(
+            [
+                "run-scientist",
+                str(project),
+                "--sources",
+                "pubmed",
+                "arxiv",
+                "--skip-paper",
+            ]
+        )
+        == 0
+    )
 
     assert seen_sources == ["pubmed,arxiv"]
     assert os.getenv("DESIGN_SCIENTIST_LITERATURE_SOURCES") is None
