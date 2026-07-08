@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 from design_scientist.cli import main
@@ -29,8 +30,10 @@ from design_scientist.manuscript import (
     _render_submission_readiness_checklist,
     _ph_switch_graph_world_block_rows,
     _ph_switch_graph_world_block_sentence,
+    _render_references_bib,
     _validate_bioinformatics_render_artifacts,
     _validate_ph_switch_graph_submission_metadata,
+    _write_ph_switch_graph_supplementary_package,
     _load_cmdgd_literature_artifacts,
     _load_external_antibody_benchmark_artifacts,
     generate_algorithm_manuscript,
@@ -94,6 +97,52 @@ def test_cmdgd_literature_artifacts_fall_back_to_v3_paper_cards(tmp_path: Path) 
         "pubmed_20953198",
         "arxiv_2412_07763v1",
     }
+
+
+def test_references_bib_corrects_known_doi_venue_metadata() -> None:
+    references = _render_references_bib(
+        {
+            "paper_cards": [
+                {
+                    "paper_id": "semantic_scholar:43fc5d1174560e905e17caa27fb5ab0451666003",
+                    "title": "ALLM-Ab: Active Learning-Driven Antibody Optimization Using Fine-Tuned Protein Language Models",
+                    "authors": ["Kairi Furui", "Masahito Ohue"],
+                    "year": 2025,
+                    "venue": "bioRxiv",
+                    "doi": "10.1021/acs.jcim.5c01577",
+                }
+            ]
+        }
+    )
+
+    assert "journal = {Journal of Chemical Information and Modeling}" in references
+    assert "journal = {bioRxiv}" not in references
+
+
+def test_ph_switch_graph_supplementary_package_includes_declared_tables(tmp_path: Path) -> None:
+    paper_dir = tmp_path / "paper"
+    table_dir = paper_dir / "tables"
+    table_dir.mkdir(parents=True)
+    for relative in (
+        "supplementary_data.md",
+        "supplement_manifest.md",
+        "algorithm_formal_definition.md",
+        "data_dictionary.json",
+        "tables/external_ph_switch_variant_replay.csv",
+        "tables/world_block_comparison.csv",
+    ):
+        path = paper_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("placeholder\n", encoding="utf-8")
+
+    package = _write_ph_switch_graph_supplementary_package(paper_dir)
+
+    assert package.exists()
+    with zipfile.ZipFile(package) as archive:
+        names = set(archive.namelist())
+    assert "supplementary_data.md" in names
+    assert "tables/external_ph_switch_variant_replay.csv" in names
+    assert "tables/world_block_comparison.csv" in names
 
 
 def test_generate_short_paper_writes_readiness_checked_bundle(tmp_path: Path) -> None:
@@ -1330,6 +1379,14 @@ def test_ph_switch_graph_external_ph_clause_reports_limited_public_table_anchor(
                     "mean_best_selected_ph_ratio": 1822.8,
                 },
             ],
+            "variant_replay_summary": {
+                "method": "leave_one_variant_transition_calibration",
+                "variant_count": 35,
+                "predicted_vs_observed_normalized_log_ratio_pearson": 0.42,
+                "predicted_vs_observed_normalized_log_ratio_spearman": 0.39,
+                "top_tertile_hit_rate_at_top_third_by_score": 0.58,
+                "top_tertile_base_rate": 0.34,
+            },
         }
     }
 
@@ -1338,7 +1395,11 @@ def test_ph_switch_graph_external_ph_clause_reports_limited_public_table_anchor(
 
     assert "5 antibody study tables" in abstract_clause
     assert "0.846 versus 0.709" in abstract_clause
-    assert "limited external sanity check" in abstract_clause
+    assert "leave-one-variant replay over 35 public variants" in abstract_clause
+    assert "limited external sanity check rather than independent validation" in abstract_clause
+    assert "Pearson correlation 0.42" in sentence
+    assert "top-tertile hit rate 0.58 versus base rate 0.34" in sentence
+    assert "raw mean ratio falls below the histidine-count baseline" in sentence
     assert "not validation of the full 1E62 generator" in sentence
 
 

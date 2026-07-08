@@ -577,6 +577,24 @@ PH_SWITCH_SUMMARY_COLUMNS = (
     "interpretation",
 )
 
+PH_SWITCH_VARIANT_REPLAY_COLUMNS = (
+    "dataset_id",
+    "source",
+    "variant_id",
+    "mutation_signature",
+    "histidine_count",
+    "acidic_count",
+    "mutation_count",
+    "observed_ph_ratio",
+    "observed_log_ratio",
+    "observed_normalized_log_ratio",
+    "predicted_score",
+    "transition_context_score",
+    "histidine_count_score",
+    "actual_top_tertile",
+    "model_training_row_count",
+)
+
 
 @dataclass(frozen=True)
 class ExternalRecord:
@@ -626,10 +644,13 @@ def run_external_ph_switch_benchmark(
         budget=budget,
     )
     result_rows.extend(transfer_rows)
+    variant_replay_rows, variant_replay_summary = _evaluate_ph_switch_variant_replay(records)
 
     summary_rows = _summary_ph_switch_rows(result_rows)
     benchmark_path = run_dir / "external_ph_switch_benchmark_results.csv"
     summary_path = run_dir / "external_ph_switch_benchmark_summary.csv"
+    variant_replay_path = run_dir / "external_ph_switch_variant_replay_results.csv"
+    variant_replay_summary_path = run_dir / "external_ph_switch_variant_replay_summary.json"
     config_path = run_dir / "external_ph_switch_benchmark_config.json"
     trace_path = run_dir / "external_ph_switch_source_trace.json"
     claims_path = run_dir / "external_ph_switch_claims.json"
@@ -637,6 +658,8 @@ def run_external_ph_switch_benchmark(
     raw_path = run_dir / "external_ph_switch_curated_records.csv"
     _write_csv(benchmark_path, result_rows, PH_SWITCH_RESULT_COLUMNS)
     _write_csv(summary_path, summary_rows, PH_SWITCH_SUMMARY_COLUMNS)
+    _write_csv(variant_replay_path, variant_replay_rows, PH_SWITCH_VARIANT_REPLAY_COLUMNS)
+    _write_json(variant_replay_summary_path, variant_replay_summary)
     _write_csv(
         raw_path,
         records,
@@ -675,6 +698,7 @@ def run_external_ph_switch_benchmark(
             ),
             "leakage_controls": {
                 "selector_inputs_exclude_reported_pH_ratio": True,
+                "variant_replay_excludes_heldout_reported_pH_ratio": True,
                 "oracle_top_measured_marked_as_upper_bound": True,
                 "benchmark_tests_residue_prior_not_full_1E62_algorithm": True,
             },
@@ -725,6 +749,8 @@ def run_external_ph_switch_benchmark(
         "claims_path": str(claims_path),
         "literature_transfer_model_path": str(transfer_model_path),
         "curated_records_path": str(raw_path),
+        "variant_replay_results_path": str(variant_replay_path),
+        "variant_replay_summary_path": str(variant_replay_summary_path),
     }
 
 
@@ -1426,6 +1452,113 @@ def _evaluate_ph_switch_literature_transfer(
     return result_rows, trace_rows, model_snapshots
 
 
+def _evaluate_ph_switch_variant_replay(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Leave one measured public pH-switch variant out and predict its rank.
+
+    The learned score uses all other public rows and the held-out variant's
+    mutation description. The held-out pH ratio is added only after scoring for
+    correlation and top-tertile evaluation.
+    """
+
+    by_dataset: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        item = dict(record)
+        item["observed_log_ratio"] = float(record["normalized_log_ratio"])
+        by_dataset[str(record["dataset_id"])].append(item)
+    normalized_records: list[dict[str, Any]] = []
+    thresholds: dict[str, float] = {}
+    for dataset_id, dataset_rows in sorted(by_dataset.items()):
+        normalized_rows = _normalize_ph_switch_dataset_records(dataset_rows)
+        thresholds[dataset_id] = _top_tertile_ph_ratio_threshold(normalized_rows)
+        normalized_records.extend(normalized_rows)
+    rows: list[dict[str, Any]] = []
+    for index, heldout in enumerate(normalized_records):
+        train_rows = [
+            row
+            for train_index, row in enumerate(normalized_records)
+            if train_index != index
+        ]
+        model = _learn_literature_transition_model(train_rows)
+        predicted_score = _literature_transition_model_score(heldout, model)
+        dataset_id = str(heldout["dataset_id"])
+        rows.append(
+            {
+                "dataset_id": dataset_id,
+                "source": str(heldout.get("source") or ""),
+                "variant_id": str(heldout["variant_id"]),
+                "mutation_signature": str(heldout.get("mutation_signature") or ""),
+                "histidine_count": int(heldout.get("histidine_count") or 0),
+                "acidic_count": int(heldout.get("acidic_count") or 0),
+                "mutation_count": int(heldout.get("mutation_count") or 0),
+                "observed_ph_ratio": _round(heldout.get("ph74_over_ph60_kd_ratio")),
+                "observed_log_ratio": _round(heldout.get("observed_log_ratio")),
+                "observed_normalized_log_ratio": _round(heldout.get("normalized_log_ratio")),
+                "predicted_score": _round(predicted_score),
+                "transition_context_score": _round(_transition_context_prior_score(heldout)),
+                "histidine_count_score": _round(heldout.get("histidine_count")),
+                "actual_top_tertile": (
+                    float(heldout["ph74_over_ph60_kd_ratio"]) >= thresholds[dataset_id]
+                ),
+                "model_training_row_count": len(train_rows),
+            }
+        )
+    summary = _ph_switch_variant_replay_summary(rows)
+    return rows, summary
+
+
+def _ph_switch_variant_replay_summary(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    scores = [_float(row.get("predicted_score")) for row in rows]
+    observed = [_float(row.get("observed_normalized_log_ratio")) for row in rows]
+    paired = [
+        (float(score), float(value))
+        for score, value in zip(scores, observed, strict=False)
+        if score is not None and value is not None
+    ]
+    ranked_rows = sorted(
+        rows,
+        key=lambda row: (
+            _float(row.get("predicted_score")) if _float(row.get("predicted_score")) is not None else -math.inf,
+            str(row.get("dataset_id") or ""),
+            str(row.get("variant_id") or ""),
+        ),
+        reverse=True,
+    )
+    top_k = max(1, math.ceil(len(ranked_rows) / 3))
+    top_rows = ranked_rows[:top_k]
+    base_rate = mean([1.0 if row.get("actual_top_tertile") else 0.0 for row in rows]) if rows else 0.0
+    top_rate = mean([1.0 if row.get("actual_top_tertile") else 0.0 for row in top_rows]) if top_rows else 0.0
+    dataset_ids = sorted({str(row.get("dataset_id") or "") for row in rows if row.get("dataset_id")})
+    return {
+        "schema_version": 1,
+        "method": "leave_one_variant_transition_calibration",
+        "variant_count": len(rows),
+        "dataset_count": len(dataset_ids),
+        "selector_inputs_exclude_heldout_reported_pH_ratio": True,
+        "predicted_vs_observed_normalized_log_ratio_pearson": _round_number(
+            _pearson_correlation([item[0] for item in paired], [item[1] for item in paired])
+        ),
+        "predicted_vs_observed_normalized_log_ratio_spearman": _round_number(
+            _pearson_correlation(
+                _rank_values([item[0] for item in paired]),
+                _rank_values([item[1] for item in paired]),
+            )
+        ),
+        "top_tertile_base_rate": _round_number(base_rate),
+        "top_tertile_hit_rate_at_top_third_by_score": _round_number(top_rate),
+        "top_tertile_enrichment_at_top_third_by_score": _round_number(
+            top_rate / base_rate if base_rate > 0 else float("nan")
+        ),
+        "interpretation": (
+            "Leave-one-variant public pH-switch replay; the held-out pH ratio is hidden during scoring. "
+            "This is a literature-table sanity check, not 1E62 wet-lab validation."
+        ),
+    }
+
+
 def _learn_literature_transition_model(
     records: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -1735,6 +1868,42 @@ def _round(value: Any) -> str:
     if number is None:
         return ""
     return f"{number:.6f}"
+
+
+def _round_number(value: Any) -> float | None:
+    number = _float(value)
+    if number is None or not math.isfinite(number):
+        return None
+    return float(f"{number:.6f}")
+
+
+def _pearson_correlation(xs: Sequence[float], ys: Sequence[float]) -> float:
+    if len(xs) != len(ys) or len(xs) < 2:
+        return float("nan")
+    x_mean = mean(xs)
+    y_mean = mean(ys)
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys, strict=False))
+    x_var = sum((x - x_mean) ** 2 for x in xs)
+    y_var = sum((y - y_mean) ** 2 for y in ys)
+    denom = math.sqrt(x_var * y_var)
+    if denom == 0:
+        return float("nan")
+    return numerator / denom
+
+
+def _rank_values(values: Sequence[float]) -> list[float]:
+    sorted_values = sorted((value, index) for index, value in enumerate(values))
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(sorted_values):
+        end = start + 1
+        while end < len(sorted_values) and sorted_values[end][0] == sorted_values[start][0]:
+            end += 1
+        average_rank = (start + end - 1) / 2.0 + 1.0
+        for _value, index in sorted_values[start:end]:
+            ranks[index] = average_rank
+        start = end
+    return ranks
 
 
 def _safe_run_id(value: str) -> str:

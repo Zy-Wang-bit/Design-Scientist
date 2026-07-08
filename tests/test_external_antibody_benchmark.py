@@ -162,6 +162,8 @@ def test_external_ph_switch_benchmark_writes_public_literature_table_replay(
     assert Path(result["summary_results_path"]).exists()
     assert Path(result["literature_transfer_model_path"]).exists()
     assert Path(result["curated_records_path"]).exists()
+    assert Path(result["variant_replay_results_path"]).exists()
+    assert Path(result["variant_replay_summary_path"]).exists()
 
     rows = _csv_rows(result["benchmark_results_path"])
     assert {
@@ -229,3 +231,20 @@ def test_external_ph_switch_benchmark_writes_public_literature_table_replay(
     assert model["method"] == "leave_one_study_transition_calibration"
     assert model["selector_inputs_exclude_heldout_reported_pH_ratio"] is True
     assert model["heldout_models"]
+
+    variant_rows = _csv_rows(result["variant_replay_results_path"])
+    assert len(variant_rows) == len(curated)
+    assert {
+        "predicted_score",
+        "observed_normalized_log_ratio",
+        "actual_top_tertile",
+        "model_training_row_count",
+    } <= set(variant_rows[0])
+    assert {row["actual_top_tertile"] for row in variant_rows} <= {"True", "False"}
+    assert all(int(row["model_training_row_count"]) == len(curated) - 1 for row in variant_rows)
+    variant_summary = json.loads(Path(result["variant_replay_summary_path"]).read_text(encoding="utf-8"))
+    assert variant_summary["method"] == "leave_one_variant_transition_calibration"
+    assert variant_summary["selector_inputs_exclude_heldout_reported_pH_ratio"] is True
+    assert variant_summary["variant_count"] == len(curated)
+    assert variant_summary["dataset_count"] >= 5
+    assert "predicted_vs_observed_normalized_log_ratio_pearson" in variant_summary
