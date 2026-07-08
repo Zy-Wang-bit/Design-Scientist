@@ -2405,6 +2405,20 @@ def _algorithm_claim_evidence_map(context: dict[str, Any]) -> dict[str, Any]:
                         "It does not replace prospective wet-lab validation.",
                     ],
                 },
+                {
+                    "claim": (
+                        "Curated public pH-switch table replays test whether truth-blind residue-transition "
+                        "scores recover published pH-selective antibody variants."
+                    ),
+                    "evidence_type": "external_public_ph_switch_table_replay",
+                    "evidence_scope": "external_pH_switch_prior_sanity_check_not_1E62_validation",
+                    "evidence_artifacts": list(EXTERNAL_PH_SWITCH_BENCHMARK_ARTIFACT_FILENAMES),
+                    "limitations": [
+                        "The pH-switch replay uses curated public summary tables, not prospective 1E62 measurements.",
+                        "The learned transition score shows bounded correlation but not top-tertile enrichment over the public-table base rate.",
+                        "The fixed transition-context prior shows modest top-tertile enrichment but does not validate generated 1E62 mutation sites.",
+                    ],
+                },
             ],
         }
     if context.get("algorithm") == "cmdgd":

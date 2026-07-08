@@ -12,6 +12,7 @@ from design_scientist.cli import main
 from design_scientist.algorithm_benchmark import run_mccbd_benchmark
 from design_scientist.manuscript import (
     PH_SWITCH_GRAPH_RELEASE_SOURCE_FILES,
+    _algorithm_claim_evidence_map,
     _bar_svg,
     _ph_switch_graph_ablation_summary_sentence,
     _ph_switch_graph_algorithm_formal_definition,
@@ -1294,6 +1295,21 @@ def test_external_antibody_benchmark_artifacts_feed_ph_switch_manuscript(
     assert "External antibody replay adds an independent held-out affinity-ranking check" in sentence
     assert "0.937" in sentence
     assert "does not validate 1E62 pH 6.0 dissociation" in sentence
+
+
+def test_ph_switch_graph_claim_map_includes_public_ph_switch_replay() -> None:
+    claim_map = _algorithm_claim_evidence_map(
+        {"algorithm": "ph_switch_graph", "run_id": "ph_switch_graph_unit"}
+    )
+
+    public_ph_claim = next(
+        claim
+        for claim in claim_map["claims"]
+        if claim["evidence_type"] == "external_public_ph_switch_table_replay"
+    )
+    assert public_ph_claim["evidence_scope"] == "external_pH_switch_prior_sanity_check_not_1E62_validation"
+    assert "external_ph_switch_variant_method_summary" in public_ph_claim["evidence_artifacts"]
+    assert any("not prospective 1E62 measurements" in limitation for limitation in public_ph_claim["limitations"])
 
 
 def test_ph_switch_graph_submission_metadata_rejects_journal_placeholders(
